@@ -78,13 +78,13 @@ std::thread::scope(|s| {
             let mut parser = tree_sitter::Parser::new();
             // Each thread gets its own parser instance
             for (file_id, path) in chunk {
-                let defs = parse_csharp_definitions(&mut parser, &content, file_id);
-                chunk_defs.push((file_id, defs));
+                let (defs, calls) = parse_csharp_definitions(&mut parser, &content, file_id);
+                    chunk_defs.push((file_id, defs, calls));
             }
         });
     }
 });
-// Merge: sequential, ~50ms for 846K definitions
+// Merge: sequential, ~50ms for ~851K definitions + call sites
 ```
 
 **Key detail:** tree-sitter `Parser` is `!Send` (contains internal mutable state). Each thread creates its own parser instance. This is intentional — tree-sitter parsers reuse internal memory allocations across parse calls, making per-thread parsers more efficient than a shared pool.
