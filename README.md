@@ -512,6 +512,7 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 | Parameter              | Description                                                    |
 | ---------------------- | -------------------------------------------------------------- |
 | `method` (required)    | Method name to trace                                           |
+| `class`                | Scope to a specific class. Without it, results may mix methods from different classes with the same name. DI-aware: `class: "UserService"` also finds callers using `IUserService`. Works for both `"up"` and `"down"` directions. |
 | `direction`            | `"up"` = find callers (default), `"down"` = find callees      |
 | `depth`                | Max recursion depth (default: 3, max: 10)                      |
 | `maxCallersPerLevel`   | Max callers per node (default: 10). Prevents explosion.        |
@@ -637,7 +638,7 @@ This means:
 ## Testing
 
 ```bash
-# Run all tests (114 tests: 92 unit + 21 property + 1 doctest)
+# Run all tests (136 tests: 93 unit + 21 lib + 21 property + 1 doctest)
 cargo test
 
 # Run property-based tests only
