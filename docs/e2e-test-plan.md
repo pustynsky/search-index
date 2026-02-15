@@ -506,8 +506,9 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 - stdout: JSON-RPC response with 7 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_definitions`, `search_callers`
 - Each tool has `name`, `description`, `inputSchema`
+- `search_definitions` inputSchema includes `includeBody` (boolean), `maxBodyLines` (integer), and `maxTotalBodyLines` (integer) parameters
 
-**Validates:** Tool discovery, tool schema generation.
+**Validates:** Tool discovery, tool schema generation, `search_definitions` schema includes body-related parameters.
 
 ---
 
@@ -556,6 +557,129 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 **Validates:** search_definitions handler, definition index loading, AST-based search.
 
 **Note:** Requires `--definitions` flag. For `.rs` files, 0 results is expected.
+
+---
+
+### T28a: `serve` — search_definitions with `includeBody: true`
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"<some_known_def>","includeBody":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definition results
+- Each definition object contains a `"body"` array field with `{line, text}` objects
+- `summary` object includes `"totalBodyLinesReturned"` field
+
+**Validates:** `includeBody` flag causes body content to be returned alongside definitions.
+
+**Note:** Replace `<some_known_def>` with a definition name that exists in the indexed codebase.
+
+---
+
+### T28b: `serve` — search_definitions with `includeBody: true, maxBodyLines: 5`
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"<some_known_long_def>","includeBody":true,"maxBodyLines":5}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definition results
+- Each definition's `"body"` array has at most 5 entries
+- If a definition is longer than 5 lines: `"bodyTruncated": true` and `"totalBodyLines"` present in the definition object
+
+**Validates:** `maxBodyLines` caps per-definition body output, truncation metadata is accurate.
+
+**Note:** Replace `<some_known_long_def>` with a definition that has more than 5 lines of body.
+
+---
+
+### T28c: `serve` — search_definitions backward compatibility (default `includeBody: false`)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"<some_known_def>"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definition results
+- Definition objects do NOT contain a `"body"` field — same output as before the feature was added
+
+**Validates:** Backward compatibility — omitting `includeBody` (or defaulting to `false`) produces the original response format.
+
+---
+
+### T28d: `serve` — search_definitions with `containsLine` + `includeBody: true`
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"file":"<known_file>","containsLine":<known_line>,"includeBody":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definition results
+- Result includes `"containingDefinitions"` array
+- Each containing definition has a `"body"` array with `{line, text}` objects
+
+**Validates:** `includeBody` works together with `containsLine` mode, body is attached to containing definitions.
+
+**Note:** Replace `<known_file>` and `<known_line>` with a file path and line number known to be inside a definition.
+
+---
+
+### T28e: `serve` — search_definitions with `maxTotalBodyLines` budget exhaustion
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"parent":"<class_with_many_methods>","includeBody":true,"maxTotalBodyLines":20}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definition results
+- First few definitions have `"body"` arrays with content
+- Later definitions have `"bodyOmitted"` marker (body budget exhausted)
+- Total body lines across all definitions ≤ 20
+
+**Validates:** `maxTotalBodyLines` global budget is enforced, definitions beyond the budget get `bodyOmitted`, budget is reported accurately.
+
+**Note:** Replace `<class_with_many_methods>` with a class/parent that has many method definitions in the indexed codebase.
 
 ---
 
@@ -693,10 +817,10 @@ Run-Test "T20 def-index"           "$Binary def-index -d $TestDir -e $TestExt"
 Run-Test "T21 invalid-regex"       "$Binary grep `"[invalid`" -d $TestDir -e $TestExt --regex" -ExpectedExit 1
 Run-Test "T22 nonexistent-dir"     "$Binary find test -d /nonexistent/path/xyz" -ExpectedExit 1
 
-# T25-T30: serve (MCP)
+# T25-T30, T28a-T28e: serve (MCP)
 # Note: MCP tests require piping JSON-RPC to stdin, which is hard to automate in simple PowerShell.
 # These are manual verification tests — run them individually per the test plan.
-Write-Host "  T25-T30: MCP serve tests — run manually (see e2e-test-plan.md)"
+Write-Host "  T25-T30, T28a-T28e: MCP serve tests — run manually (see e2e-test-plan.md)"
 
 Write-Host "`n=== Results: $passed passed, $failed failed, $total total ===`n"
 if ($failed -gt 0) { exit 1 }

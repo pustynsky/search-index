@@ -163,7 +163,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_definitions".to_string(),
-            description: "Search C# and SQL code definitions — classes, interfaces, methods, properties, enums, stored procedures, tables. Uses pre-built tree-sitter AST index for instant results (~0.001s). Requires server started with --definitions flag. Supports 'containsLine' to find which method/class contains a given line number (no more manual read_file!).".to_string(),
+            description: "Search C# and SQL code definitions — classes, interfaces, methods, properties, enums, stored procedures, tables. Uses pre-built tree-sitter AST index for instant results (~0.001s). Requires server started with --definitions flag. Supports 'containsLine' to find which method/class contains a given line number (no more manual read_file!). Supports 'includeBody' to return actual source code inline, eliminating read_file calls.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -208,6 +208,18 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "Directory names to exclude from results"
+                    },
+                    "includeBody": {
+                        "type": "boolean",
+                        "description": "Include source code body of each definition in the results. Reads the actual file and returns lines from line_start to line_end for each definition. Combine with maxBodyLines to control output size. (default: false)"
+                    },
+                    "maxBodyLines": {
+                        "type": "integer",
+                        "description": "Maximum number of source code lines to include per definition when includeBody=true. If a definition has more lines than this limit, only the first maxBodyLines lines are returned, with a 'truncated' flag. (default: 100, 0 = unlimited)"
+                    },
+                    "maxTotalBodyLines": {
+                        "type": "integer",
+                        "description": "Maximum total lines of body content across ALL returned definitions. When budget is exhausted, remaining definitions are returned without body (with 'bodyOmitted' marker). Prevents output explosion when many definitions match. (default: 500, 0 = unlimited)"
                     }
                 },
                 "required": []
@@ -1122,6 +1134,98 @@ fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
+// ─── helper: inject body source code into definition JSON object ─────
+
+fn inject_body_into_obj(
+    obj: &mut Value,
+    file_path: &str,
+    line_start: u32,
+    line_end: u32,
+    file_cache: &mut HashMap<String, Option<String>>,
+    total_body_lines_emitted: &mut usize,
+    max_body_lines: usize,
+    max_total_body_lines: usize,
+) {
+    // Check total budget
+    if max_total_body_lines > 0 && *total_body_lines_emitted >= max_total_body_lines {
+        obj["bodyOmitted"] = json!("total body lines budget exceeded");
+        return;
+    }
+
+    // Read file via cache
+    let content_opt = file_cache
+        .entry(file_path.to_string())
+        .or_insert_with(|| std::fs::read_to_string(file_path).ok())
+        .clone();
+
+    match content_opt {
+        None => {
+            obj["bodyError"] = json!("failed to read file");
+        }
+        Some(content) => {
+            let lines_vec: Vec<&str> = content.lines().collect();
+            let total_file_lines = lines_vec.len();
+
+            // 1-based to 0-based
+            let start_idx = (line_start as usize).saturating_sub(1);
+            let end_idx = (line_end as usize).min(total_file_lines);
+
+            // Stale data check
+            if line_end as usize > total_file_lines {
+                obj["bodyWarning"] = json!(format!(
+                    "definition claims line_end={} but file has only {} lines (stale index?)",
+                    line_end, total_file_lines
+                ));
+            }
+
+            let body_lines: Vec<&str> = if start_idx < total_file_lines {
+                lines_vec[start_idx..end_idx].to_vec()
+            } else {
+                vec![]
+            };
+
+            let total_body_lines_in_def = body_lines.len();
+
+            // Calculate remaining budget
+            let remaining_budget = if max_total_body_lines == 0 {
+                usize::MAX
+            } else {
+                max_total_body_lines.saturating_sub(*total_body_lines_emitted)
+            };
+
+            // Effective max per definition
+            let effective_max = if max_body_lines == 0 {
+                remaining_budget
+            } else {
+                max_body_lines.min(remaining_budget)
+            };
+
+            let truncated = total_body_lines_in_def > effective_max;
+            let lines_to_emit = if truncated { effective_max } else { total_body_lines_in_def };
+
+            let body_array: Vec<Value> = body_lines[..lines_to_emit]
+                .iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    json!({
+                        "line": start_idx + i + 1,
+                        "text": *text,
+                    })
+                })
+                .collect();
+
+            obj["body"] = json!(body_array);
+
+            if truncated {
+                obj["bodyTruncated"] = json!(true);
+                obj["totalBodyLines"] = json!(total_body_lines_in_def);
+            }
+
+            *total_body_lines_emitted += lines_to_emit;
+        }
+    }
+}
+
 // ─── search_definitions handler ──────────────────────────────────────
 
 fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
@@ -1152,6 +1256,9 @@ fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
+    let include_body = args.get("includeBody").and_then(|v| v.as_bool()).unwrap_or(false);
+    let max_body_lines = args.get("maxBodyLines").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+    let max_total_body_lines = args.get("maxTotalBodyLines").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
 
     // ─── containsLine: find containing method/class by line number ───
     if let Some(line_num) = contains_line {
@@ -1164,6 +1271,8 @@ fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResu
 
         // Find matching file(s)
         let mut containing_defs: Vec<Value> = Vec::new();
+        let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
+        let mut total_body_lines_emitted: usize = 0;
         for (file_id, file_path) in index.files.iter().enumerate() {
             if !file_path.to_lowercase().contains(&file_substr) {
                 continue;
@@ -1196,22 +1305,33 @@ fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResu
                     if !def.modifiers.is_empty() {
                         obj["modifiers"] = json!(def.modifiers);
                     }
+                    if include_body {
+                        inject_body_into_obj(
+                            &mut obj, file_path, def.line_start, def.line_end,
+                            &mut file_cache, &mut total_body_lines_emitted,
+                            max_body_lines, max_total_body_lines,
+                        );
+                    }
                     containing_defs.push(obj);
                 }
             }
         }
 
         let search_elapsed = search_start.elapsed();
+        let mut summary = json!({
+            "totalResults": containing_defs.len(),
+            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+        });
+        if include_body {
+            summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
+        }
         let output = json!({
             "containingDefinitions": containing_defs,
             "query": {
                 "file": file_filter.unwrap(),
                 "line": line_num,
             },
-            "summary": {
-                "totalResults": containing_defs.len(),
-                "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-            }
+            "summary": summary,
         });
         return ToolCallResult::success(serde_json::to_string(&output).unwrap());
     }
@@ -1360,6 +1480,8 @@ fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     let search_elapsed = search_start.elapsed();
 
     // Build output JSON
+    let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut total_body_lines_emitted: usize = 0;
     let defs_json: Vec<Value> = results.iter().map(|def| {
         let file_path = index.files.get(def.file_id as usize)
             .map(|s| s.as_str())
@@ -1387,19 +1509,30 @@ fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         if let Some(ref parent) = def.parent {
             obj["parent"] = json!(parent);
         }
+        if include_body {
+            inject_body_into_obj(
+                &mut obj, file_path, def.line_start, def.line_end,
+                &mut file_cache, &mut total_body_lines_emitted,
+                max_body_lines, max_total_body_lines,
+            );
+        }
 
         obj
     }).collect();
 
+    let mut summary = json!({
+        "totalResults": total_results,
+        "returned": defs_json.len(),
+        "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+        "indexFiles": index.files.len(),
+        "totalDefinitions": index.definitions.len(),
+    });
+    if include_body {
+        summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
+    }
     let output = json!({
         "definitions": defs_json,
-        "summary": {
-            "totalResults": total_results,
-            "returned": defs_json.len(),
-            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-            "indexFiles": index.files.len(),
-            "totalDefinitions": index.definitions.len(),
-        }
+        "summary": summary,
     });
 
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
@@ -2910,6 +3043,410 @@ mod tests {
         // Verify ambiguity warning is present when no class filter is specified
         assert!(output3.get("warning").is_some(),
             "Should have ambiguity warning when no class filter and multiple classes have same method");
+    }
+
+    // ─── includeBody tests ───
+
+    /// Helper: create temp files with known content + build HandlerContext with DefinitionIndex pointing to them
+    fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
+        use crate::definitions::*;
+        use std::path::PathBuf;
+        use std::io::Write;
+
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let tmp_dir = std::env::temp_dir().join(format!("search_test_{}_{}", std::process::id(), id));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+
+        // File 0: MyService.cs — 15 lines
+        let file0_path = tmp_dir.join("MyService.cs");
+        {
+            let mut f = std::fs::File::create(&file0_path).unwrap();
+            for i in 1..=15 {
+                writeln!(f, "// line {}", i).unwrap();
+            }
+        }
+
+        // File 1: BigFile.cs — 25 lines
+        let file1_path = tmp_dir.join("BigFile.cs");
+        {
+            let mut f = std::fs::File::create(&file1_path).unwrap();
+            for i in 1..=25 {
+                writeln!(f, "// big line {}", i).unwrap();
+            }
+        }
+
+        let file0_str = file0_path.to_string_lossy().to_string();
+        let file1_str = file1_path.to_string_lossy().to_string();
+
+        let definitions = vec![
+            // file 0: class MyService lines 1-15
+            DefinitionEntry {
+                file_id: 0, name: "MyService".to_string(),
+                kind: DefinitionKind::Class, line_start: 1, line_end: 15,
+                parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            // file 0: method DoWork lines 3-8
+            DefinitionEntry {
+                file_id: 0, name: "DoWork".to_string(),
+                kind: DefinitionKind::Method, line_start: 3, line_end: 8,
+                parent: Some("MyService".to_string()), signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            // file 1: class BigClass lines 1-25
+            DefinitionEntry {
+                file_id: 1, name: "BigClass".to_string(),
+                kind: DefinitionKind::Class, line_start: 1, line_end: 25,
+                parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            // file 1: method Process lines 5-24 (20 lines)
+            DefinitionEntry {
+                file_id: 1, name: "Process".to_string(),
+                kind: DefinitionKind::Method, line_start: 5, line_end: 24,
+                parent: Some("BigClass".to_string()), signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+        ];
+
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind.clone()).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+        }
+
+        path_to_id.insert(file0_path.clone(), 0);
+        path_to_id.insert(file1_path.clone(), 1);
+
+        let def_index = DefinitionIndex {
+            root: tmp_dir.to_string_lossy().to_string(),
+            created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: vec![file0_str.clone(), file1_str.clone()],
+            definitions,
+            name_index,
+            kind_index,
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index,
+            path_to_id,
+            method_calls: HashMap::new(),
+        };
+
+        let content_idx = HashMap::new();
+        let content_index = ContentIndex {
+            root: tmp_dir.to_string_lossy().to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![file0_str, file1_str],
+            index: content_idx,
+            total_tokens: 0,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![0, 0],
+            forward: None,
+            path_to_id: None,
+        };
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(content_index)),
+            def_index: Some(Arc::new(RwLock::new(def_index))),
+            server_dir: tmp_dir.to_string_lossy().to_string(),
+            server_ext: "cs".to_string(),
+        };
+
+        (ctx, tmp_dir)
+    }
+
+    fn cleanup_tmp(tmp_dir: &std::path::Path) {
+        let _ = std::fs::remove_dir_all(tmp_dir);
+    }
+
+    #[test]
+    fn test_search_definitions_include_body() {
+        let (ctx, tmp_dir) = make_ctx_with_real_files();
+        let result = dispatch_tool(&ctx, "search_definitions", &json!({
+            "name": "DoWork",
+            "includeBody": true
+        }));
+        assert!(!result.is_error, "Should not error: {}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = output["definitions"].as_array().unwrap();
+        assert_eq!(defs.len(), 1);
+        let body = defs[0]["body"].as_array().unwrap();
+        // DoWork is lines 3-8, so 6 lines
+        assert_eq!(body.len(), 6);
+        assert_eq!(body[0]["line"], 3);
+        assert_eq!(body[0]["text"], "// line 3");
+        assert_eq!(body[5]["line"], 8);
+        assert_eq!(body[5]["text"], "// line 8");
+        // Should not be truncated
+        assert!(defs[0].get("bodyTruncated").is_none());
+        // Summary should have totalBodyLinesReturned
+        assert_eq!(output["summary"]["totalBodyLinesReturned"], 6);
+        cleanup_tmp(&tmp_dir);
+    }
+
+    #[test]
+    fn test_search_definitions_include_body_default_false() {
+        let (ctx, tmp_dir) = make_ctx_with_real_files();
+        let result = dispatch_tool(&ctx, "search_definitions", &json!({
+            "name": "DoWork"
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = output["definitions"].as_array().unwrap();
+        assert_eq!(defs.len(), 1);
+        // No body field when includeBody is not set
+        assert!(defs[0].get("body").is_none(), "body should not be present by default");
+        // No totalBodyLinesReturned in summary
+        assert!(output["summary"].get("totalBodyLinesReturned").is_none());
+        cleanup_tmp(&tmp_dir);
+    }
+
+    #[test]
+    fn test_search_definitions_max_body_lines_truncation() {
+        let (ctx, tmp_dir) = make_ctx_with_real_files();
+        // Process method has 20 lines (5-24), request maxBodyLines=5
+        let result = dispatch_tool(&ctx, "search_definitions", &json!({
+            "name": "Process",
+            "includeBody": true,
+            "maxBodyLines": 5
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = output["definitions"].as_array().unwrap();
+        assert_eq!(defs.len(), 1);
+        let body = defs[0]["body"].as_array().unwrap();
+        assert_eq!(body.len(), 5, "Should only have 5 lines");
+        assert_eq!(defs[0]["bodyTruncated"], true);
+        assert_eq!(defs[0]["totalBodyLines"], 20);
+        cleanup_tmp(&tmp_dir);
+    }
+
+    #[test]
+    fn test_search_definitions_max_total_body_lines_budget() {
+        let (ctx, tmp_dir) = make_ctx_with_real_files();
+        // Search for both methods: DoWork (6 lines) + Process (20 lines)
+        // Budget of 10 means DoWork (6 lines) fits, Process only gets 4 lines
+        let result = dispatch_tool(&ctx, "search_definitions", &json!({
+            "name": "DoWork,Process",
+            "includeBody": true,
+            "maxTotalBodyLines": 10
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = output["definitions"].as_array().unwrap();
+        assert_eq!(defs.len(), 2);
+
+        // First def gets body
+        let first = &defs[0];
+        assert!(first.get("body").is_some(), "First def should have body");
+        assert!(first.get("bodyOmitted").is_none(), "First def should not be omitted");
+
+        // Total body lines returned should be <= 10
+        let total = output["summary"]["totalBodyLinesReturned"].as_u64().unwrap();
+        assert!(total <= 10, "Total body lines should be <= 10, got {}", total);
+        cleanup_tmp(&tmp_dir);
+    }
+
+    #[test]
+    fn test_search_definitions_contains_line_with_body() {
+        let (ctx, tmp_dir) = make_ctx_with_real_files();
+        let result = dispatch_tool(&ctx, "search_definitions", &json!({
+            "file": "MyService",
+            "containsLine": 5,
+            "includeBody": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = output["containingDefinitions"].as_array().unwrap();
+        assert!(!defs.is_empty(), "Should find containing definitions");
+        // The innermost (DoWork, lines 3-8) should be first
+        assert_eq!(defs[0]["name"], "DoWork");
+        let body = defs[0]["body"].as_array().unwrap();
+        assert!(!body.is_empty(), "Body should be present for containsLine with includeBody");
+        assert_eq!(body[0]["line"], 3);
+        // Summary should have totalBodyLinesReturned
+        assert!(output["summary"]["totalBodyLinesReturned"].as_u64().unwrap() > 0);
+        cleanup_tmp(&tmp_dir);
+    }
+
+    #[test]
+    fn test_search_definitions_file_cache() {
+        let (ctx, tmp_dir) = make_ctx_with_real_files();
+        // Search with parent filter returning multiple defs from same file
+        let result = dispatch_tool(&ctx, "search_definitions", &json!({
+            "parent": "MyService",
+            "includeBody": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = output["definitions"].as_array().unwrap();
+        // Should find DoWork (parent=MyService)
+        assert!(!defs.is_empty());
+        for def in defs {
+            assert!(def.get("body").is_some(), "Each def should have body");
+        }
+        cleanup_tmp(&tmp_dir);
+    }
+
+    #[test]
+    fn test_search_definitions_stale_file_warning() {
+        use std::io::Write;
+
+        let tmp_dir = std::env::temp_dir().join(format!("search_test_stale_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+
+        // Create file with only 10 lines
+        let file_path = tmp_dir.join("Stale.cs");
+        {
+            let mut f = std::fs::File::create(&file_path).unwrap();
+            for i in 1..=10 {
+                writeln!(f, "// stale line {}", i).unwrap();
+            }
+        }
+
+        let file_str = file_path.to_string_lossy().to_string();
+
+        let definitions = vec![
+            DefinitionEntry {
+                file_id: 0, name: "StaleClass".to_string(),
+                kind: DefinitionKind::Class, line_start: 5, line_end: 20, // claims line 20 but file only has 10
+                parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+        ];
+
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind.clone()).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+        }
+
+        let def_index = DefinitionIndex {
+            root: tmp_dir.to_string_lossy().to_string(),
+            created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: vec![file_str.clone()],
+            definitions,
+            name_index,
+            kind_index,
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index,
+            path_to_id: HashMap::new(),
+            method_calls: HashMap::new(),
+        };
+
+        let content_index = ContentIndex {
+            root: tmp_dir.to_string_lossy().to_string(),
+            created_at: 0, max_age_secs: 3600,
+            files: vec![file_str],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![0],
+            forward: None,
+            path_to_id: None,
+        };
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(content_index)),
+            def_index: Some(Arc::new(RwLock::new(def_index))),
+            server_dir: tmp_dir.to_string_lossy().to_string(),
+            server_ext: "cs".to_string(),
+        };
+
+        let result = dispatch_tool(&ctx, "search_definitions", &json!({
+            "name": "StaleClass",
+            "includeBody": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = output["definitions"].as_array().unwrap();
+        assert_eq!(defs.len(), 1);
+        assert!(defs[0].get("bodyWarning").is_some(), "Should have bodyWarning for stale file");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_search_definitions_body_error() {
+        // Def points to non-existent file
+        let definitions = vec![
+            DefinitionEntry {
+                file_id: 0, name: "GhostClass".to_string(),
+                kind: DefinitionKind::Class, line_start: 1, line_end: 10,
+                parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+        ];
+
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind.clone()).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+        }
+
+        let non_existent = "C:\\nonexistent\\path\\Ghost.cs".to_string();
+
+        let def_index = DefinitionIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: vec![non_existent.clone()],
+            definitions,
+            name_index,
+            kind_index,
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index,
+            path_to_id: HashMap::new(),
+            method_calls: HashMap::new(),
+        };
+
+        let content_index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0, max_age_secs: 3600,
+            files: vec![non_existent],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![0],
+            forward: None,
+            path_to_id: None,
+        };
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(content_index)),
+            def_index: Some(Arc::new(RwLock::new(def_index))),
+            server_dir: ".".to_string(),
+            server_ext: "cs".to_string(),
+        };
+
+        let result = dispatch_tool(&ctx, "search_definitions", &json!({
+            "name": "GhostClass",
+            "includeBody": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = output["definitions"].as_array().unwrap();
+        assert_eq!(defs.len(), 1);
+        assert!(defs[0].get("bodyError").is_some(), "Should have bodyError for missing file");
+        assert_eq!(defs[0]["bodyError"], "failed to read file");
     }
 
     // Note: is_csharp_noise_token tests removed — function was replaced by
