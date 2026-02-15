@@ -577,7 +577,7 @@ if ($failed -gt 0) { exit 1 }
 
 ## When to Run
 
-- ✅ After every phase of the refactoring plan (see [refactoring-plan.md](refactoring-plan.md))
+- ✅ After every major refactoring or structural change
 - ✅ After dependency upgrades (`cargo update`)
 - ✅ Before creating a PR
 - ✅ After merging a large PR
