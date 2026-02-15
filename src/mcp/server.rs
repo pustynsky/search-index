@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, Write};
 use std::sync::{Arc, RwLock};
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use tracing::{debug, error, info, warn};
 
 use crate::mcp::handlers::{self, HandlerContext};
@@ -57,8 +57,14 @@ pub fn run_server(
                 );
                 let resp = serde_json::to_string(&err).unwrap();
                 debug!(response = %resp, "Error response");
-                let _ = writeln!(writer, "{}", resp);
-                let _ = writer.flush();
+                if let Err(e) = writeln!(writer, "{}", resp) {
+                    error!(error = %e, "Failed to write error response to stdout, shutting down");
+                    break;
+                }
+                if let Err(e) = writer.flush() {
+                    error!(error = %e, "Failed to flush stdout, shutting down");
+                    break;
+                }
                 continue;
             }
         };
@@ -74,8 +80,14 @@ pub fn run_server(
 
         let resp_str = serde_json::to_string(&response).unwrap();
         debug!(response = %resp_str, "Outgoing JSON-RPC");
-        let _ = writeln!(writer, "{}", resp_str);
-        let _ = writer.flush();
+        if let Err(e) = writeln!(writer, "{}", resp_str) {
+            error!(error = %e, "Failed to write response to stdout, shutting down");
+            break;
+        }
+        if let Err(e) = writer.flush() {
+            error!(error = %e, "Failed to flush stdout, shutting down");
+            break;
+        }
     }
 
     info!("stdin closed, shutting down");
@@ -149,7 +161,6 @@ fn handle_request(
     }
 }
 
-use serde_json::json;
 
 #[cfg(test)]
 mod tests {

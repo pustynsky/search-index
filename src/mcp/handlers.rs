@@ -1126,14 +1126,17 @@ fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResu
 
     // Filter by kind first (most selective usually)
     if let Some(kind_str) = kind_filter {
-        if let Some(kind) = DefinitionKind::from_str(kind_str) {
-            if let Some(indices) = index.kind_index.get(&kind) {
-                candidate_indices = Some(indices.clone());
-            } else {
-                candidate_indices = Some(Vec::new());
+        match kind_str.parse::<DefinitionKind>() {
+            Ok(kind) => {
+                if let Some(indices) = index.kind_index.get(&kind) {
+                    candidate_indices = Some(indices.clone());
+                } else {
+                    candidate_indices = Some(Vec::new());
+                }
             }
-        } else {
-            return ToolCallResult::error(format!("Unknown definition kind: '{}'", kind_str));
+            Err(e) => {
+                return ToolCallResult::error(e);
+            }
         }
     }
 

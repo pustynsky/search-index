@@ -10,89 +10,13 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand};
 use ignore::WalkBuilder;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
+
+// Re-export core types from library crate
+pub use search::{clean_path, tokenize, ContentIndex, FileEntry, FileIndex, Posting};
 
 mod definitions;
 mod mcp;
-
-// ─── Helpers ─────────────────────────────────────────────────────────
-
-/// Strip the `\\?\` extended-length path prefix that Windows canonicalize adds
-pub fn clean_path(p: &str) -> String {
-    p.strip_prefix(r"\\?\").unwrap_or(p).to_string()
-}
-
-// ─── Index data structures ───────────────────────────────────────────
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct FileEntry {
-    pub path: String,
-    pub size: u64,
-    pub modified: u64, // seconds since epoch
-    pub is_dir: bool,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct FileIndex {
-    pub root: String,
-    pub created_at: u64,
-    pub max_age_secs: u64,
-    pub entries: Vec<FileEntry>,
-}
-
-impl FileIndex {
-    fn is_stale(&self) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        now - self.created_at > self.max_age_secs
-    }
-}
-
-// ─── Content (inverted) index data structures ────────────────────────
-
-/// A posting: file_id + line numbers where the token appears
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Posting {
-    pub file_id: u32,
-    pub lines: Vec<u32>,
-}
-
-/// Inverted index: token → list of postings
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ContentIndex {
-    pub root: String,
-    pub created_at: u64,
-    pub max_age_secs: u64,
-    /// file_id → file path
-    pub files: Vec<String>,
-    /// token (lowercased) → postings
-    pub index: HashMap<String, Vec<Posting>>,
-    /// total tokens indexed
-    pub total_tokens: u64,
-    /// extensions that were indexed
-    pub extensions: Vec<String>,
-    /// file_id → total token count in that file (for TF-IDF)
-    pub file_token_counts: Vec<u32>,
-    /// Forward index: file_id → Vec<token> (only populated with --watch)
-    #[serde(default)]
-    pub forward: Option<HashMap<u32, Vec<String>>>,
-    /// Path → file_id lookup (only populated with --watch)
-    #[serde(default)]
-    pub path_to_id: Option<HashMap<PathBuf, u32>>,
-}
-
-impl ContentIndex {
-    fn is_stale(&self) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        now - self.created_at > self.max_age_secs
-    }
-}
 
 // ─── CLI ─────────────────────────────────────────────────────────────
 
@@ -1005,14 +929,6 @@ fn cmd_fast(args: FastArgs) {
 }
 
 // ─── Content index building ──────────────────────────────────────────
-
-/// Tokenize a line of text into lowercase tokens
-pub fn tokenize(line: &str, min_len: usize) -> Vec<String> {
-    line.split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|s| s.len() >= min_len)
-        .map(|s| s.to_lowercase())
-        .collect()
-}
 
 pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
     let root = fs::canonicalize(&args.dir).unwrap_or_else(|_| PathBuf::from(&args.dir));

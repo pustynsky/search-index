@@ -59,29 +59,39 @@ impl DefinitionKind {
             Self::SqlIndex => "sqlIndex",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::fmt::Display for DefinitionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for DefinitionKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "class" => Some(Self::Class),
-            "interface" => Some(Self::Interface),
-            "enum" => Some(Self::Enum),
-            "struct" => Some(Self::Struct),
-            "record" => Some(Self::Record),
-            "method" => Some(Self::Method),
-            "property" => Some(Self::Property),
-            "field" => Some(Self::Field),
-            "constructor" => Some(Self::Constructor),
-            "delegate" => Some(Self::Delegate),
-            "event" => Some(Self::Event),
-            "enummember" => Some(Self::EnumMember),
-            "storedprocedure" => Some(Self::StoredProcedure),
-            "table" => Some(Self::Table),
-            "view" => Some(Self::View),
-            "sqlfunction" => Some(Self::SqlFunction),
-            "userdefinedtype" => Some(Self::UserDefinedType),
-            "column" => Some(Self::Column),
-            "sqlindex" => Some(Self::SqlIndex),
-            _ => None,
+            "class" => Ok(Self::Class),
+            "interface" => Ok(Self::Interface),
+            "enum" => Ok(Self::Enum),
+            "struct" => Ok(Self::Struct),
+            "record" => Ok(Self::Record),
+            "method" => Ok(Self::Method),
+            "property" => Ok(Self::Property),
+            "field" => Ok(Self::Field),
+            "constructor" => Ok(Self::Constructor),
+            "delegate" => Ok(Self::Delegate),
+            "event" => Ok(Self::Event),
+            "enummember" => Ok(Self::EnumMember),
+            "storedprocedure" => Ok(Self::StoredProcedure),
+            "table" => Ok(Self::Table),
+            "view" => Ok(Self::View),
+            "sqlfunction" => Ok(Self::SqlFunction),
+            "userdefinedtype" => Ok(Self::UserDefinedType),
+            "column" => Ok(Self::Column),
+            "sqlindex" => Ok(Self::SqlIndex),
+            other => Err(format!("Unknown definition kind: '{}'", other)),
         }
     }
 }
@@ -1197,8 +1207,48 @@ mod tests {
         ];
         for kind in kinds {
             let s = kind.as_str();
-            let parsed = DefinitionKind::from_str(s).unwrap();
+            let parsed: DefinitionKind = s.parse().unwrap();
             assert_eq!(parsed, kind);
+        }
+    }
+
+    #[test]
+    fn test_definition_kind_display() {
+        assert_eq!(format!("{}", DefinitionKind::Class), "class");
+        assert_eq!(format!("{}", DefinitionKind::StoredProcedure), "storedProcedure");
+        assert_eq!(format!("{}", DefinitionKind::EnumMember), "enumMember");
+    }
+
+    #[test]
+    fn test_definition_kind_parse_invalid() {
+        let result = "invalid_kind".parse::<DefinitionKind>();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown definition kind"));
+    }
+
+    #[test]
+    fn test_definition_kind_parse_case_insensitive() {
+        let parsed: DefinitionKind = "CLASS".parse().unwrap();
+        assert_eq!(parsed, DefinitionKind::Class);
+        let parsed: DefinitionKind = "StoredProcedure".parse().unwrap();
+        assert_eq!(parsed, DefinitionKind::StoredProcedure);
+    }
+
+    #[test]
+    fn test_definition_kind_roundtrip_all_variants() {
+        let all_kinds = vec![
+            DefinitionKind::Class, DefinitionKind::Interface, DefinitionKind::Enum,
+            DefinitionKind::Struct, DefinitionKind::Record, DefinitionKind::Method,
+            DefinitionKind::Property, DefinitionKind::Field, DefinitionKind::Constructor,
+            DefinitionKind::Delegate, DefinitionKind::Event, DefinitionKind::EnumMember,
+            DefinitionKind::StoredProcedure, DefinitionKind::Table, DefinitionKind::View,
+            DefinitionKind::SqlFunction, DefinitionKind::UserDefinedType,
+            DefinitionKind::Column, DefinitionKind::SqlIndex,
+        ];
+        for kind in all_kinds {
+            let s = kind.to_string();
+            let parsed: DefinitionKind = s.parse().unwrap_or_else(|e| panic!("Failed to parse '{}': {}", s, e));
+            assert_eq!(parsed, kind, "Roundtrip failed for {:?} -> '{}' -> {:?}", kind, s, parsed);
         }
     }
 
