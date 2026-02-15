@@ -6,7 +6,7 @@ All numbers in this document are **measured**, not estimated. Criterion benchmar
 
 | Parameter | Value                                                |
 | --------- | ---------------------------------------------------- |
-| CPU       | 24 logical cores                                     |
+| CPU       | Intel Core i7-12850HX (16 cores / 24 threads)        |
 | RAM       | 128 GB                                               |
 | Storage   | NVMe SSD                                             |
 | OS        | Windows 11                                           |
