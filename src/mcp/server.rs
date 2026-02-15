@@ -205,13 +205,14 @@ mod tests {
         assert_eq!(result["jsonrpc"], "2.0");
         assert_eq!(result["id"], 2);
         let tools = result["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"search_grep"));
         assert!(names.contains(&"search_find"));
         assert!(names.contains(&"search_fast"));
         assert!(names.contains(&"search_info"));
         assert!(names.contains(&"search_reindex"));
+        assert!(names.contains(&"search_reindex_definitions"));
         assert!(names.contains(&"search_definitions"));
     }
 

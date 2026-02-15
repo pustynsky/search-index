@@ -148,6 +148,20 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "search_reindex_definitions".to_string(),
+            description: "Force rebuild the AST definition index (tree-sitter) and reload it into the server's in-memory cache. Returns build metrics: files parsed, definitions extracted, call sites, parse errors, build time, and index size. Requires server started with --definitions flag.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "dir": { "type": "string", "description": "Directory to reindex (default: server's --dir)" },
+                    "ext": {
+                        "type": "string",
+                        "description": "File extensions to parse, comma-separated (default: server's --ext)"
+                    }
+                }
+            }),
+        },
+        ToolDefinition {
             name: "search_definitions".to_string(),
             description: "Search C# and SQL code definitions — classes, interfaces, methods, properties, enums, stored procedures, tables. Uses pre-built tree-sitter AST index for instant results (~0.001s). Requires server started with --definitions flag. Supports 'containsLine' to find which method/class contains a given line number (no more manual read_file!).".to_string(),
             input_schema: json!({
@@ -275,10 +289,85 @@ pub fn dispatch_tool(
         "search_fast" => handle_search_fast(ctx, arguments),
         "search_info" => handle_search_info(),
         "search_reindex" => handle_search_reindex(ctx, arguments),
+        "search_reindex_definitions" => handle_search_reindex_definitions(ctx, arguments),
         "search_definitions" => handle_search_definitions(ctx, arguments),
         "search_callers" => handle_search_callers(ctx, arguments),
         _ => ToolCallResult::error(format!("Unknown tool: {}", tool_name)),
     }
+}
+
+// ─── search_reindex_definitions handler ──────────────────────────────
+
+fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+    let def_index_arc = match &ctx.def_index {
+        Some(di) => Arc::clone(di),
+        None => return ToolCallResult::error(
+            "Definition index not available. Start server with --definitions flag.".to_string()
+        ),
+    };
+
+    let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or(&ctx.server_dir);
+    let ext = args.get("ext").and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| ctx.server_ext.clone());
+
+    // Check dir matches server dir
+    let requested = std::fs::canonicalize(dir)
+        .map(|p| clean_path(&p.to_string_lossy()))
+        .unwrap_or_else(|_| dir.to_string());
+    let server = std::fs::canonicalize(&ctx.server_dir)
+        .map(|p| clean_path(&p.to_string_lossy()))
+        .unwrap_or_else(|_| ctx.server_dir.clone());
+    if !requested.eq_ignore_ascii_case(&server) {
+        return ToolCallResult::error(format!(
+            "Server started with --dir {}. For other directories, start another server instance or use CLI.",
+            ctx.server_dir
+        ));
+    }
+
+    info!(dir = %dir, ext = %ext, "Rebuilding definition index");
+    let start = Instant::now();
+
+    let new_index = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+        dir: dir.to_string(),
+        ext: ext.clone(),
+        threads: 0,
+    });
+
+    // Save to disk
+    if let Err(e) = crate::definitions::save_definition_index(&new_index) {
+        warn!(error = %e, "Failed to save definition index to disk");
+    }
+
+    let file_count = new_index.files.len();
+    let def_count = new_index.definitions.len();
+    let call_site_count: usize = new_index.method_calls.values().map(|v| v.len()).sum();
+
+    // Compute index size on disk
+    let size_mb = bincode::serialize(&new_index)
+        .map(|data| data.len() as f64 / 1_048_576.0)
+        .unwrap_or(0.0);
+
+    // Update in-memory cache
+    match def_index_arc.write() {
+        Ok(mut idx) => {
+            *idx = new_index;
+        }
+        Err(e) => return ToolCallResult::error(format!("Failed to update in-memory definition index: {}", e)),
+    }
+
+    let elapsed = start.elapsed();
+
+    let output = json!({
+        "status": "ok",
+        "files": file_count,
+        "definitions": def_count,
+        "callSites": call_site_count,
+        "sizeMb": (size_mb * 10.0).round() / 10.0,
+        "rebuildTimeMs": elapsed.as_secs_f64() * 1000.0,
+    });
+
+    ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
 // ─── search_grep handler ─────────────────────────────────────────────
@@ -1998,7 +2087,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
     }
 
     #[test]
@@ -2010,6 +2099,7 @@ mod tests {
         assert!(names.contains(&"search_fast"));
         assert!(names.contains(&"search_info"));
         assert!(names.contains(&"search_reindex"));
+        assert!(names.contains(&"search_reindex_definitions"));
         assert!(names.contains(&"search_definitions"));
         assert!(names.contains(&"search_callers"));
     }
@@ -2388,6 +2478,35 @@ mod tests {
             assert!(node["file"].is_string(), "Node should have file name");
             assert!(node["line"].is_number(), "Node should have line number");
         }
+    }
+
+    // ─── search_reindex_definitions tests ───
+
+    #[test]
+    fn test_reindex_definitions_no_def_index() {
+        let index = ContentIndex {
+            root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+            files: vec![], index: HashMap::new(), total_tokens: 0,
+            extensions: vec![], file_token_counts: vec![], forward: None, path_to_id: None,
+        };
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(index)),
+            def_index: None,
+            server_dir: ".".to_string(),
+            server_ext: "cs".to_string(),
+        };
+        let result = dispatch_tool(&ctx, "search_reindex_definitions", &json!({}));
+        assert!(result.is_error);
+        assert!(result.content[0].text.contains("Definition index not available"));
+    }
+
+    #[test]
+    fn test_reindex_definitions_has_schema() {
+        let tools = tool_definitions();
+        let tool = tools.iter().find(|t| t.name == "search_reindex_definitions").unwrap();
+        let props = tool.input_schema["properties"].as_object().unwrap();
+        assert!(props.contains_key("dir"), "Should have dir parameter");
+        assert!(props.contains_key("ext"), "Should have ext parameter");
     }
 
     // ─── containsLine tests ───
