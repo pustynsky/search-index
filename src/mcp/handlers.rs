@@ -209,6 +209,10 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "Method name to find callers/callees for. Example: 'GetUserAsync'"
                     },
+                    "class": {
+                        "type": "string",
+                        "description": "Parent class name to scope the search. Without this, callers of ALL methods with this name are found (may mix results from unrelated classes). With class specified, only callers that reference this class or its interfaces are returned. DI-aware: automatically includes callers that use the interface (e.g., class='UserService' also finds callers using IUserService). Example: 'UserService'"
+                    },
                     "depth": {
                         "type": "integer",
                         "description": "Maximum recursion depth for the call tree (default: 3, max: 10). Each level finds callers of the callers."
@@ -1326,6 +1330,7 @@ fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         Some(m) => m.to_string(),
         None => return ToolCallResult::error("Missing required parameter: method".to_string()),
     };
+    let class_filter = args.get("class").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     let max_depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3).min(10) as usize;
     let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("up");
@@ -1358,11 +1363,35 @@ fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let limits = CallerLimits { max_callers_per_level, max_total_nodes };
     let node_count = std::sync::atomic::AtomicUsize::new(0);
 
+    // Check for ambiguous method names and generate warning
+    let method_lower = method_name.to_lowercase();
+    let mut ambiguity_warning: Option<String> = None;
+    if class_filter.is_none() {
+        if let Some(name_indices) = def_idx.name_index.get(&method_lower) {
+            let method_defs: Vec<&DefinitionEntry> = name_indices.iter()
+                .filter_map(|&di| def_idx.definitions.get(di as usize))
+                .filter(|d| d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor)
+                .collect();
+
+            let unique_classes: std::collections::HashSet<&str> = method_defs.iter()
+                .filter_map(|d| d.parent.as_deref())
+                .collect();
+
+            if unique_classes.len() > 1 {
+                let class_list: Vec<&str> = unique_classes.into_iter().collect();
+                ambiguity_warning = Some(format!(
+                    "Method '{}' found in {} classes: {}. Results may mix callers from different classes. Use 'class' parameter to scope the search.",
+                    method_name, class_list.len(), class_list.join(", ")
+                ));
+            }
+        }
+    }
+
     if direction == "up" {
         let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
         let tree = build_caller_tree(
             &method_name,
-            None, // no parent class context for initial search
+            class_filter.as_deref(), // pass class scoping from MCP parameter
             max_depth,
             0,
             &content_index,
@@ -1376,10 +1405,13 @@ fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             &node_count,
         );
 
+        // Dedup: remove duplicate nodes at root level (can happen with resolveInterfaces)
+        let tree = dedup_caller_tree(tree);
+
         let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
         let truncated = total_nodes >= max_total_nodes;
         let search_elapsed = search_start.elapsed();
-        let output = json!({
+        let mut output = json!({
             "callTree": tree,
             "query": {
                 "method": method_name,
@@ -1395,6 +1427,12 @@ fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
             }
         });
+        if let Some(ref warning) = ambiguity_warning {
+            output["warning"] = json!(warning);
+        }
+        if let Some(ref cls) = class_filter {
+            output["query"]["class"] = json!(cls);
+        }
         ToolCallResult::success(serde_json::to_string(&output).unwrap())
     } else {
         let tree = build_callee_tree(
@@ -1429,6 +1467,23 @@ fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         });
         ToolCallResult::success(serde_json::to_string(&output).unwrap())
     }
+}
+
+/// Remove duplicate nodes from the caller tree (can occur with resolveInterfaces
+/// when the same caller is found through multiple interface implementations).
+fn dedup_caller_tree(tree: Vec<Value>) -> Vec<Value> {
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    tree.into_iter()
+        .filter(|node| {
+            let key = format!(
+                "{}.{}.{}",
+                node.get("class").and_then(|v| v.as_str()).unwrap_or("?"),
+                node.get("method").and_then(|v| v.as_str()).unwrap_or("?"),
+                node.get("file").and_then(|v| v.as_str()).unwrap_or("?"),
+            );
+            seen.insert(key)
+        })
+        .collect()
 }
 
 struct CallerLimits {
