@@ -124,6 +124,7 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 - Full syntactic understanding — correctly handles nested classes, partial classes, multi-line signatures
 - Modifiers, attributes, base types extracted as structured data
 - Line range tracking enables `containsLine` queries (which method is on line N?)
+- Call-graph extraction — AST walk of method bodies extracts `CallSite` data (method name, receiver type, line) for `search_callers` "down" direction. Resolves field types (e.g., `_userService` → `IUserService`) for DI-aware call trees. This would be impossible with regex.
 - Language grammar maintained by the community, handles edge cases we'd never cover with regex
 
 **Rejected alternatives:**
