@@ -69,7 +69,7 @@ Index load: 0.055s, search: 0.036s.
 | -------------------------- | --------------- | ------- | ---------- | --------- |
 | FileIndex (C:\Windows)     | 333,875 entries | 24      | ~3s        | 47.8 MB   |
 | ContentIndex (C# files)    | 48,599 files    | 24      | 7.0s       | 241.7 MB  |
-| DefinitionIndex (C# + SQL) | 53,799 files    | 24      | 16.1s      | 231.8 MB  |
+| DefinitionIndex (C# + SQL) | 53,799 files    | 24      | 16.1s      | ~324 MB   |
 
 **Why is def-index 2.3× slower than content-index?**
 
@@ -135,7 +135,7 @@ Extrapolated for real 241.7 MB index: ~700ms deserialize (matches measured 689ms
 | ---------------------- | ------- | --------- | ---------------------------------------------------- |
 | ContentIndex           | 48,599  | 241.7 MB  | 0.689s                                               |
 | FileIndex (C:\Windows) | 333,875 | 47.8 MB   | 0.055s                                               |
-| DefinitionIndex        | 53,799  | 231.8 MB  | ~0.7s (estimated from size parity with ContentIndex) |
+| DefinitionIndex        | 53,799  | ~324 MB   | ~1.5s (measured)                                     |
 
 ## MCP Server Tool Performance (index in-memory)
 
@@ -175,7 +175,7 @@ Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O
 | Subsequent queries (MCP server) | 27.5s   | 0.6ms                  | **45,000×** |
 | Index build (one-time)          | N/A     | 7.0s                   | —           |
 | Disk overhead                   | None    | 241.7 MB               | —           |
-| RAM (server mode, estimated)    | None    | ~400 MB (not measured) | —           |
+| RAM (server mode, estimated)    | None    | ~500 MB (not measured) | —           |
 
 ## Bottlenecks and Scaling Limits
 
@@ -186,6 +186,22 @@ Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O
 | Multi-term OR (3 terms) | 5.6ms                | Scoring 13K+ posting entries         | Acceptable for interactive use           |
 | Content index build     | 7.0s                 | Parallel I/O + tokenization          | Already parallelized (24 threads)        |
 | Def index build         | 16.1s                | tree-sitter parsing CPU-bound        | Already parallelized (24 threads)        |
+
+## Cross-Machine Variability
+
+Benchmarks measured on a second machine (16 threads instead of 24) show significantly different numbers due to CPU speed and thread count:
+
+| Metric | i7-12850HX (24 threads) | 2nd machine (16 threads) | Ratio |
+|---|---|---|---|
+| Single token search | 0.644ms | 4.2ms | 6.5× |
+| Multi-term OR (3) | 5.6ms | 11.4ms | 2× |
+| Regex (i.*cache) | 44ms | 68ms | 1.5× |
+| Content index build | 7.0s | 15.9s | 2.3× |
+| Def index build | 16.1s | 32.0s | 2× |
+| Index load (startup) | 0.7s | 3.1s (both) | 4.4× |
+| Watcher update (1 file) | ~5ms (from logs) | ~0.9s | 180× |
+
+The watcher update discrepancy is notable — the original "~5ms" figure appears to have been the per-file content-only update time, while the new 0.9s measurement includes definition index re-parsing with tree-sitter (which is CPU-intensive). The true per-file update cost depends heavily on file size and CPU speed.
 
 ## Reproducibility
 

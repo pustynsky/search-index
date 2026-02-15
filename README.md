@@ -10,7 +10,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. S
 | Call tree (3 levels) | **0.51ms** (**102,198×** faster than manual rg) |
 | Find interface implementations | **0.63ms** (**89,241×** faster than rg) |
 | Index build | **7s** (content), **16s** (AST definitions) |
-| Incremental update | **~5ms** per file change |
+| Incremental update | **<1s** per file change (content + AST re-parse) |
 | Index load from disk | **0.7s** (242 MB bincode) |
 | Binary size | Single static binary, zero runtime dependencies |
 
