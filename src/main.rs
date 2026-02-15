@@ -565,7 +565,7 @@ pub fn build_index(args: &IndexArgs) -> FileIndex {
 
 // ─── Live search (no index) ──────────────────────────────────────────
 
-fn cmd_find(args: FindArgs) {
+fn cmd_find(args: FindArgs) -> Result<(), SearchError> {
     let start = Instant::now();
 
     let pattern = if args.ignore_case {
@@ -575,15 +575,15 @@ fn cmd_find(args: FindArgs) {
     };
 
     let re = if args.regex {
-        match Regex::new(&if args.ignore_case {
+        let pat = if args.ignore_case {
             format!("(?i){}", &args.pattern)
         } else {
             args.pattern.clone()
-        }) {
+        };
+        match Regex::new(&pat) {
             Ok(r) => Some(r),
             Err(e) => {
-                eprintln!("Invalid regex: {}", e);
-                std::process::exit(1);
+                return Err(SearchError::InvalidRegex { pattern: pat, source: e });
             }
         }
     } else {
@@ -592,8 +592,7 @@ fn cmd_find(args: FindArgs) {
 
     let root = Path::new(&args.dir);
     if !root.exists() {
-        eprintln!("Directory does not exist: {}", args.dir);
-        std::process::exit(1);
+        return Err(SearchError::DirNotFound(args.dir.clone()));
     }
 
     let match_count = AtomicUsize::new(0);
@@ -756,32 +755,27 @@ fn cmd_find(args: FindArgs) {
         "\n{} matches found among {} entries in {:.3}s ({} threads)",
         matches, files, elapsed.as_secs_f64(), thread_count
     );
+    Ok(())
 }
 
 // ─── Index command ───────────────────────────────────────────────────
 
-fn cmd_index(args: IndexArgs) {
+fn cmd_index(args: IndexArgs) -> Result<(), SearchError> {
     let index = build_index(&args);
-    match save_index(&index) {
-        Ok(()) => {
-            let path = index_path_for(&args.dir);
-            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            eprintln!(
-                "Index saved to {} ({:.1} MB)",
-                path.display(),
-                size as f64 / 1_048_576.0
-            );
-        }
-        Err(e) => {
-            eprintln!("Failed to save index: {}", e);
-            std::process::exit(1);
-        }
-    }
+    save_index(&index)?;
+    let path = index_path_for(&args.dir);
+    let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    eprintln!(
+        "Index saved to {} ({:.1} MB)",
+        path.display(),
+        size as f64 / 1_048_576.0
+    );
+    Ok(())
 }
 
 // ─── Fast search (from index) ────────────────────────────────────────
 
-fn cmd_fast(args: FastArgs) {
+fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
     let start = Instant::now();
 
     // Load or rebuild index
@@ -833,15 +827,15 @@ fn cmd_fast(args: FastArgs) {
     };
 
     let re = if args.regex {
-        match Regex::new(&if args.ignore_case {
+        let pat = if args.ignore_case {
             format!("(?i){}", &args.pattern)
         } else {
             args.pattern.clone()
-        }) {
+        };
+        match Regex::new(&pat) {
             Ok(r) => Some(r),
             Err(e) => {
-                eprintln!("Invalid regex: {}", e);
-                std::process::exit(1);
+                return Err(SearchError::InvalidRegex { pattern: pat, source: e });
             }
         }
     } else {
@@ -929,6 +923,7 @@ fn cmd_fast(args: FastArgs) {
         search_elapsed.as_secs_f64(),
         total_elapsed.as_secs_f64()
     );
+    Ok(())
 }
 
 // ─── Content index building ──────────────────────────────────────────
@@ -1046,29 +1041,23 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
 
 // ─── Content index command ───────────────────────────────────────────
 
-fn cmd_content_index(args: ContentIndexArgs) {
+fn cmd_content_index(args: ContentIndexArgs) -> Result<(), SearchError> {
     let exts_str = args.ext.clone();
     let index = build_content_index(&args);
-    match save_content_index(&index) {
-        Ok(()) => {
-            let path = content_index_path_for(&args.dir, &exts_str);
-            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            eprintln!(
-                "Content index saved to {} ({:.1} MB)",
-                path.display(),
-                size as f64 / 1_048_576.0
-            );
-        }
-        Err(e) => {
-            eprintln!("Failed to save content index: {}", e);
-            std::process::exit(1);
-        }
-    }
+    save_content_index(&index)?;
+    let path = content_index_path_for(&args.dir, &exts_str);
+    let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    eprintln!(
+        "Content index saved to {} ({:.1} MB)",
+        path.display(),
+        size as f64 / 1_048_576.0
+    );
+    Ok(())
 }
 
 // ─── Grep command (search from content index) ────────────────────────
 
-fn cmd_grep(args: GrepArgs) {
+fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     let start = Instant::now();
     let exts_for_load = args.ext.clone().unwrap_or_default();
 
@@ -1099,9 +1088,7 @@ fn cmd_grep(args: GrepArgs) {
             match find_content_index_for_dir(&args.dir) {
                 Some(idx) => idx,
                 None => {
-                    eprintln!("No content index found for '{}'. Build one first:", args.dir);
-                    eprintln!("  search content-index -d {} -e cs", args.dir);
-                    std::process::exit(1);
+                    return Err(SearchError::IndexNotFound { dir: args.dir.clone() });
                 }
             }
         }
@@ -1117,8 +1104,7 @@ fn cmd_grep(args: GrepArgs) {
         let phrase_tokens = tokenize(&phrase_lower, 2);
 
         if phrase_tokens.is_empty() {
-            eprintln!("Phrase '{}' has no indexable tokens (min length 2)", phrase);
-            std::process::exit(1);
+            return Err(SearchError::EmptyPhrase { phrase: phrase.to_string() });
         }
 
         // Build a whitespace-flexible regex from phrase tokens: "async void" → "async\s+void"
@@ -1126,11 +1112,11 @@ fn cmd_grep(args: GrepArgs) {
             .map(|t| regex::escape(t))
             .collect::<Vec<_>>()
             .join(r"\s+");
-        let phrase_re = match Regex::new(&format!("(?i){}", phrase_regex_pattern)) {
+        let phrase_re_pat = format!("(?i){}", phrase_regex_pattern);
+        let phrase_re = match Regex::new(&phrase_re_pat) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("Failed to build phrase regex: {}", e);
-                std::process::exit(1);
+                return Err(SearchError::InvalidRegex { pattern: phrase_re_pat, source: e });
             }
         };
 
@@ -1264,7 +1250,7 @@ fn cmd_grep(args: GrepArgs) {
             "Index load: {:.3}s | Search+Verify: {:.6}s | Total: {:.3}s",
             load_elapsed.as_secs_f64(), search_elapsed.as_secs_f64(), total_elapsed.as_secs_f64()
         );
-        return;
+        return Ok(());
     }
 
     // ─── Normal token search ────────────────────────────────
@@ -1294,8 +1280,7 @@ fn cmd_grep(args: GrepArgs) {
                     expanded.extend(matching);
                 }
                 Err(e) => {
-                    eprintln!("Invalid regex '{}': {}", pat, e);
-                    std::process::exit(1);
+                    return Err(SearchError::InvalidRegex { pattern: pat.clone(), source: e });
                 }
             }
         }
@@ -1473,6 +1458,7 @@ fn cmd_grep(args: GrepArgs) {
         "Index load: {:.3}s | Search+Rank: {:.6}s | Total: {:.3}s",
         load_elapsed.as_secs_f64(), search_elapsed.as_secs_f64(), total_elapsed.as_secs_f64()
     );
+    Ok(())
 }
 
 // ─── Info command ────────────────────────────────────────────────────
@@ -1752,18 +1738,12 @@ fn cmd_serve(args: ServeArgs) {
     mcp::server::run_server(index, def_index, dir_str, exts_for_load);
 }
 
-fn cmd_def_index(args: definitions::DefIndexArgs) {
+fn cmd_def_index(args: definitions::DefIndexArgs) -> Result<(), SearchError> {
     let index = definitions::build_definition_index(&args);
-    match definitions::save_definition_index(&index) {
-        Ok(()) => {
-            eprintln!("[def-index] Done! {} definitions from {} files",
-                index.definitions.len(), index.files.len());
-        }
-        Err(e) => {
-            eprintln!("[def-index] Error saving index: {}", e);
-            std::process::exit(1);
-        }
-    }
+    definitions::save_definition_index(&index)?;
+    eprintln!("[def-index] Done! {} definitions from {} files",
+        index.definitions.len(), index.files.len());
+    Ok(())
 }
 
 // ─── Main ────────────────────────────────────────────────────────────
@@ -1771,15 +1751,20 @@ fn cmd_def_index(args: definitions::DefIndexArgs) {
 fn main() {
     let cli = Cli::parse();
 
-    match cli.command {
+    let result = match cli.command {
         Commands::Find(args) => cmd_find(args),
         Commands::Index(args) => cmd_index(args),
         Commands::Fast(args) => cmd_fast(args),
-        Commands::Info => cmd_info(),
+        Commands::Info => { cmd_info(); Ok(()) },
         Commands::ContentIndex(args) => cmd_content_index(args),
         Commands::Grep(args) => cmd_grep(args),
-        Commands::Serve(args) => cmd_serve(args),
+        Commands::Serve(args) => { cmd_serve(args); Ok(()) },
         Commands::DefIndex(args) => cmd_def_index(args),
+    };
+
+    if let Err(e) = result {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
     }
 }
 
