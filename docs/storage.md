@@ -76,7 +76,7 @@ Measured on a real codebase (from `search info` and build logs):
 | --------------- | --------------- | ----------------------- | --------- |
 | FileIndex       | 333,875 entries | Paths + metadata        | 47.8 MB   |
 | ContentIndex    | 48,599 files    | 33M tokens, 754K unique | 241.7 MB  |
-| DefinitionIndex | 53,799 files    | ~846K definitions + 2.4M call sites | ~324 MB   |
+| DefinitionIndex | ~48,600 files   | ~846K definitions + ~2.4M call sites | ~324 MB   |
 
 In-memory size is larger than on-disk due to HashMap overhead and struct alignment, but has not been separately measured.
 

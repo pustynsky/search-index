@@ -25,7 +25,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 | [Concurrency](docs/concurrency.md) | Thread model, lock strategy, watcher design |
 | [Trade-offs](docs/tradeoffs.md) | Design decisions with alternatives considered |
 | [Benchmarks](docs/benchmarks.md) | Performance data, scaling estimates, industry comparison |
-| [E2E Test Plan](docs/e2e-test-plan.md) | 24 end-to-end test cases with automation script |
+| [E2E Test Plan](docs/e2e-test-plan.md) | 30 end-to-end test cases (24 CLI + 6 MCP) with automation script |
 
 ## Features
 
@@ -38,8 +38,8 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Extension filtering** — limit search to specific file types
 - **MCP Server** — native Model Context Protocol server for AI agents (VS Code Roo, Copilot, Claude)
 - **Code definition index** — tree-sitter AST parsing of C# (classes, methods, interfaces, properties, enums) and SQL (stored procedures, tables) for structural code search
-- **Parallel parsing** — multi-threaded tree-sitter parsing across all CPU cores (~14s for 48K files)
-- **File watcher** — incremental index updates on file changes (~5ms per file for both content and definition indexes)
+- **Parallel parsing** — multi-threaded tree-sitter parsing across all CPU cores (~16-32s for 48K files, varies by CPU)
+- **File watcher** — incremental index updates on file changes (<1s per file for content + definition indexes)
 
 ## Performance
 
@@ -52,14 +52,13 @@ Measured on a real codebase (48,599 C# files, 754K unique tokens, 33M total). Se
 | `search grep -e cs -c` (total incl. index load) | 1.33s | **21×** |
 | ↳ search + TF-IDF rank only | 0.644ms | **42,700×** |
 
-In MCP server mode (index pre-loaded in RAM), all queries pay only the search+rank cost:
+In MCP server mode (index pre-loaded in RAM), all queries pay only the search+rank cost (times vary by hardware — see [full benchmarks](docs/benchmarks.md)):
 
-| Query Type | Search Time |
-|---|---|
-| Single token | 0.644ms |
-| Multi-term AND (2 terms) | 0.500ms |
-| Multi-term OR (3 terms) | 5.6ms |
-| Regex (`i.*cache` → 218 tokens) | 44ms |
+| Query Type | Machine 1 | Machine 2 |
+|---|---|---|
+| Single token | 0.6ms | 4.2ms |
+| Multi-term OR (3 terms) | 5.6ms | 11.4ms |
+| Regex (`i.*cache` → 218 tokens) | 44ms | 68ms |
 
 File name search on `C:\Windows` (333,875 entries):
 
@@ -362,9 +361,10 @@ Each definition includes: name, kind, file path, line range, full signature, mod
 
 | Metric | Value |
 | --- | --- |
-| 48,643 files | ~14s (24 threads) |
-| Definitions extracted | 846,167 |
-| Index size | ~230 MB |
+| ~48,600 files | ~16-32s (varies by CPU/threads) |
+| Definitions extracted | ~846,000 |
+| Call sites extracted | ~2.4M |
+| Index size | ~324 MB |
 
 **Options:**
 
@@ -415,11 +415,12 @@ search serve --dir C:\Projects --ext cs --watch --debounce-ms 300 --bulk-thresho
 | --------------------- | ---------------------------------------------------------------- |
 | `search_grep`         | Search content index with TF-IDF ranking, regex, phrase, AND/OR  |
 | `search_definitions`  | Search code definitions: classes, methods, interfaces, enums, SPs. Supports `containsLine` to find which method/class contains a given line number. (requires `--definitions`) |
-| `search_callers`      | **NEW** Find all callers of a method and build a recursive call tree (up or down). Combines grep index + AST definition index to trace call chains in a single request. Replaces 7+ sequential search_grep + read_file calls. (requires `--definitions`) |
+| `search_callers`      | Find all callers of a method and build a recursive call tree (up or down). Combines grep index + AST definition index to trace call chains in a single request. (requires `--definitions`) |
 | `search_find`         | Live filesystem walk (⚠️ slow for large dirs)                    |
 | `search_fast`         | Search pre-built file name index (instant)                       |
 | `search_info`         | Show all indexes with status, sizes, age                         |
-| `search_reindex`      | Force rebuild + reload in-memory index                           |
+| `search_reindex`      | Force rebuild + reload content index                             |
+| `search_reindex_definitions` | Force rebuild + reload definition index (requires `--definitions`) |
 
 **Setup in VS Code (step-by-step):**
 
@@ -456,13 +457,13 @@ search serve --dir C:\Projects --ext cs --watch --debounce-ms 300 --bulk-thresho
    }
    ```
 
-4. **Restart VS Code** — the MCP server starts automatically. Your AI agent (Copilot, Roo, Claude) now has access to `search_grep`, `search_definitions`, `search_callers`, `search_find`, `search_fast`, `search_info`, and `search_reindex` tools.
+4. **Restart VS Code** — the MCP server starts automatically. Your AI agent (Copilot, Roo, Claude) now has access to all 8 MCP tools: `search_grep`, `search_definitions`, `search_callers`, `search_find`, `search_fast`, `search_info`, `search_reindex`, and `search_reindex_definitions`.
 
 5. **Verify** — ask the AI: _"Use search_grep to find all files containing HttpClient"_
 
 **What the AI agent sees:**
 
-When the AI connects, it discovers 7 tools with full JSON schemas. Each tool has a detailed description explaining what it does, required/optional parameters, and examples. The AI can then call these tools with structured JSON to search your codebase.
+When the AI connects, it discovers 8 tools with full JSON schemas. Each tool has a detailed description explaining what it does, required/optional parameters, and examples. The AI can then call these tools with structured JSON to search your codebase.
 
 Example interaction:
 
@@ -640,7 +641,7 @@ This means:
 ## Testing
 
 ```bash
-# Run all tests (136 tests: 93 unit + 21 lib + 21 property + 1 doctest)
+# Run all tests (138 tests: 116 main + 21 lib + 1 doctest)
 cargo test
 
 # Run property-based tests only

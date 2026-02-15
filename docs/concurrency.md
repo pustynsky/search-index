@@ -67,7 +67,7 @@ For our workload (~49K files, 7s total build measured), the walk phase is parall
 
 ### Definition Index Build
 
-Definition parsing IS parallelized because tree-sitter parsing is CPU-intensive (16.1s for 54K files with 24 threads):
+Definition parsing IS parallelized because tree-sitter parsing is CPU-intensive (~16-32s for ~48K files depending on CPU):
 
 ```rust
 let chunks: Vec<Vec<(u32, String)>> = files.chunks(chunk_size).collect();
@@ -84,7 +84,7 @@ std::thread::scope(|s| {
         });
     }
 });
-// Merge: sequential, ~50ms for ~851K definitions + call sites
+// Merge: sequential, ~50ms for ~846K definitions + ~2.4M call sites
 ```
 
 **Key detail:** tree-sitter `Parser` is `!Send` (contains internal mutable state). Each thread creates its own parser instance. This is intentional — tree-sitter parsers reuse internal memory allocations across parse calls, making per-thread parsers more efficient than a shared pool.

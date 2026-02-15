@@ -2,16 +2,20 @@
 
 All numbers in this document are **measured**, not estimated. Criterion benchmarks use synthetic data for reproducibility; CLI benchmarks use a real production codebase.
 
-## Test Environment
+## Test Environments
 
-| Parameter | Value                                                |
-| --------- | ---------------------------------------------------- |
-| CPU       | Intel Core i7-12850HX (16 cores / 24 threads)        |
-| RAM       | 128 GB                                               |
-| Storage   | NVMe SSD                                             |
-| OS        | Windows 11                                           |
-| Rust      | 1.83+ (edition 2024)                                 |
-| Build     | `--release` with LTO (`opt-level = 3`, `lto = true`) |
+Benchmarks were measured on two machines to show hardware-dependent variability:
+
+| Parameter   | Machine 1 (primary)                                  | Machine 2 (Azure VM)                                       |
+| ----------- | ---------------------------------------------------- | ---------------------------------------------------------- |
+| **CPU**     | Intel Core i7-12850HX (16 cores / 24 threads)        | Intel Xeon Platinum 8370C @ 2.80GHz (8 cores / 16 threads) |
+| **RAM**     | 128 GB                                               | 64 GB                                                      |
+| **Storage** | NVMe SSD                                             | Azure VM — Msft Virtual Disk (NVMe-backed)                 |
+| **OS**      | Windows 11                                           | Windows 11 Enterprise                                      |
+| **Rust**    | 1.83+ (edition 2024)                                 | same                                                       |
+| **Build**   | `--release` with LTO (`opt-level = 3`, `lto = true`) | same                                                       |
+
+Unless noted, numbers are from Machine 1. Cross-machine comparisons are shown where available.
 
 ## Codebase Under Test
 
@@ -23,8 +27,8 @@ Real production C# codebase:
 | File types                   | C# (.cs)           |
 | Unique tokens                | 754,350            |
 | Total token occurrences      | 33,082,236         |
-| Definitions (AST)            | ~851,000           |
-| Files parsed for definitions | 53,799 (incl. SQL) |
+| Definitions (AST)            | ~846,000           |
+| Files parsed for definitions | 48,599–48,649 (varies by run) |
 
 ## Content Search: search vs ripgrep
 
@@ -38,7 +42,7 @@ Single-term search for `HttpClient` across the full codebase (1,065 matching fil
 | ↳ index load from disk                         | bincode deserialize 241.7 MB      | 0.689s    | —           |
 | ↳ search + TF-IDF rank                         | HashMap lookup + scoring          | 0.644ms   | **42,700×** |
 
-> **Note:** In MCP server mode, the index is loaded once at startup. All subsequent queries pay only the search+rank cost (~0.6ms), not the load cost.
+> **Note:** In MCP server mode, the index is loaded once at startup. All subsequent queries pay only the search+rank cost (0.6–4ms depending on hardware), not the load cost.
 
 ## CLI Search Latency (index pre-loaded from disk)
 
@@ -51,7 +55,7 @@ Measured via `search grep` on 48,599-file C# index (754K unique tokens):
 | Multi-term OR (`HttpClient,ILogger,Task`) | 5.628ms          | 13,349        | 151,750     |
 | Regex (`i.*cache` → 218 matching tokens)  | 44.24ms          | 1,419         | 4,237       |
 
-**Note:** These times include loading index from disk (~0.69s) + search. The "Search+Rank" column is the pure in-memory search time as reported by the tool's internal timers.
+**Note:** The "Search+Rank" column is the pure in-memory search time as reported by the tool's internal timers. The total CLI wall time also includes index load from disk (~0.69s).
 
 ## File Name Search
 
@@ -65,16 +69,26 @@ Index load: 0.055s, search: 0.036s.
 
 ## Index Build Times
 
-| Index Type                 | Files           | Threads | Build Time | Disk Size |
-| -------------------------- | --------------- | ------- | ---------- | --------- |
-| FileIndex (C:\Windows)     | 333,875 entries | 24      | ~3s        | 47.8 MB   |
-| ContentIndex (C# files)    | 48,599 files    | 24      | 7.0s       | 241.7 MB  |
-| DefinitionIndex (C# + SQL) | 53,799 files    | 24      | 16.1s      | ~324 MB   |
+Three distinct indexes, each built independently:
 
-**Why is def-index 2.3× slower than content-index?**
+| Index Type | What it stores | CLI command | MCP tool |
+|---|---|---|---|
+| **FileIndex** (.idx) | File paths, sizes, timestamps | `search index` | — |
+| **ContentIndex** (.cidx) | Inverted token→file map for TF-IDF search | `search content-index` | `search_reindex` |
+| **DefinitionIndex** (.didx) | AST definitions + call graph | `search def-index` | `search_reindex_definitions` |
+
+### Build times across machines
+
+| Index Type                 | Files           | Machine 1 (24 threads) | Machine 2 (16 threads) | Disk Size |
+| -------------------------- | --------------- | ---------------------- | ---------------------- | --------- |
+| FileIndex (C:\Windows)     | 333,875 entries | ~3s                    | —                      | 47.8 MB   |
+| ContentIndex (C# files)    | 48,599 files    | 7.0s                   | 15.9s                  | 241.7 MB  |
+| DefinitionIndex (C#)       | ~48,600 files   | 16.1s                  | 32.0s                  | ~324 MB   |
+
+**Why is def-index 2× slower than content-index?**
 
 - Content indexing: read file → split tokens (simple string operations)
-- Definition indexing: read file → parse full AST with tree-sitter → walk AST tree → extract definitions with modifiers, attributes, base types
+- Definition indexing: read file → parse full AST with tree-sitter → walk AST tree → extract definitions with modifiers, attributes, base types → extract call sites from method bodies
 
 ## Criterion Benchmarks (synthetic, reproducible)
 
@@ -135,7 +149,7 @@ Extrapolated for real 241.7 MB index: ~700ms deserialize (matches measured 689ms
 | ---------------------- | ------- | --------- | ---------------------------------------------------- |
 | ContentIndex           | 48,599  | 241.7 MB  | 0.689s                                               |
 | FileIndex (C:\Windows) | 333,875 | 47.8 MB   | 0.055s                                               |
-| DefinitionIndex        | 53,799  | ~324 MB   | ~1.5s (measured)                                     |
+| DefinitionIndex        | ~48,600 | ~324 MB   | ~1.5s (measured on Machine 2)                        |
 
 ## MCP Server Tool Performance (index in-memory)
 
@@ -175,8 +189,9 @@ Verified measurements from two machines:
 | ------------------------------- | ------- | ---------------------- | ----------- |
 | First query (cold)              | 27.5s   | 1.33s (incl. load)     | **21×**     |
 | Subsequent queries (MCP server) | 27.5s   | 0.6–4.2ms              | **6,500–45,000×** |
-| Index build (one-time)          | N/A     | 7.0s                   | —           |
-| Disk overhead                   | None    | 241.7 MB               | —           |
+| Index build (content, one-time) | N/A     | 7–16s                  | —           |
+| Index build (defs, one-time)    | N/A     | 16–32s                 | —           |
+| Disk overhead                   | None    | ~566 MB (content+defs) | —           |
 | RAM (server mode, estimated)    | None    | ~500 MB (not measured) | —           |
 
 ## Bottlenecks and Scaling Limits
