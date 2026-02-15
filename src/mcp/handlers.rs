@@ -1437,6 +1437,7 @@ fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     } else {
         let tree = build_callee_tree(
             &method_name,
+            class_filter.as_deref(),
             max_depth,
             0,
             &def_idx,
@@ -1450,7 +1451,7 @@ fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
         let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
         let search_elapsed = search_start.elapsed();
-        let output = json!({
+        let mut output = json!({
             "callTree": tree,
             "query": {
                 "method": method_name,
@@ -1464,6 +1465,12 @@ fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
             }
         });
+        if let Some(ref warning) = ambiguity_warning {
+            output["warning"] = json!(warning);
+        }
+        if let Some(ref cls) = class_filter {
+            output["query"]["class"] = json!(cls);
+        }
         ToolCallResult::success(serde_json::to_string(&output).unwrap())
     }
 }
@@ -1758,6 +1765,7 @@ fn build_caller_tree(
 /// Uses pre-computed call graph from AST analysis (method_calls in DefinitionIndex).
 fn build_callee_tree(
     method_name: &str,
+    class_filter: Option<&str>,
     max_depth: usize,
     current_depth: usize,
     def_idx: &DefinitionIndex,
@@ -1776,7 +1784,12 @@ fn build_callee_tree(
     }
 
     let method_lower = method_name.to_lowercase();
-    if !visited.insert(method_lower.clone()) {
+    let visit_key = if let Some(cls) = class_filter {
+        format!("{}.{}", cls.to_lowercase(), method_lower)
+    } else {
+        method_lower.clone()
+    };
+    if !visited.insert(visit_key) {
         return Vec::new();
     }
 
@@ -1787,7 +1800,21 @@ fn build_callee_tree(
             indices.iter()
                 .filter(|&&di| {
                     def_idx.definitions.get(di as usize)
-                        .is_some_and(|d| d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor)
+                        .is_some_and(|d| {
+                            let kind_ok = d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor;
+                            if !kind_ok { return false; }
+
+                            // Apply class filter: only match methods whose parent matches
+                            if let Some(cls) = class_filter {
+                                let cls_lower = cls.to_lowercase();
+                                match &d.parent {
+                                    Some(parent) => parent.to_lowercase() == cls_lower,
+                                    None => false,
+                                }
+                            } else {
+                                true
+                            }
+                        })
                 })
                 .copied()
                 .collect()
@@ -1854,6 +1881,7 @@ fn build_callee_tree(
 
                 let sub_callees = build_callee_tree(
                     &callee_def.name,
+                    None, // don't propagate class filter to sub-callees
                     max_depth,
                     current_depth + 1,
                     def_idx,
@@ -2578,6 +2606,191 @@ mod tests {
         assert!(resolved_iface.iter().any(|&di| {
             def_index.definitions[di as usize].parent.as_deref() == Some("ServiceA")
         }), "Should resolve IService.Execute to ServiceA.Execute");
+    }
+
+    // ─── search_callers "down" direction + class filter tests ───
+
+    #[test]
+    fn test_search_callers_down_class_filter() {
+        use crate::definitions::*;
+        use std::path::PathBuf;
+
+        // Two classes with same method name "SearchInternalAsync",
+        // each calling different methods.
+        let definitions = vec![
+            // Class: IndexSearchService (file 0)
+            DefinitionEntry {
+                file_id: 0, name: "IndexSearchService".to_string(),
+                kind: DefinitionKind::Class, line_start: 1, line_end: 900,
+                parent: None, signature: None, modifiers: vec![], attributes: vec![],
+                base_types: vec![],
+            },
+            // di=1
+            DefinitionEntry {
+                file_id: 0, name: "SearchInternalAsync".to_string(),
+                kind: DefinitionKind::Method, line_start: 766, line_end: 833,
+                parent: Some("IndexSearchService".to_string()), signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            // di=2: callee of IndexSearchService.SearchInternalAsync
+            DefinitionEntry {
+                file_id: 0, name: "ShouldIssueVectorSearch".to_string(),
+                kind: DefinitionKind::Method, line_start: 200, line_end: 220,
+                parent: Some("IndexSearchService".to_string()), signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            // Class: IndexedSearchQueryExecuter (file 1)
+            DefinitionEntry {
+                file_id: 1, name: "IndexedSearchQueryExecuter".to_string(),
+                kind: DefinitionKind::Class, line_start: 1, line_end: 400,
+                parent: None, signature: None, modifiers: vec![], attributes: vec![],
+                base_types: vec![],
+            },
+            // di=4
+            DefinitionEntry {
+                file_id: 1, name: "SearchInternalAsync".to_string(),
+                kind: DefinitionKind::Method, line_start: 328, line_end: 341,
+                parent: Some("IndexedSearchQueryExecuter".to_string()), signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            // di=5: callee of IndexedSearchQueryExecuter.SearchInternalAsync
+            DefinitionEntry {
+                file_id: 1, name: "TraceInformation".to_string(),
+                kind: DefinitionKind::Method, line_start: 50, line_end: 55,
+                parent: Some("IndexedSearchQueryExecuter".to_string()), signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+        ];
+
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind.clone()).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+        }
+
+        // method_calls: map method def_idx -> vec of CallSite
+        let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+
+        // IndexSearchService.SearchInternalAsync (di=1) calls ShouldIssueVectorSearch
+        method_calls.insert(1, vec![
+            CallSite { method_name: "ShouldIssueVectorSearch".to_string(), receiver_type: None, line: 780 },
+        ]);
+        // IndexedSearchQueryExecuter.SearchInternalAsync (di=4) calls TraceInformation
+        method_calls.insert(4, vec![
+            CallSite { method_name: "TraceInformation".to_string(), receiver_type: None, line: 333 },
+        ]);
+
+        let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+        path_to_id.insert(PathBuf::from("C:\\src\\IndexSearchService.cs"), 0);
+        path_to_id.insert(PathBuf::from("C:\\src\\IndexedSearchQueryExecuter.cs"), 1);
+
+        let def_index = DefinitionIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: vec![
+                "C:\\src\\IndexSearchService.cs".to_string(),
+                "C:\\src\\IndexedSearchQueryExecuter.cs".to_string(),
+            ],
+            definitions,
+            name_index,
+            kind_index,
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index,
+            path_to_id,
+            method_calls,
+        };
+
+        let content_index = ContentIndex {
+            root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+            files: vec![
+                "C:\\src\\IndexSearchService.cs".to_string(),
+                "C:\\src\\IndexedSearchQueryExecuter.cs".to_string(),
+            ],
+            index: HashMap::new(), total_tokens: 0,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![100, 100],
+            forward: None, path_to_id: None,
+        };
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(content_index)),
+            def_index: Some(Arc::new(RwLock::new(def_index))),
+            server_dir: ".".to_string(),
+            server_ext: "cs".to_string(),
+        };
+
+        // Test 1: direction=down with class=IndexSearchService
+        // Should find ShouldIssueVectorSearch, NOT TraceInformation
+        let result = dispatch_tool(&ctx, "search_callers", &json!({
+            "method": "SearchInternalAsync",
+            "class": "IndexSearchService",
+            "direction": "down",
+            "depth": 1
+        }));
+        assert!(!result.is_error, "Should succeed");
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let tree = output["callTree"].as_array().unwrap();
+        assert!(!tree.is_empty(), "Should have callees for IndexSearchService.SearchInternalAsync");
+
+        let callee_names: Vec<&str> = tree.iter()
+            .filter_map(|n| n["method"].as_str())
+            .collect();
+        assert!(callee_names.contains(&"ShouldIssueVectorSearch"),
+            "Should contain ShouldIssueVectorSearch, got: {:?}", callee_names);
+        assert!(!callee_names.contains(&"TraceInformation"),
+            "Should NOT contain TraceInformation from IndexedSearchQueryExecuter, got: {:?}", callee_names);
+
+        // Verify class appears in query output
+        assert_eq!(output["query"]["class"], "IndexSearchService");
+
+        // Test 2: direction=down with class=IndexedSearchQueryExecuter
+        // Should find TraceInformation, NOT ShouldIssueVectorSearch
+        let result2 = dispatch_tool(&ctx, "search_callers", &json!({
+            "method": "SearchInternalAsync",
+            "class": "IndexedSearchQueryExecuter",
+            "direction": "down",
+            "depth": 1
+        }));
+        assert!(!result2.is_error);
+        let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+        let tree2 = output2["callTree"].as_array().unwrap();
+
+        let callee_names2: Vec<&str> = tree2.iter()
+            .filter_map(|n| n["method"].as_str())
+            .collect();
+        assert!(callee_names2.contains(&"TraceInformation"),
+            "Should contain TraceInformation, got: {:?}", callee_names2);
+        assert!(!callee_names2.contains(&"ShouldIssueVectorSearch"),
+            "Should NOT contain ShouldIssueVectorSearch, got: {:?}", callee_names2);
+
+        // Test 3: direction=down WITHOUT class filter → should get callees from BOTH classes
+        let result3 = dispatch_tool(&ctx, "search_callers", &json!({
+            "method": "SearchInternalAsync",
+            "direction": "down",
+            "depth": 1
+        }));
+        assert!(!result3.is_error);
+        let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
+        let tree3 = output3["callTree"].as_array().unwrap();
+
+        let callee_names3: Vec<&str> = tree3.iter()
+            .filter_map(|n| n["method"].as_str())
+            .collect();
+        assert!(callee_names3.contains(&"ShouldIssueVectorSearch"),
+            "Without class filter, should find ShouldIssueVectorSearch, got: {:?}", callee_names3);
+        assert!(callee_names3.contains(&"TraceInformation"),
+            "Without class filter, should find TraceInformation, got: {:?}", callee_names3);
+
+        // Verify ambiguity warning is present when no class filter is specified
+        assert!(output3.get("warning").is_some(),
+            "Should have ambiguity warning when no class filter and multiple classes have same method");
     }
 
     // Note: is_csharp_noise_token tests removed — function was replaced by
