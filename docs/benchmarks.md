@@ -7,7 +7,7 @@ All numbers in this document are **measured**, not estimated. Criterion benchmar
 | Parameter | Value                                                |
 | --------- | ---------------------------------------------------- |
 | CPU       | 24 logical cores                                     |
-| RAM       | 32 GB                                                |
+| RAM       | 128 GB                                               |
 | Storage   | NVMe SSD                                             |
 | OS        | Windows 11                                           |
 | Rust      | 1.83+ (edition 2024)                                 |
