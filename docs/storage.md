@@ -76,7 +76,7 @@ Measured on a real codebase (from `search info` and build logs):
 | --------------- | --------------- | ----------------------- | --------- |
 | FileIndex       | 333,875 entries | Paths + metadata        | 47.8 MB   |
 | ContentIndex    | 48,599 files    | 33M tokens, 754K unique | 241.7 MB  |
-| DefinitionIndex | 53,799 files    | 846K definitions        | 231.8 MB  |
+| DefinitionIndex | 53,799 files    | ~851K definitions + call graph | 231.8 MB  |
 
 In-memory size is larger than on-disk due to HashMap overhead and struct alignment, but has not been separately measured.
 
@@ -139,6 +139,7 @@ struct DefinitionIndex {
     base_type_index: HashMap<String, Vec<u32>>,        // base type → def indices
     file_index: HashMap<u32, Vec<u32>>,                // file_id → def indices
     path_to_id: HashMap<PathBuf, u32>,                 // path → file_id
+    method_calls: HashMap<u32, Vec<CallSite>>,         // def_idx → call sites (for search_callers "down")
 }
 
 struct DefinitionEntry {
@@ -152,6 +153,12 @@ struct DefinitionEntry {
     modifiers: Vec<String>,       // public, static, async, etc.
     attributes: Vec<String>,      // C# attributes
     base_types: Vec<String>,      // Implemented interfaces, base class
+}
+
+struct CallSite {
+    method_name: String,          // Name of the called method
+    receiver_type: Option<String>, // Resolved type of receiver (e.g., "IUserService")
+    line: u32,                    // Line number of the call site
 }
 ```
 
@@ -242,6 +249,8 @@ This scan reads and deserializes each `.cidx` file header — slow if many index
 ```
 
 **Note:** Removed definitions leave "holes" in the `definitions` Vec (indices are not reused). This is acceptable because the Vec is only accessed via the secondary indexes, and the memory overhead of a few hundred empty slots is negligible compared to the total index size.
+
+The `method_calls` entries for removed definitions are also cleaned up during `remove_file_definitions`.
 
 ## Disk I/O Patterns
 
