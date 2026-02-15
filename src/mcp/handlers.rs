@@ -11,7 +11,7 @@ use crate::{
     build_content_index, clean_path, cmd_info_json,
     save_content_index, tokenize, ContentIndex, ContentIndexArgs,
 };
-use crate::definitions::{DefinitionEntry, DefinitionIndex, DefinitionKind};
+use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionKind};
 
 /// Return all tool definitions for tools/list
 pub fn tool_definitions() -> Vec<ToolDefinition> {
@@ -1439,7 +1439,6 @@ fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             &method_name,
             max_depth,
             0,
-            &content_index,
             &def_idx,
             &ext_filter,
             &exclude_dir,
@@ -1755,53 +1754,12 @@ fn build_caller_tree(
     callers
 }
 
-/// Check if a token is a C# keyword, common type, or noise that should not be
-/// treated as a method call when building callee trees.
-fn is_csharp_noise_token(token: &str) -> bool {
-    matches!(token,
-        // C# keywords
-        "return" | "async" | "await" | "var" | "null" | "true" | "false"
-        | "if" | "else" | "for" | "foreach" | "while" | "do" | "switch"
-        | "case" | "break" | "continue" | "throw" | "try" | "catch" | "finally"
-        | "using" | "namespace" | "class" | "struct" | "interface" | "enum"
-        | "public" | "private" | "protected" | "internal" | "static" | "readonly"
-        | "const" | "sealed" | "abstract" | "virtual" | "override" | "new"
-        | "this" | "base" | "typeof" | "sizeof" | "nameof" | "default"
-        | "void" | "object" | "string" | "bool" | "int" | "long" | "double"
-        | "float" | "decimal" | "byte" | "short" | "uint" | "ulong" | "char"
-        | "where" | "select" | "from" | "orderby" | "group" | "into" | "join"
-        | "let" | "ascending" | "descending" | "equals" | "value" | "get" | "set"
-        | "add" | "remove" | "partial" | "yield" | "lock" | "fixed" | "checked"
-        | "unchecked" | "unsafe" | "volatile" | "extern" | "ref" | "out" | "in"
-        | "is" | "as" | "params" | "delegate" | "event" | "implicit" | "explicit"
-        | "operator" | "stackalloc" | "when" | "with" | "record" | "init"
-        // Common .NET types and patterns (lowercased tokens)
-        | "task" | "list" | "dictionary" | "hashset" | "ienumerable"
-        | "ilist" | "icollection" | "ireadonlylist" | "ireadonlycollection"
-        | "cancellationtoken" | "exception" | "argumentexception"
-        | "argumentnullexception" | "invalidoperationexception"
-        | "notimplementedexception" | "notsupportedexception"
-        | "keyvaluepair" | "nullable" | "func" | "action" | "predicate"
-        | "tuple" | "valuetuple" | "guid" | "datetime" | "timespan" | "uri"
-        | "type" | "array" | "span" | "memory" | "readonlyspan" | "readonlymemory"
-        // Common test/assertion patterns
-        | "assert" | "verify" | "mock" | "setup" | "returns" | "throws"
-        | "should" | "expect" | "actual" | "expected" | "result"
-        // Common noise in method bodies
-        | "empty" | "count" | "length" | "first" | "last" | "single"
-        | "any" | "all" | "contains" | "tostring" | "toarray" | "tolist"
-        | "tolower" | "toupper" | "trim" | "split" | "format" | "concat"
-        | "gethashcode" | "gettype" | "dispose" | "close"
-        | "configureawait" | "completedtask" | "fromresult" | "whenall"
-    )
-}
-
 /// Build a callee tree (direction = "down"): find what methods are called by this method.
+/// Uses pre-computed call graph from AST analysis (method_calls in DefinitionIndex).
 fn build_callee_tree(
     method_name: &str,
     max_depth: usize,
     current_depth: usize,
-    content_index: &ContentIndex,
     def_idx: &DefinitionIndex,
     ext_filter: &str,
     exclude_dir: &[String],
@@ -1822,142 +1780,186 @@ fn build_callee_tree(
         return Vec::new();
     }
 
-    let method_defs: Vec<&DefinitionEntry> = def_idx.name_index
+    // Find all definitions of this method (with their def_idx indices)
+    let method_def_indices: Vec<u32> = def_idx.name_index
         .get(&method_lower)
         .map(|indices| {
             indices.iter()
-                .filter_map(|&di| def_idx.definitions.get(di as usize))
-                .filter(|d| d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor)
+                .filter(|&&di| {
+                    def_idx.definitions.get(di as usize)
+                        .is_some_and(|d| d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor)
+                })
+                .copied()
                 .collect()
         })
         .unwrap_or_default();
 
-    if method_defs.is_empty() {
+    if method_def_indices.is_empty() {
         return Vec::new();
     }
 
     let mut callees: Vec<Value> = Vec::new();
     let mut seen_callees: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for method_def in &method_defs {
+    for &method_di in &method_def_indices {
         if callees.len() >= limits.max_callers_per_level { break; }
         if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes { break; }
 
-        let file_path = match def_idx.files.get(method_def.file_id as usize) {
-            Some(p) => p,
+        // Get pre-computed call sites for this method
+        let call_sites = match def_idx.method_calls.get(&method_di) {
+            Some(calls) => calls,
             None => continue,
         };
 
-        // Find the content_index file_id for this file (different numbering from def_idx)
-        let content_file_id: Option<u32> = content_index.files.iter()
-            .position(|f| f == file_path)
-            .map(|i| i as u32);
-
-        let content = match std::fs::read_to_string(file_path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let lines: Vec<&str> = content.lines().collect();
-        let start = (method_def.line_start as usize).saturating_sub(1);
-        let end = (method_def.line_end as usize).min(lines.len());
-
-        for line_idx in start..end {
+        for call in call_sites {
             if callees.len() >= limits.max_callers_per_level { break; }
             if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes { break; }
 
-            let line = lines[line_idx];
-            let line_tokens = tokenize(line, 2);
-            for token in &line_tokens {
-                if token == &method_lower { continue; }
+            // Resolve this call site to actual definitions
+            let resolved = resolve_call_site(call, def_idx);
 
-                // Skip C# keywords and common types that are never method calls
-                if is_csharp_noise_token(token) { continue; }
+            for callee_di in resolved {
+                if callees.len() >= limits.max_callers_per_level { break; }
+                if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes { break; }
 
-                if let Some(name_indices) = def_idx.name_index.get(token.as_str()) {
-                    // Skip methods with many definitions (Trace, Log, etc.)
-                    // These are ubiquitous and produce noise. Only include
-                    // methods that have a small number of definitions (unique enough).
-                    if name_indices.len() > 5 {
-                        continue;
-                    }
+                let callee_def = match def_idx.definitions.get(callee_di as usize) {
+                    Some(d) => d,
+                    None => continue,
+                };
 
-                    for &di in name_indices {
-                        if let Some(callee_def) = def_idx.definitions.get(di as usize) {
-                            if callee_def.kind != DefinitionKind::Method && callee_def.kind != DefinitionKind::Constructor {
-                                continue;
-                            }
+                let callee_file = def_idx.files.get(callee_def.file_id as usize)
+                    .map(|s| s.as_str()).unwrap_or("");
 
-                            // Only include callees whose parent class is
-                            // referenced in the same file (via the content index).
-                            // Use content_file_id (not method_def.file_id which is def_idx numbering)
-                            if let (Some(parent), Some(cfid)) = (&callee_def.parent, content_file_id) {
-                                let parent_lower = parent.to_lowercase();
-                                let has_ref = content_index.index.get(&parent_lower)
-                                    .is_some_and(|p| p.iter().any(|pp| pp.file_id == cfid));
-                                if !has_ref {
-                                    let iface = format!("i{}", parent_lower);
-                                    let has_iface = content_index.index.get(&iface)
-                                        .is_some_and(|p| p.iter().any(|pp| pp.file_id == cfid));
-                                    if !has_iface { continue; }
-                                }
-                            }
+                // Apply extension filter
+                let matches_ext = Path::new(callee_file)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case(ext_filter));
+                if !matches_ext { continue; }
 
-                            let callee_file = def_idx.files.get(callee_def.file_id as usize)
-                                .map(|s| s.as_str()).unwrap_or("");
+                // Apply directory/file exclusions
+                let path_lower = callee_file.to_lowercase();
+                if exclude_dir.iter().any(|excl| path_lower.contains(&excl.to_lowercase())) { continue; }
+                if exclude_file.iter().any(|excl| path_lower.contains(&excl.to_lowercase())) { continue; }
 
-                            let matches_ext = Path::new(callee_file)
-                                .extension()
-                                .and_then(|e| e.to_str())
-                                .is_some_and(|e| e.eq_ignore_ascii_case(ext_filter));
-                            if !matches_ext { continue; }
+                let callee_key = format!("{}.{}",
+                    callee_def.parent.as_deref().unwrap_or("?"),
+                    &callee_def.name
+                );
 
-                            let callee_key = format!("{}.{}",
-                                callee_def.parent.as_deref().unwrap_or("?"),
-                                &callee_def.name
-                            );
+                if seen_callees.contains(&callee_key) { continue; }
+                seen_callees.insert(callee_key.clone());
 
-                            if seen_callees.contains(&callee_key) { continue; }
-                            seen_callees.insert(callee_key.clone());
+                node_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                            node_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let sub_callees = build_callee_tree(
+                    &callee_def.name,
+                    max_depth,
+                    current_depth + 1,
+                    def_idx,
+                    ext_filter,
+                    exclude_dir,
+                    exclude_file,
+                    visited,
+                    limits,
+                    node_count,
+                );
 
-                            let sub_callees = build_callee_tree(
-                                &callee_def.name,
-                                max_depth,
-                                current_depth + 1,
-                                content_index,
-                                def_idx,
-                                ext_filter,
-                                exclude_dir,
-                                exclude_file,
-                                visited,
-                                limits,
-                                node_count,
-                            );
-
-                            let mut node = json!({
-                                "method": callee_def.name,
-                                "line": callee_def.line_start,
-                            });
-                            if let Some(ref parent) = callee_def.parent {
-                                node["class"] = json!(parent);
-                            }
-                            if let Some(fname) = Path::new(callee_file).file_name().and_then(|f| f.to_str()) {
-                                node["file"] = json!(fname);
-                            }
-                            if !sub_callees.is_empty() {
-                                node["callees"] = json!(sub_callees);
-                            }
-                            callees.push(node);
-                        }
-                    }
+                let mut node = json!({
+                    "method": callee_def.name,
+                    "line": callee_def.line_start,
+                    "callSiteLine": call.line,
+                });
+                if let Some(ref parent) = callee_def.parent {
+                    node["class"] = json!(parent);
                 }
+                if let Some(fname) = Path::new(callee_file).file_name().and_then(|f| f.to_str()) {
+                    node["file"] = json!(fname);
+                }
+                if let Some(ref recv) = call.receiver_type {
+                    node["receiverType"] = json!(recv);
+                }
+                if !sub_callees.is_empty() {
+                    node["callees"] = json!(sub_callees);
+                }
+                callees.push(node);
             }
         }
     }
 
     callees
+}
+
+/// Resolve a CallSite to actual definition indices in the definition index.
+/// Uses receiver_type to disambiguate when available, and falls back to
+/// name-only matching when receiver is unknown.
+fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex) -> Vec<u32> {
+    let name_lower = call.method_name.to_lowercase();
+    let candidates = match def_idx.name_index.get(&name_lower) {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+
+    let mut resolved: Vec<u32> = Vec::new();
+
+    for &di in candidates {
+        let def = match def_idx.definitions.get(di as usize) {
+            Some(d) => d,
+            None => continue,
+        };
+
+        // Only match methods and constructors
+        if def.kind != DefinitionKind::Method && def.kind != DefinitionKind::Constructor {
+            continue;
+        }
+
+        if let Some(ref recv_type) = call.receiver_type {
+            // We have receiver type info — use it to disambiguate
+            let recv_lower = recv_type.to_lowercase();
+
+            if let Some(ref parent) = def.parent {
+                let parent_lower = parent.to_lowercase();
+
+                // Direct match: parent class name == receiver type
+                if parent_lower == recv_lower {
+                    resolved.push(di);
+                    continue;
+                }
+
+                // Interface match: receiver is an interface, parent implements it
+                // Check if parent's class definition has recv_type in base_types
+                if let Some(parent_defs) = def_idx.name_index.get(&parent_lower) {
+                    for &pi in parent_defs {
+                        if let Some(parent_def) = def_idx.definitions.get(pi as usize) {
+                            if matches!(parent_def.kind,
+                                DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record)
+                            {
+                                let implements = parent_def.base_types.iter()
+                                    .any(|bt| {
+                                        let bt_base = bt.split('<').next().unwrap_or(bt);
+                                        bt_base.eq_ignore_ascii_case(&recv_lower)
+                                    });
+                                if implements {
+                                    resolved.push(di);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Also check: is the receiver type itself a class/struct that this method belongs to?
+                // (for cases where receiver_type is a concrete class, not interface)
+                // This is already handled by the direct match above.
+            }
+        } else {
+            // No receiver type — accept any matching method/constructor
+            // (this handles simple calls like Foo() within the same class)
+            resolved.push(di);
+        }
+    }
+
+    resolved
 }
 
 #[cfg(test)]
@@ -2246,6 +2248,7 @@ mod tests {
             base_type_index: HashMap::new(),
             file_index,
             path_to_id,
+            method_calls: HashMap::new(),
         };
 
         HandlerContext {
@@ -2468,48 +2471,115 @@ mod tests {
         let props = defs.input_schema["properties"].as_object().unwrap();
         assert!(props.contains_key("containsLine"), "Should have containsLine parameter");
     }
-    // ─── noise token filter tests ───
+    // ─── resolve_call_site tests ───
 
     #[test]
-    fn test_csharp_noise_filter_keywords() {
-        assert!(is_csharp_noise_token("return"));
-        assert!(is_csharp_noise_token("async"));
-        assert!(is_csharp_noise_token("await"));
-        assert!(is_csharp_noise_token("var"));
-        assert!(is_csharp_noise_token("null"));
-        assert!(is_csharp_noise_token("true"));
-        assert!(is_csharp_noise_token("false"));
-        assert!(is_csharp_noise_token("if"));
-        assert!(is_csharp_noise_token("public"));
-        assert!(is_csharp_noise_token("private"));
-        assert!(is_csharp_noise_token("static"));
+    fn test_resolve_call_site_with_class_scope() {
+        use crate::definitions::*;
+
+        // Build a definition index with two classes, each having a method with the same name
+        let definitions = vec![
+            // Class A
+            DefinitionEntry {
+                file_id: 0, name: "ServiceA".to_string(),
+                kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+                parent: None, signature: None, modifiers: vec![], attributes: vec![],
+                base_types: vec!["IService".to_string()],
+            },
+            DefinitionEntry {
+                file_id: 0, name: "Execute".to_string(),
+                kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+                parent: Some("ServiceA".to_string()), signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            // Class B
+            DefinitionEntry {
+                file_id: 1, name: "ServiceB".to_string(),
+                kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+                parent: None, signature: None, modifiers: vec![], attributes: vec![],
+                base_types: vec![],
+            },
+            DefinitionEntry {
+                file_id: 1, name: "Execute".to_string(),
+                kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+                parent: Some("ServiceB".to_string()), signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+        ];
+
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut base_type_index: HashMap<String, Vec<u32>> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind.clone()).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+            for bt in &def.base_types {
+                base_type_index.entry(bt.to_lowercase()).or_default().push(idx);
+            }
+        }
+
+        let def_index = DefinitionIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: vec!["a.cs".to_string(), "b.cs".to_string()],
+            definitions,
+            name_index,
+            kind_index,
+            attribute_index: HashMap::new(),
+            base_type_index,
+            file_index,
+            path_to_id: HashMap::new(),
+            method_calls: HashMap::new(),
+        };
+
+        // Case 1: Call with receiver_type = "ServiceA" should resolve to ServiceA.Execute only
+        let call_a = CallSite {
+            method_name: "Execute".to_string(),
+            receiver_type: Some("ServiceA".to_string()),
+            line: 5,
+        };
+        let resolved_a = resolve_call_site(&call_a, &def_index);
+        assert_eq!(resolved_a.len(), 1, "Should resolve to exactly one definition for ServiceA.Execute");
+        assert_eq!(def_index.definitions[resolved_a[0] as usize].parent.as_deref(), Some("ServiceA"));
+
+        // Case 2: Call with receiver_type = "ServiceB" should resolve to ServiceB.Execute only
+        let call_b = CallSite {
+            method_name: "Execute".to_string(),
+            receiver_type: Some("ServiceB".to_string()),
+            line: 10,
+        };
+        let resolved_b = resolve_call_site(&call_b, &def_index);
+        assert_eq!(resolved_b.len(), 1, "Should resolve to exactly one definition for ServiceB.Execute");
+        assert_eq!(def_index.definitions[resolved_b[0] as usize].parent.as_deref(), Some("ServiceB"));
+
+        // Case 3: Call with no receiver_type should resolve to BOTH Execute methods
+        let call_no_recv = CallSite {
+            method_name: "Execute".to_string(),
+            receiver_type: None,
+            line: 15,
+        };
+        let resolved_none = resolve_call_site(&call_no_recv, &def_index);
+        assert_eq!(resolved_none.len(), 2, "No receiver should match all Execute methods");
+
+        // Case 4: Call with receiver_type = "IService" (interface) should resolve to
+        // ServiceA.Execute because ServiceA implements IService
+        let call_iface = CallSite {
+            method_name: "Execute".to_string(),
+            receiver_type: Some("IService".to_string()),
+            line: 20,
+        };
+        let resolved_iface = resolve_call_site(&call_iface, &def_index);
+        assert!(!resolved_iface.is_empty(), "Interface receiver should resolve to implementing class method");
+        assert!(resolved_iface.iter().any(|&di| {
+            def_index.definitions[di as usize].parent.as_deref() == Some("ServiceA")
+        }), "Should resolve IService.Execute to ServiceA.Execute");
     }
 
-    #[test]
-    fn test_csharp_noise_filter_types() {
-        assert!(is_csharp_noise_token("task"));
-        assert!(is_csharp_noise_token("cancellationtoken"));
-        assert!(is_csharp_noise_token("string"));
-        assert!(is_csharp_noise_token("list"));
-        assert!(is_csharp_noise_token("exception"));
-        assert!(is_csharp_noise_token("guid"));
-    }
-
-    #[test]
-    fn test_csharp_noise_filter_test_patterns() {
-        assert!(is_csharp_noise_token("assert"));
-        assert!(is_csharp_noise_token("verify"));
-        assert!(is_csharp_noise_token("mock"));
-        assert!(is_csharp_noise_token("result"));
-    }
-
-    #[test]
-    fn test_csharp_noise_filter_allows_real_methods() {
-        assert!(!is_csharp_noise_token("executequeryasync"));
-        assert!(!is_csharp_noise_token("runquerybatchasync"));
-        assert!(!is_csharp_noise_token("processbatchqueryasync"));
-        assert!(!is_csharp_noise_token("syncresourcesinternalasync"));
-        assert!(!is_csharp_noise_token("queryservice"));
-        assert!(!is_csharp_noise_token("httpclient"));
-    }
+    // Note: is_csharp_noise_token tests removed — function was replaced by
+    // AST-based call extraction which doesn't need noise filtering.
 }

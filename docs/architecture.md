@@ -103,7 +103,7 @@ Inverted view (actual storage):
 
 ### 3. Definition Index (AST Index)
 
-Structural code search using tree-sitter AST parsing. Five cross-referencing indexes over the same `Vec<DefinitionEntry>`:
+Structural code search using tree-sitter AST parsing. Six cross-referencing indexes over the same `Vec<DefinitionEntry>`, plus a pre-computed call graph:
 
 ```mermaid
 graph LR
@@ -114,6 +114,7 @@ graph LR
         AI["attribute_index: HashMap&lt;String, Vec&lt;u32&gt;&gt;"]
         BTI["base_type_index: HashMap&lt;String, Vec&lt;u32&gt;&gt;"]
         FII["file_index: HashMap&lt;u32, Vec&lt;u32&gt;&gt;"]
+        MC["method_calls: HashMap&lt;u32, Vec&lt;CallSite&gt;&gt;"]
     end
 
     NI -->|"index into"| DEFS
@@ -121,9 +122,14 @@ graph LR
     AI -->|"index into"| DEFS
     BTI -->|"index into"| DEFS
     FII -->|"index into"| DEFS
+    MC -->|"def_idx →"| DEFS
 ```
 
 Each `DefinitionEntry` contains: `name`, `kind`, `file_id`, `line_start..line_end`, `parent` (containing class), `signature`, `modifiers`, `attributes`, `base_types`.
+
+Each `CallSite` contains: `method_name`, `receiver_type` (resolved via field/constructor type declarations, DI-aware), `line`.
+
+The `method_calls` map stores pre-computed call sites for each method/constructor, extracted during `def-index` build by walking AST `invocation_expression` and `member_access_expression` nodes. This enables instant callee lookups (direction "down") without runtime file I/O.
 
 The multi-index design enables compound queries: "find all public async methods in classes that implement `IQueryHandler` and have `[ServiceProvider]` attribute" — resolved via set intersection of index lookups.
 
@@ -234,6 +240,7 @@ Multi-term: scores are summed across matching terms. Files matching more terms r
 
 ### Call Tree Pipeline (search_callers)
 
+**Direction "up" (find callers):**
 ```mermaid
 graph TB
     A[Method Name] -->|grep index lookup| B[Files containing token]
@@ -243,7 +250,19 @@ graph TB
     D -->|collect| E[Hierarchical call tree]
 ```
 
-This replaces 7+ sequential grep + read_file calls with a single request by combining the content index (where does this token appear?) with the definition index (which method spans this line range?).
+**Direction "down" (find callees):**
+```mermaid
+graph TB
+    A[Method Name] -->|definition index| B[Find method definition]
+    B -->|method_calls lookup| C[Pre-computed CallSites]
+    C -->|resolve_call_site| D[Match to method definitions]
+    D -->|recurse| A
+    D -->|collect| E[Hierarchical callee tree]
+```
+
+Direction "up" combines the content index (where does this token appear?) with the definition index (which method spans this line range?). Supports `class` parameter for disambiguation and `resolveInterfaces` for DI-aware tracing.
+
+Direction "down" uses the pre-computed call graph — zero runtime file I/O. Call sites are extracted during `def-index` build with field type resolution (DI constructor parameter types → field types → receiver types).
 
 ## Module Structure
 
