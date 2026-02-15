@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 // ─── Core public types ───────────────────────────────────────────────
 
 /// Strip the `\\?\` extended-length path prefix that Windows canonicalize adds.
+#[must_use]
 pub fn clean_path(p: &str) -> String {
     p.strip_prefix(r"\\?\").unwrap_or(p).to_string()
 }
@@ -116,6 +117,7 @@ impl ContentIndex {
 /// assert!(tokens.contains(&"httpclient".to_string()));
 /// assert!(tokens.contains(&"_client".to_string()));
 /// ```
+#[must_use]
 pub fn tokenize(line: &str, min_len: usize) -> Vec<String> {
     line.split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|s| s.len() >= min_len)

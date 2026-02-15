@@ -468,15 +468,12 @@ pub fn find_content_index_for_dir(dir: &str) -> Option<ContentIndex> {
 
     for entry in fs::read_dir(&idx_dir).ok()?.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("cidx") {
-            if let Ok(data) = fs::read(&path) {
-                if let Ok(index) = bincode::deserialize::<ContentIndex>(&data) {
-                    if index.root == clean {
+        if path.extension().and_then(|e| e.to_str()) == Some("cidx")
+            && let Ok(data) = fs::read(&path)
+                && let Ok(index) = bincode::deserialize::<ContentIndex>(&data)
+                    && index.root == clean {
                         return Some(index);
                     }
-                }
-            }
-        }
     }
     None
 }
@@ -633,7 +630,7 @@ fn cmd_find(args: FindArgs) -> Result<(), SearchError> {
                     Err(_) => return ignore::WalkState::Continue,
                 };
 
-                if !entry.file_type().map_or(false, |ft| ft.is_file()) {
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                     return ignore::WalkState::Continue;
                 }
 
@@ -642,7 +639,7 @@ fn cmd_find(args: FindArgs) -> Result<(), SearchError> {
                         .path()
                         .extension()
                         .and_then(|e| e.to_str())
-                        .map_or(false, |e| e.eq_ignore_ascii_case(ext));
+                        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
                     if !matches_ext {
                         return ignore::WalkState::Continue;
                     }
@@ -717,7 +714,7 @@ fn cmd_find(args: FindArgs) -> Result<(), SearchError> {
                         .path()
                         .extension()
                         .and_then(|e| e.to_str())
-                        .map_or(false, |e| e.eq_ignore_ascii_case(ext));
+                        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
                     if !matches_ext {
                         return ignore::WalkState::Continue;
                     }
@@ -856,16 +853,14 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
         }
 
         // Size filters
-        if let Some(min) = args.min_size {
-            if entry.size < min {
+        if let Some(min) = args.min_size
+            && entry.size < min {
                 continue;
             }
-        }
-        if let Some(max) = args.max_size {
-            if entry.size > max {
+        if let Some(max) = args.max_size
+            && entry.size > max {
                 continue;
             }
-        }
 
         // Extension filter
         if let Some(ref ext) = args.ext {
@@ -873,7 +868,7 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
             let matches_ext = path
                 .extension()
                 .and_then(|e| e.to_str())
-                .map_or(false, |e| e.eq_ignore_ascii_case(ext));
+                .is_some_and(|e| e.eq_ignore_ascii_case(ext));
             if !matches_ext {
                 continue;
             }
@@ -962,14 +957,14 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
         let file_data = &file_data;
         Box::new(move |result| {
             if let Ok(entry) = result {
-                if !entry.file_type().map_or(false, |ft| ft.is_file()) {
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                     return ignore::WalkState::Continue;
                 }
                 let ext_match = entry
                     .path()
                     .extension()
                     .and_then(|e| e.to_str())
-                    .map_or(false, |e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));
+                    .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));
                 if !ext_match {
                     return ignore::WalkState::Continue;
                 }
@@ -1133,7 +1128,7 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
                         if let Some(ref ext) = args.ext {
                             let m = Path::new(path).extension()
                                 .and_then(|e| e.to_str())
-                                .map_or(false, |e| e.eq_ignore_ascii_case(ext));
+                                .is_some_and(|e| e.eq_ignore_ascii_case(ext));
                             if !m { return false; }
                         }
                         // Apply exclude filters
@@ -1169,8 +1164,8 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
 
         for &file_id in &candidates {
             let file_path = &index.files[file_id as usize];
-            if let Ok(content) = fs::read_to_string(file_path) {
-                if phrase_re.is_match(&content) {
+            if let Ok(content) = fs::read_to_string(file_path)
+                && phrase_re.is_match(&content) {
                     // Find matching line numbers
                     let mut matching_lines = Vec::new();
                     for (line_num, line) in content.lines().enumerate() {
@@ -1185,7 +1180,6 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
                         });
                     }
                 }
-            }
         }
 
         let search_elapsed = search_start.elapsed();
@@ -1224,7 +1218,7 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
 
                         let mut prev: Option<usize> = None;
                         for &idx in &lines_to_show {
-                            if let Some(p) = prev { if idx > p + 1 { println!("--"); } }
+                            if let Some(p) = prev && idx > p + 1 { println!("--"); }
                             let marker = if match_lines_set.contains(&idx) { ">" } else { " " };
                             println!("{}{}:{}: {}", marker, result.file_path, idx + 1, lines_vec[idx]);
                             prev = Some(idx);
@@ -1317,7 +1311,7 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
                     let matches = Path::new(file_path)
                         .extension()
                         .and_then(|e| e.to_str())
-                        .map_or(false, |e| e.eq_ignore_ascii_case(ext));
+                        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
                     if !matches {
                         continue;
                     }
@@ -1420,11 +1414,10 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
                     let mut prev_idx: Option<usize> = None;
                     for &idx in &lines_to_show {
                         // Print separator between non-contiguous blocks
-                        if let Some(prev) = prev_idx {
-                            if idx > prev + 1 {
+                        if let Some(prev) = prev_idx
+                            && idx > prev + 1 {
                                 println!("--");
                             }
-                        }
                         let marker = if match_lines.contains(&idx) { ">" } else { " " };
                         println!("{}{}:{}: {}", marker, result.file_path, idx + 1, lines_vec[idx]);
                         prev_idx = Some(idx);
@@ -1487,8 +1480,8 @@ fn cmd_info() {
         let ext = path.extension().and_then(|e| e.to_str());
 
         if ext == Some("idx") {
-            if let Ok(data) = fs::read(&path) {
-                if let Ok(index) = bincode::deserialize::<FileIndex>(&data) {
+            if let Ok(data) = fs::read(&path)
+                && let Ok(index) = bincode::deserialize::<FileIndex>(&data) {
                     found = true;
                     let age_secs = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -1504,10 +1497,9 @@ fn cmd_info() {
                         size as f64 / 1_048_576.0, age_hours, stale
                     );
                 }
-            }
-        } else if ext == Some("cidx") {
-            if let Ok(data) = fs::read(&path) {
-                if let Ok(index) = bincode::deserialize::<ContentIndex>(&data) {
+        } else if ext == Some("cidx")
+            && let Ok(data) = fs::read(&path)
+                && let Ok(index) = bincode::deserialize::<ContentIndex>(&data) {
                     found = true;
                     let age_secs = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -1524,8 +1516,6 @@ fn cmd_info() {
                         size as f64 / 1_048_576.0, age_hours, stale
                     );
                 }
-            }
-        }
     }
 
     if !found {
@@ -1547,8 +1537,8 @@ pub fn cmd_info_json() -> serde_json::Value {
             let ext = path.extension().and_then(|e| e.to_str());
 
             if ext == Some("idx") {
-                if let Ok(data) = fs::read(&path) {
-                    if let Ok(index) = bincode::deserialize::<FileIndex>(&data) {
+                if let Ok(data) = fs::read(&path)
+                    && let Ok(index) = bincode::deserialize::<FileIndex>(&data) {
                         let age_secs = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
@@ -1564,10 +1554,9 @@ pub fn cmd_info_json() -> serde_json::Value {
                             "stale": index.is_stale(),
                         }));
                     }
-                }
-            } else if ext == Some("cidx") {
-                if let Ok(data) = fs::read(&path) {
-                    if let Ok(index) = bincode::deserialize::<ContentIndex>(&data) {
+            } else if ext == Some("cidx")
+                && let Ok(data) = fs::read(&path)
+                    && let Ok(index) = bincode::deserialize::<ContentIndex>(&data) {
                         let age_secs = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
@@ -1585,8 +1574,6 @@ pub fn cmd_info_json() -> serde_json::Value {
                             "stale": index.is_stale(),
                         }));
                     }
-                }
-            }
         }
     }
 

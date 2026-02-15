@@ -380,7 +380,7 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                     let matches = Path::new(file_path)
                         .extension()
                         .and_then(|e| e.to_str())
-                        .map_or(false, |e| e.eq_ignore_ascii_case(ext));
+                        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
                     if !matches { continue; }
                 }
 
@@ -469,8 +469,8 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             "lines": r.lines,
         });
 
-        if show_lines {
-            if let Ok(content) = std::fs::read_to_string(&r.file_path) {
+        if show_lines
+            && let Ok(content) = std::fs::read_to_string(&r.file_path) {
                 let lines_vec: Vec<&str> = content.lines().collect();
                 let total_lines = lines_vec.len();
                 let mut line_content = Vec::new();
@@ -498,7 +498,6 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
                 file_obj["lineContent"] = json!(line_content);
             }
-        }
 
         file_obj
     }).collect();
@@ -568,7 +567,7 @@ fn handle_phrase_search(
                     if let Some(ext) = ext_filter {
                         let m = Path::new(path).extension()
                             .and_then(|e| e.to_str())
-                            .map_or(false, |e| e.eq_ignore_ascii_case(ext));
+                            .is_some_and(|e| e.eq_ignore_ascii_case(ext));
                         if !m { return false; }
                     }
                     if exclude_dir.iter().any(|excl| path.to_lowercase().contains(&excl.to_lowercase())) {
@@ -603,8 +602,8 @@ fn handle_phrase_search(
 
     for &file_id in &candidates {
         let file_path = &index.files[file_id as usize];
-        if let Ok(content) = std::fs::read_to_string(file_path) {
-            if phrase_re.is_match(&content) {
+        if let Ok(content) = std::fs::read_to_string(file_path)
+            && phrase_re.is_match(&content) {
                 let mut matching_lines = Vec::new();
                 for (line_num, line) in content.lines().enumerate() {
                     if phrase_re.is_match(line) {
@@ -620,7 +619,6 @@ fn handle_phrase_search(
                     });
                 }
             }
-        }
     }
 
     let total_files = results.len();
@@ -765,11 +763,11 @@ fn handle_search_find(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 Ok(e) => e,
                 Err(_) => continue,
             };
-            if !entry.file_type().map_or(false, |ft| ft.is_file()) { continue; }
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) { continue; }
             if let Some(ref ext_f) = ext {
                 let matches_ext = entry.path().extension()
                     .and_then(|e| e.to_str())
-                    .map_or(false, |e| e.eq_ignore_ascii_case(ext_f));
+                    .is_some_and(|e| e.eq_ignore_ascii_case(ext_f));
                 if !matches_ext { continue; }
             }
             file_count += 1;
@@ -824,7 +822,7 @@ fn handle_search_find(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             if let Some(ref ext_f) = ext {
                 let matches_ext = entry.path().extension()
                     .and_then(|e| e.to_str())
-                    .map_or(false, |e| e.eq_ignore_ascii_case(ext_f));
+                    .is_some_and(|e| e.eq_ignore_ascii_case(ext_f));
                 if !matches_ext { continue; }
             }
             let search_name = if ignore_case { name.to_lowercase() } else { name.clone() };
@@ -919,7 +917,7 @@ fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             let path = Path::new(&entry.path);
             let matches_ext = path.extension()
                 .and_then(|e| e.to_str())
-                .map_or(false, |e| e.eq_ignore_ascii_case(ext_f));
+                .is_some_and(|e| e.eq_ignore_ascii_case(ext_f));
             if !matches_ext { continue; }
         }
 
@@ -1231,11 +1229,10 @@ fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResu
             let file_path = index.files.get(def.file_id as usize)?;
 
             // File filter
-            if let Some(ff) = file_filter {
-                if !file_path.to_lowercase().contains(&ff.to_lowercase()) {
+            if let Some(ff) = file_filter
+                && !file_path.to_lowercase().contains(&ff.to_lowercase()) {
                     return None;
                 }
-            }
 
             // Parent filter
             if let Some(pf) = parent_filter {
@@ -1534,8 +1531,8 @@ fn build_caller_tree(
         // Also check if parent implements any interfaces and add files referencing those
         if let Some(name_indices) = def_idx.name_index.get(&cls_lower) {
             for &di in name_indices {
-                if let Some(def) = def_idx.definitions.get(di as usize) {
-                    if def.kind == DefinitionKind::Class || def.kind == DefinitionKind::Struct {
+                if let Some(def) = def_idx.definitions.get(di as usize)
+                    && (def.kind == DefinitionKind::Class || def.kind == DefinitionKind::Struct) {
                         for bt in &def.base_types {
                             let bt_lower = bt.to_lowercase();
                             if let Some(postings) = content_index.index.get(&bt_lower) {
@@ -1543,7 +1540,6 @@ fn build_caller_tree(
                             }
                         }
                     }
-                }
             }
         }
 
@@ -1556,11 +1552,10 @@ fn build_caller_tree(
     let mut definition_locations: std::collections::HashSet<(u32, u32)> = std::collections::HashSet::new();
     if let Some(name_indices) = def_idx.name_index.get(&method_lower) {
         for &di in name_indices {
-            if let Some(def) = def_idx.definitions.get(di as usize) {
-                if def.kind == DefinitionKind::Method || def.kind == DefinitionKind::Constructor {
+            if let Some(def) = def_idx.definitions.get(di as usize)
+                && (def.kind == DefinitionKind::Method || def.kind == DefinitionKind::Constructor) {
                     definition_locations.insert((def.file_id, def.line_start));
                 }
-            }
         }
     }
 
@@ -1573,11 +1568,10 @@ fn build_caller_tree(
         }
 
         // If we have a parent class context, skip files that don't reference that class
-        if let Some(ref pids) = parent_file_ids {
-            if !pids.contains(&posting.file_id) {
+        if let Some(ref pids) = parent_file_ids
+            && !pids.contains(&posting.file_id) {
                 continue;
             }
-        }
 
         let file_path = match content_index.files.get(posting.file_id as usize) {
             Some(p) => p,
@@ -1587,7 +1581,7 @@ fn build_caller_tree(
         let matches_ext = Path::new(file_path)
             .extension()
             .and_then(|e| e.to_str())
-            .map_or(false, |e| e.eq_ignore_ascii_case(ext_filter));
+            .is_some_and(|e| e.eq_ignore_ascii_case(ext_filter));
         if !matches_ext { continue; }
 
         let path_lower = file_path.to_lowercase();
@@ -1663,21 +1657,21 @@ fn build_caller_tree(
     }
 
     // Interface resolution
-    if resolve_interfaces && current_depth == 0 {
-        if let Some(name_indices) = def_idx.name_index.get(&method_lower) {
+    if resolve_interfaces && current_depth == 0
+        && let Some(name_indices) = def_idx.name_index.get(&method_lower) {
             for &di in name_indices {
                 if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes { break; }
-                if let Some(def) = def_idx.definitions.get(di as usize) {
-                    if let Some(ref parent_class_name) = def.parent {
+                if let Some(def) = def_idx.definitions.get(di as usize)
+                    && let Some(ref parent_class_name) = def.parent {
                         let parent_lower = parent_class_name.to_lowercase();
                         if let Some(parent_indices) = def_idx.name_index.get(&parent_lower) {
                             for &pi in parent_indices {
-                                if let Some(parent_def) = def_idx.definitions.get(pi as usize) {
-                                    if parent_def.kind == DefinitionKind::Interface {
-                                        if let Some(impl_indices) = def_idx.base_type_index.get(&parent_lower) {
+                                if let Some(parent_def) = def_idx.definitions.get(pi as usize)
+                                    && parent_def.kind == DefinitionKind::Interface
+                                        && let Some(impl_indices) = def_idx.base_type_index.get(&parent_lower) {
                                             for &ii in impl_indices {
-                                                if let Some(impl_def) = def_idx.definitions.get(ii as usize) {
-                                                    if impl_def.kind == DefinitionKind::Class || impl_def.kind == DefinitionKind::Struct {
+                                                if let Some(impl_def) = def_idx.definitions.get(ii as usize)
+                                                    && (impl_def.kind == DefinitionKind::Class || impl_def.kind == DefinitionKind::Struct) {
                                                         let impl_callers = build_caller_tree(
                                                             method_name,
                                                             Some(&impl_def.name),
@@ -1695,18 +1689,13 @@ fn build_caller_tree(
                                                         );
                                                         callers.extend(impl_callers);
                                                     }
-                                                }
                                             }
                                         }
-                                    }
-                                }
                             }
                         }
                     }
-                }
             }
         }
-    }
 
     callers
 }
@@ -1850,11 +1839,11 @@ fn build_callee_tree(
                             if let (Some(parent), Some(cfid)) = (&callee_def.parent, content_file_id) {
                                 let parent_lower = parent.to_lowercase();
                                 let has_ref = content_index.index.get(&parent_lower)
-                                    .map_or(false, |p| p.iter().any(|pp| pp.file_id == cfid));
+                                    .is_some_and(|p| p.iter().any(|pp| pp.file_id == cfid));
                                 if !has_ref {
                                     let iface = format!("i{}", parent_lower);
                                     let has_iface = content_index.index.get(&iface)
-                                        .map_or(false, |p| p.iter().any(|pp| pp.file_id == cfid));
+                                        .is_some_and(|p| p.iter().any(|pp| pp.file_id == cfid));
                                     if !has_iface { continue; }
                                 }
                             }
@@ -1865,7 +1854,7 @@ fn build_callee_tree(
                             let matches_ext = Path::new(callee_file)
                                 .extension()
                                 .and_then(|e| e.to_str())
-                                .map_or(false, |e| e.eq_ignore_ascii_case(ext_filter));
+                                .is_some_and(|e| e.eq_ignore_ascii_case(ext_filter));
                             if !matches_ext { continue; }
 
                             let callee_key = format!("{}.{}",

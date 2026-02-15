@@ -207,13 +207,13 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                 Ok(e) => e,
                 Err(_) => return ignore::WalkState::Continue,
             };
-            if !entry.file_type().map_or(false, |ft| ft.is_file()) {
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                 return ignore::WalkState::Continue;
             }
             let path = entry.path();
             let ext_match = path.extension()
                 .and_then(|e| e.to_str())
-                .map_or(false, |e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));
+                .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));
             if !ext_match {
                 return ignore::WalkState::Continue;
             }
@@ -248,7 +248,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
             .map(|n| n.get())
             .unwrap_or(4)
     };
-    let chunk_size = (total_files + num_threads - 1) / num_threads;
+    let chunk_size = total_files.div_ceil(num_threads);
     let chunks: Vec<Vec<(u32, String)>> = files.iter().enumerate()
         .map(|(i, f)| (i as u32, f.clone()))
         .collect::<Vec<_>>()
@@ -726,8 +726,8 @@ fn extract_csharp_field_defs(
 
         for i in 0..var_decl.child_count() {
             let child = var_decl.child(i).unwrap();
-            if child.kind() == "variable_declarator" {
-                if let Some(name_node) = find_child_by_field(child, "name") {
+            if child.kind() == "variable_declarator"
+                && let Some(name_node) = find_child_by_field(child, "name") {
                     let name = node_text(name_node, source).to_string();
                     let sig = format!("{} {}", type_str, name);
 
@@ -744,7 +744,6 @@ fn extract_csharp_field_defs(
                         base_types: Vec::new(),
                     });
                 }
-            }
         }
     }
 }
@@ -881,11 +880,9 @@ fn walk_sql_node(
                     defs.push(def);
                     return;
                 }
-            } else {
-                if let Some(def) = extract_sql_named_def(node, source, file_id, DefinitionKind::SqlFunction) {
-                    defs.push(def);
-                    return;
-                }
+            } else if let Some(def) = extract_sql_named_def(node, source, file_id, DefinitionKind::SqlFunction) {
+                defs.push(def);
+                return;
             }
         }
         "create_procedure_statement" => {
@@ -981,15 +978,14 @@ fn find_sql_object_name(node: tree_sitter::Node, source: &[u8]) -> Option<String
         }
 
         // After keywords, the next identifier-like node is the name
-        if found_keyword {
-            if ck == "identifier" || ck == "dotted_name" || ck == "object_reference"
-               || ck == "schema_qualified_name" || child.is_named() {
+        if found_keyword
+            && (ck == "identifier" || ck == "dotted_name" || ck == "object_reference"
+               || ck == "schema_qualified_name" || child.is_named()) {
                 let text = node_text(child, source).to_string();
                 if !text.is_empty() && !text.starts_with('(') && !text.starts_with("AS") {
                     return Some(text);
                 }
             }
-        }
     }
 
     // Fallback: extract from raw text using regex-like approach
@@ -1059,9 +1055,9 @@ pub fn find_definition_index_for_dir(dir: &str) -> Option<DefinitionIndex> {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("didx") {
-            if let Ok(data) = std::fs::read(&path) {
-                if let Ok(index) = bincode::deserialize::<DefinitionIndex>(&data) {
+        if path.extension().and_then(|e| e.to_str()) == Some("didx")
+            && let Ok(data) = std::fs::read(&path)
+                && let Ok(index) = bincode::deserialize::<DefinitionIndex>(&data) {
                     let idx_root = std::fs::canonicalize(&index.root)
                         .map(|p| clean_path(&p.to_string_lossy()))
                         .unwrap_or_else(|_| index.root.clone());
@@ -1069,8 +1065,6 @@ pub fn find_definition_index_for_dir(dir: &str) -> Option<DefinitionIndex> {
                         return Some(index);
                     }
                 }
-            }
-        }
     }
     None
 }

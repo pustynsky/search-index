@@ -151,7 +151,7 @@ pub fn start_watcher(
 fn matches_extensions(path: &Path, extensions: &[String]) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map_or(false, |e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)))
+        .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)))
 }
 
 /// Build a ContentIndex with forward index populated (for watch mode)
@@ -204,8 +204,8 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
             };
             index.total_tokens = index.total_tokens.saturating_sub(old_count);
 
-            if let Some(ref mut forward) = index.forward {
-                if let Some(old_tokens) = forward.remove(&file_id) {
+            if let Some(ref mut forward) = index.forward
+                && let Some(old_tokens) = forward.remove(&file_id) {
                     for token in &old_tokens {
                         if let Some(postings) = index.index.get_mut(token) {
                             postings.retain(|p| p.file_id != file_id);
@@ -215,7 +215,6 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
                         }
                     }
                 }
-            }
 
             // Re-tokenize file
             let mut file_tokens: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
@@ -277,8 +276,8 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
 
 /// Remove a file from the index
 fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
-    if let Some(ref mut path_to_id) = index.path_to_id {
-        if let Some(&file_id) = path_to_id.get(path) {
+    if let Some(ref mut path_to_id) = index.path_to_id
+        && let Some(&file_id) = path_to_id.get(path) {
             // Subtract this file's token count from total
             let old_count = if (file_id as usize) < index.file_token_counts.len() {
                 index.file_token_counts[file_id as usize] as u64
@@ -292,8 +291,8 @@ fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
             }
 
             // Remove all tokens for this file from inverted index
-            if let Some(ref mut forward) = index.forward {
-                if let Some(old_tokens) = forward.remove(&file_id) {
+            if let Some(ref mut forward) = index.forward
+                && let Some(old_tokens) = forward.remove(&file_id) {
                     for token in &old_tokens {
                         if let Some(postings) = index.index.get_mut(token) {
                             postings.retain(|p| p.file_id != file_id);
@@ -303,11 +302,9 @@ fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
                         }
                     }
                 }
-            }
             path_to_id.remove(path);
             // Don't remove from files vec to preserve file_id stability
         }
-    }
 }
 
 #[cfg(test)]
