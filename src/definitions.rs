@@ -218,7 +218,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                 return ignore::WalkState::Continue;
             }
             let clean = clean_path(&path.to_string_lossy());
-            all_files.lock().unwrap().push(clean);
+            all_files.lock().unwrap_or_else(|e| e.into_inner()).push(clean);
             file_count.fetch_add(1, Ordering::Relaxed);
             ignore::WalkState::Continue
         })
@@ -1026,7 +1026,7 @@ fn def_index_path_for(dir: &str, exts: &str) -> PathBuf {
     crate::index_dir().join(format!("{:016x}.didx", hash))
 }
 
-pub fn save_definition_index(index: &DefinitionIndex) -> Result<(), Box<dyn std::error::Error>> {
+pub fn save_definition_index(index: &DefinitionIndex) -> Result<(), crate::SearchError> {
     let dir = crate::index_dir();
     std::fs::create_dir_all(&dir)?;
     let exts_str = index.extensions.join(",");

@@ -16,7 +16,10 @@ use tracing::{info, warn};
 pub use search::{clean_path, tokenize, ContentIndex, FileEntry, FileIndex, Posting};
 
 mod definitions;
+mod error;
 mod mcp;
+
+pub use error::SearchError;
 
 // ─── CLI ─────────────────────────────────────────────────────────────
 
@@ -414,7 +417,7 @@ fn index_path_for(dir: &str) -> PathBuf {
     index_dir().join(format!("{:016x}.idx", hash))
 }
 
-pub fn save_index(index: &FileIndex) -> Result<(), Box<dyn std::error::Error>> {
+pub fn save_index(index: &FileIndex) -> Result<(), SearchError> {
     let dir = index_dir();
     fs::create_dir_all(&dir)?;
     let path = index_path_for(&index.root);
@@ -438,7 +441,7 @@ fn content_index_path_for(dir: &str, exts: &str) -> PathBuf {
     index_dir().join(format!("{:016x}.cidx", hash))
 }
 
-pub fn save_content_index(index: &ContentIndex) -> Result<(), Box<dyn std::error::Error>> {
+pub fn save_content_index(index: &ContentIndex) -> Result<(), SearchError> {
     let dir = index_dir();
     fs::create_dir_all(&dir)?;
     let exts_str = index.extensions.join(",");
@@ -529,7 +532,7 @@ pub fn build_index(args: &IndexArgs) -> FileIndex {
                     is_dir,
                 };
 
-                entries.lock().unwrap().push(fe);
+                entries.lock().unwrap_or_else(|e| e.into_inner()).push(fe);
             }
             ignore::WalkState::Continue
         })
@@ -977,7 +980,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
                 }
                 let path = clean_path(&entry.path().to_string_lossy());
                 if let Ok(content) = fs::read_to_string(entry.path()) {
-                    file_data.lock().unwrap().push((path, content));
+                    file_data.lock().unwrap_or_else(|e| e.into_inner()).push((path, content));
                 }
             }
             ignore::WalkState::Continue

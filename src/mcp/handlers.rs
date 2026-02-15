@@ -593,10 +593,11 @@ fn handle_phrase_search(
 
     let candidates = candidate_file_ids.unwrap_or_default();
 
-    // Step 2: Verify phrase
+    // Step 2: Verify phrase (read file once, cache content for show_lines)
     struct PhraseMatch {
         file_path: String,
         lines: Vec<u32>,
+        content: Option<String>, // cached for show_lines to avoid re-reading
     }
     let mut results: Vec<PhraseMatch> = Vec::new();
 
@@ -614,6 +615,8 @@ fn handle_phrase_search(
                     results.push(PhraseMatch {
                         file_path: file_path.clone(),
                         lines: matching_lines,
+                        // Only keep content in memory if we'll need it for show_lines
+                        content: if show_lines { Some(content) } else { None },
                     });
                 }
             }
@@ -653,7 +656,8 @@ fn handle_phrase_search(
         });
 
         if show_lines {
-            if let Ok(content) = std::fs::read_to_string(&r.file_path) {
+            // Use cached content from phrase verification (no second read)
+            if let Some(ref content) = r.content {
                 let lines_vec: Vec<&str> = content.lines().collect();
                 let total_lines = lines_vec.len();
                 let mut line_content = Vec::new();
