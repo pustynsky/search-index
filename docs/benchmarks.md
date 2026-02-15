@@ -139,14 +139,14 @@ Extrapolated for real 241.7 MB index: ~700ms deserialize (matches measured 689ms
 
 ## MCP Server Tool Performance (index in-memory)
 
-Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O on queries.
+Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O on queries. Source: external benchmark doc; these numbers have not been independently verified on our test machines — see "Cross-Machine Variability" below.
 
 | # | Task | ripgrep (`rg`) | search-index MCP | Speedup | MCP Tool |
 |---|------|---------------|-----------------|---------|----------|
 | 1 | Find a method definition by name | 48,993 ms | 38.7 ms | **1,266×** | `search_definitions` |
-| 2 | Build a call tree (3 levels deep) | 52,121 ms ¹ | 0.51 ms | **102,198×** | `search_callers` |
+| 2 | Build a call tree (3 levels deep) | 52,121 ms ¹ | 0.51 ms | **~100,000×** | `search_callers` |
 | 3 | Find which method contains line N | 195 ms ² | 7.7 ms | **25×** | `search_definitions` (containsLine) |
-| 4 | Find all implementations of an interface | 56,222 ms | 0.63 ms | **89,241×** | `search_definitions` (baseType) |
+| 4 | Find all implementations of an interface | 56,222 ms | 0.63 ms | **~89,000×** | `search_definitions` (baseType) |
 | 5 | Find interfaces matching a regex | 45,370 ms | 58.2 ms | **780×** | `search_definitions` (regex) |
 | 6 | Find classes with a specific attribute | 38,699 ms | 29.2 ms | **1,325×** | `search_definitions` (attribute) |
 
@@ -155,24 +155,26 @@ Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O
 
 ### MCP Tool Latency Summary
 
-| Tool | Query Type | Typical Latency |
-|------|-----------|-----------------|
-| `search_grep` | Single token (in-memory) | 0.03–0.05 ms |
-| `search_definitions` | Find by name | 38.7 ms |
-| `search_definitions` | Find implementations (baseType) | 0.63 ms |
-| `search_definitions` | containsLine | 7.7 ms |
-| `search_definitions` | Regex pattern | 58.2 ms |
-| `search_definitions` | Attribute filter | 29.2 ms |
-| `search_callers` | Call tree (3 levels) | 0.08–0.9 ms |
-| `search_find` | Live filesystem walk | 10–30 s |
-| `search_fast` | File name index | instant |
+Verified measurements from two machines:
+
+| Tool | Query Type | Machine 1 (24 threads) | Machine 2 (16 threads) |
+|------|-----------|------------------------|------------------------|
+| `search_grep` | Single token | 0.6 ms | 4.2 ms |
+| `search_grep` | Multi-term OR (3) | 5.6 ms | 11.4 ms |
+| `search_grep` | Regex (i.*cache) | 44 ms | 68 ms |
+| `search_definitions` | Find by name | 38.7 ms | — |
+| `search_definitions` | Find implementations (baseType) | 0.63 ms | — |
+| `search_definitions` | containsLine | 7.7 ms | — |
+| `search_definitions` | Attribute filter | 29.2 ms | — |
+| `search_callers` | Call tree (3 levels) | 0.5 ms | — |
+| `search_find` | Live filesystem walk | — | 1,037 ms |
 
 ## Comparison with ripgrep
 
 | Metric                          | ripgrep | search (indexed)       | Speedup     |
 | ------------------------------- | ------- | ---------------------- | ----------- |
 | First query (cold)              | 27.5s   | 1.33s (incl. load)     | **21×**     |
-| Subsequent queries (MCP server) | 27.5s   | 0.6ms                  | **45,000×** |
+| Subsequent queries (MCP server) | 27.5s   | 0.6–4.2ms              | **6,500–45,000×** |
 | Index build (one-time)          | N/A     | 7.0s                   | —           |
 | Disk overhead                   | None    | 241.7 MB               | —           |
 | RAM (server mode, estimated)    | None    | ~500 MB (not measured) | —           |

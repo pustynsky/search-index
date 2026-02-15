@@ -1,17 +1,17 @@
 # Search — High-Performance Code Search Engine
 
-Inverted index + AST-based code intelligence engine for large-scale codebases. Sub-microsecond content search, structural code navigation (classes, methods, call trees), and native MCP server for AI agent integration — in a single statically-linked Rust binary.
+Inverted index + AST-based code intelligence engine for large-scale codebases. Millisecond content search, structural code navigation (classes, methods, call trees), and native MCP server for AI agent integration — in a single statically-linked Rust binary.
 
-**Measured on a real C# codebase with 49,000 files, 851K definitions ([full benchmarks](docs/benchmarks.md)):**
+**Measured on a real C# codebase with 49,000 files, 846K definitions ([full benchmarks](docs/benchmarks.md)):**
 
 | Metric | Value |
 |---|---|
-| Indexed content search | **0.03ms** per query (**42,700×** faster than ripgrep) |
-| Call tree (3 levels) | **0.51ms** (**102,198×** faster than manual rg) |
-| Find interface implementations | **0.63ms** (**89,241×** faster than rg) |
-| Index build | **7s** (content), **16s** (AST definitions) |
+| Indexed content search (MCP, in-memory) | **0.6–4ms** per query (**250–6,500×** faster than live scan/ripgrep) |
+| Call tree (3 levels) | **0.5ms** |
+| Find interface implementations | **0.6ms** |
+| Index build | **7–16s** (content), **16–32s** (AST definitions) — varies by CPU |
 | Incremental update | **<1s** per file change (content + AST re-parse) |
-| Index load from disk | **0.7s** (242 MB bincode) |
+| Index load from disk | **0.7–1.6s** (242 MB content index) |
 | Binary size | Single static binary, zero runtime dependencies |
 
 > Built on the same [`ignore`](https://crates.io/crates/ignore) crate used by [ripgrep](https://github.com/BurntSushi/ripgrep), with [`tree-sitter`](https://tree-sitter.github.io/) for language-aware code parsing.
