@@ -26,9 +26,11 @@ pub use index::{
 
 // ─── CLI ─────────────────────────────────────────────────────────────
 
-/// Fast file search tool with optional indexing for instant lookups
+/// High-performance code search engine with inverted indexing and AST-based code intelligence
 #[derive(Parser, Debug)]
-#[command(name = "search", version, about)]
+#[command(name = "search", version, about, after_help = "\
+Run 'search <COMMAND> --help' for detailed options and examples.\n\
+Common options: -d <DIR> (directory), -e <EXT> (extension filter), -c (count only)")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -225,12 +227,12 @@ AVAILABLE TOOLS (exposed via MCP):
   search_reindex     -- Force rebuild + reload index
 
 HOW IT WORKS:
-  1. On startup: loads (or builds) content index into RAM (~0.8s one-time)
-  2. With --definitions: loads cached definition index from disk (instant),
-     or builds it using tree-sitter on first use (~14s for 48K files)
+  1. On startup: loads (or builds) content index into RAM (~0.7-1.6s one-time)
+  2. With --definitions: loads cached definition index from disk (~1.5s),
+     or builds it using tree-sitter on first use (~16-32s for 48K files)
   3. Starts JSON-RPC event loop on stdin/stdout
-  4. All search queries use in-memory index (~0.001s per query)
-  5. With --watch: file changes update both indexes incrementally (~5ms/file)
+  4. All search queries use in-memory index (~0.6-4ms per query)
+  5. With --watch: file changes update both indexes incrementally (<1s/file)
   6. Logging goes to stderr (never pollutes JSON-RPC on stdout)
 "#)]
 pub struct ServeArgs {
@@ -245,7 +247,7 @@ pub struct ServeArgs {
     #[arg(short, long, default_value = "cs")]
     pub ext: String,
 
-    /// Watch for file changes and update index incrementally (~5ms per file).
+    /// Watch for file changes and update index incrementally (<1s per file).
     /// Without this flag, the index is static (loaded once at startup).
     /// Uses OS file notifications (ReadDirectoryChangesW on Windows).
     #[arg(long)]
@@ -270,7 +272,7 @@ pub struct ServeArgs {
     /// using tree-sitter AST parsing of C# and SQL files.
     /// Enables the search_definitions and search_callers MCP tools.
     /// On startup: loads cached index from disk if available (instant).
-    /// Only builds from scratch on first use (~14s for 48K files).
+    /// Only builds from scratch on first use (~16-32s for 48K files).
     /// With --watch, file changes update the def index incrementally.
     /// Use 'search def-index' CLI or search_reindex tool to force rebuild.
     #[arg(long)]
@@ -1304,6 +1306,27 @@ pub fn cmd_info_json() -> serde_json::Value {
                             "sizeMb": (size as f64 / 1_048_576.0 * 10.0).round() / 10.0,
                             "ageHours": (age_secs as f64 / 3600.0 * 10.0).round() / 10.0,
                             "stale": index.is_stale(),
+                        }));
+                    }
+            else if ext == Some("didx")
+                && let Ok(data) = fs::read(&path)
+                    && let Ok(index) = bincode::deserialize::<definitions::DefinitionIndex>(&data) {
+                        let age_secs = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs()
+                            .saturating_sub(index.created_at);
+                        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        let call_sites: usize = index.method_calls.values().map(|v| v.len()).sum();
+                        indexes.push(serde_json::json!({
+                            "type": "definition",
+                            "root": index.root,
+                            "files": index.files.len(),
+                            "definitions": index.definitions.len(),
+                            "callSites": call_sites,
+                            "extensions": index.extensions,
+                            "sizeMb": (size as f64 / 1_048_576.0 * 10.0).round() / 10.0,
+                            "ageHours": (age_secs as f64 / 3600.0 * 10.0).round() / 10.0,
                         }));
                     }
         }
