@@ -2,11 +2,13 @@
 
 Inverted index + AST-based code intelligence engine for large-scale codebases. Sub-microsecond content search, structural code navigation (classes, methods, call trees), and native MCP server for AI agent integration — in a single statically-linked Rust binary.
 
-**Measured on a real C# codebase with 49,000 files ([full benchmarks](docs/benchmarks.md)):**
+**Measured on a real C# codebase with 49,000 files, 851K definitions ([full benchmarks](docs/benchmarks.md)):**
 
 | Metric | Value |
 |---|---|
-| Indexed content search | **0.6ms** per query (**42,700×** faster than ripgrep) |
+| Indexed content search | **0.03ms** per query (**42,700×** faster than ripgrep) |
+| Call tree (3 levels) | **0.51ms** (**102,198×** faster than manual rg) |
+| Find interface implementations | **0.63ms** (**89,241×** faster than rg) |
 | Index build | **7s** (content), **16s** (AST definitions) |
 | Incremental update | **~5ms** per file change |
 | Index load from disk | **0.7s** (242 MB bincode) |

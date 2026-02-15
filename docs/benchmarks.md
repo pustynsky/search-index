@@ -23,7 +23,7 @@ Real production C# codebase:
 | File types                   | C# (.cs)           |
 | Unique tokens                | 754,350            |
 | Total token occurrences      | 33,082,236         |
-| Definitions (AST)            | 846,167            |
+| Definitions (AST)            | ~851,000           |
 | Files parsed for definitions | 53,799 (incl. SQL) |
 
 ## Content Search: search vs ripgrep
@@ -136,6 +136,36 @@ Extrapolated for real 241.7 MB index: ~700ms deserialize (matches measured 689ms
 | ContentIndex           | 48,599  | 241.7 MB  | 0.689s                                               |
 | FileIndex (C:\Windows) | 333,875 | 47.8 MB   | 0.055s                                               |
 | DefinitionIndex        | 53,799  | 231.8 MB  | ~0.7s (estimated from size parity with ContentIndex) |
+
+## MCP Server Tool Performance (index in-memory)
+
+Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O on queries.
+
+| # | Task | ripgrep (`rg`) | search-index MCP | Speedup | MCP Tool |
+|---|------|---------------|-----------------|---------|----------|
+| 1 | Find a method definition by name | 48,993 ms | 38.7 ms | **1,266×** | `search_definitions` |
+| 2 | Build a call tree (3 levels deep) | 52,121 ms ¹ | 0.51 ms | **102,198×** | `search_callers` |
+| 3 | Find which method contains line N | 195 ms ² | 7.7 ms | **25×** | `search_definitions` (containsLine) |
+| 4 | Find all implementations of an interface | 56,222 ms | 0.63 ms | **89,241×** | `search_definitions` (baseType) |
+| 5 | Find interfaces matching a regex | 45,370 ms | 58.2 ms | **780×** | `search_definitions` (regex) |
+| 6 | Find classes with a specific attribute | 38,699 ms | 29.2 ms | **1,325×** | `search_definitions` (attribute) |
+
+> ¹ `rg` only provides flat text search — it cannot build a call tree. The 52s is for a single `rg` query; building a 3-level tree manually would require 3–7 sequential queries totaling 150–350 seconds.
+> ² For containsLine, `rg` only reads a single file (not the full repo), so the speedup is smaller.
+
+### MCP Tool Latency Summary
+
+| Tool | Query Type | Typical Latency |
+|------|-----------|-----------------|
+| `search_grep` | Single token (in-memory) | 0.03–0.05 ms |
+| `search_definitions` | Find by name | 38.7 ms |
+| `search_definitions` | Find implementations (baseType) | 0.63 ms |
+| `search_definitions` | containsLine | 7.7 ms |
+| `search_definitions` | Regex pattern | 58.2 ms |
+| `search_definitions` | Attribute filter | 29.2 ms |
+| `search_callers` | Call tree (3 levels) | 0.08–0.9 ms |
+| `search_find` | Live filesystem walk | 10–30 s |
+| `search_fast` | File name index | instant |
 
 ## Comparison with ripgrep
 
