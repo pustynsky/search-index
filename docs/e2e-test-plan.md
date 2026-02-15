@@ -471,6 +471,143 @@ cargo run -- grep "is_stale" -d $TEST_DIR -e $TEST_EXT --show-lines -B 1 -A 3
 
 ---
 
+### T25: `serve` — MCP server starts and responds to initialize
+
+**Command:**
+
+```powershell
+$init = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+echo $init | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `"result"` containing `"serverInfo"` and `"capabilities"`
+- Response includes `"tools"` capability
+
+**Validates:** MCP server startup, JSON-RPC initialize handshake.
+
+---
+
+### T26: `serve` — MCP tools/list returns all tools
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with 7 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_definitions`, `search_callers`
+- Each tool has `name`, `description`, `inputSchema`
+
+**Validates:** Tool discovery, tool schema generation.
+
+---
+
+### T27: `serve` — MCP search_grep via tools/call
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokenize"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `"result"` containing search results
+- Result content includes `files` array and `summary` object
+- `summary.totalFiles` > 0
+
+**Validates:** MCP tool dispatch, search_grep handler, JSON-RPC tools/call.
+
+---
+
+### T28: `serve` — MCP search_definitions (requires --definitions)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"tokenize"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definition results
+- For Rust codebase: 0 results (tree-sitter supports C#/SQL only)
+- For C# codebase: results with `name`, `kind`, `file`, `lines`
+
+**Validates:** search_definitions handler, definition index loading, AST-based search.
+
+**Note:** Requires `--definitions` flag. For `.rs` files, 0 results is expected.
+
+---
+
+### T29: `serve` — MCP search_callers (requires --definitions)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"tokenize","depth":2}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with call tree
+- Result includes `callTree` array, `query` object (method, direction, depth), `summary` object (totalNodes, searchTimeMs)
+- For Rust codebase: empty callTree (tree-sitter supports C#/SQL only)
+
+**Validates:** search_callers handler end-to-end, call tree building, JSON output format.
+
+**Note:** For C# codebases, use a method name that exists (e.g., `ExecuteQueryAsync`).
+
+---
+
+### T30: `serve` — MCP search_callers with class filter and direction=down
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"tokenize","class":"SomeClass","direction":"down","depth":2}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with callee tree
+- `query.direction` = "down"
+- `query.class` = "SomeClass" (class filter passed through)
+- Result includes `callTree`, `summary`
+
+**Validates:** class parameter works for direction=down (bug fix), callee tree building.
+
+---
+
 ## Automation Script
 
 Save as `e2e-test.ps1` and run from workspace root:
@@ -555,6 +692,11 @@ Run-Test "T20 def-index"           "$Binary def-index -d $TestDir -e $TestExt"
 # T21-T23: error handling
 Run-Test "T21 invalid-regex"       "$Binary grep `"[invalid`" -d $TestDir -e $TestExt --regex" -ExpectedExit 1
 Run-Test "T22 nonexistent-dir"     "$Binary find test -d /nonexistent/path/xyz" -ExpectedExit 1
+
+# T25-T30: serve (MCP)
+# Note: MCP tests require piping JSON-RPC to stdin, which is hard to automate in simple PowerShell.
+# These are manual verification tests — run them individually per the test plan.
+Write-Host "  T25-T30: MCP serve tests — run manually (see e2e-test-plan.md)"
 
 Write-Host "`n=== Results: $passed passed, $failed failed, $total total ===`n"
 if ($failed -gt 0) { exit 1 }
