@@ -249,25 +249,30 @@ This replaces 7+ sequential grep + read_file calls with a single request by comb
 
 ```
 src/
-├── main.rs              # CLI, index data structures, build/search logic
-│                          FileIndex, ContentIndex, tokenizer, all CLI commands
+├── lib.rs               # Public types: FileEntry, FileIndex, ContentIndex, Posting
+│                          tokenize(), clean_path() — shared by binary and benchmarks
+├── main.rs              # CLI args, search commands (find, fast, grep, info, serve)
+│                          fn main() dispatches to cmd_* functions returning Result<SearchError>
+├── index.rs             # Index storage: save/load/build for FileIndex and ContentIndex
+│                          index_dir(), *_path_for(), build_index(), build_content_index()
+├── error.rs             # SearchError enum (thiserror) — unified error type
 ├── definitions.rs       # DefinitionIndex, tree-sitter parsing (C# + SQL)
 │                          AST walking, definition extraction, incremental updates
 └── mcp/
     ├── mod.rs            # Module exports
     ├── protocol.rs       # JSON-RPC 2.0 types (request, response, error)
-    ├── server.rs         # Stdio event loop, method dispatch
+    ├── server.rs         # Stdio event loop, method dispatch, graceful shutdown on write errors
     ├── handlers.rs       # Tool implementations (grep, find, fast, callers, defs)
     └── watcher.rs        # File watcher, incremental index updates
 ```
 
-**Dependency direction:** `main.rs` ← `mcp/*` ← `definitions.rs`. No circular dependencies. MCP layer depends on core index types but core has no knowledge of MCP.
+**Dependency direction:** `main.rs` → `index.rs` → `lib.rs` (types). `mcp/*` → `index.rs` + `definitions.rs`. No circular dependencies. MCP layer depends on core index types but core has no knowledge of MCP.
 
 ## Supported Languages
 
-| Language   | Parser                  | Definition Types                                                                                           |
-| ---------- | ----------------------- | ---------------------------------------------------------------------------------------------------------- |
-| C# (.cs)   | tree-sitter-c-sharp     | class, interface, struct, enum, record, method, constructor, property, field, delegate, event, enum member |
-| SQL (.sql) | tree-sitter-sequel-tsql | stored procedure, table, view, function, user-defined type, column, index                                  |
+| Language   | Parser                  | Definition Types                                                                                           | Status |
+| ---------- | ----------------------- | ---------------------------------------------------------------------------------------------------------- | ------ |
+| C# (.cs)   | tree-sitter-c-sharp     | class, interface, struct, enum, record, method, constructor, property, field, delegate, event, enum member | ✅ Active |
+| SQL (.sql) | *(disabled)*            | stored procedure, table, view, function, user-defined type, column, index                                  | ⏸️ Disabled — `tree-sitter-sequel-tsql` 0.4 requires language version 15, incompatible with tree-sitter 0.24 (supports 13-14). Parsing code is retained for future use. |
 
 Content indexing (tokenizer) is language-agnostic — works with any text file.

@@ -59,29 +59,39 @@ impl DefinitionKind {
             Self::SqlIndex => "sqlIndex",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::fmt::Display for DefinitionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for DefinitionKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
-            "class" => Some(Self::Class),
-            "interface" => Some(Self::Interface),
-            "enum" => Some(Self::Enum),
-            "struct" => Some(Self::Struct),
-            "record" => Some(Self::Record),
-            "method" => Some(Self::Method),
-            "property" => Some(Self::Property),
-            "field" => Some(Self::Field),
-            "constructor" => Some(Self::Constructor),
-            "delegate" => Some(Self::Delegate),
-            "event" => Some(Self::Event),
-            "enummember" => Some(Self::EnumMember),
-            "storedprocedure" => Some(Self::StoredProcedure),
-            "table" => Some(Self::Table),
-            "view" => Some(Self::View),
-            "sqlfunction" => Some(Self::SqlFunction),
-            "userdefinedtype" => Some(Self::UserDefinedType),
-            "column" => Some(Self::Column),
-            "sqlindex" => Some(Self::SqlIndex),
-            _ => None,
+            "class" => Ok(Self::Class),
+            "interface" => Ok(Self::Interface),
+            "enum" => Ok(Self::Enum),
+            "struct" => Ok(Self::Struct),
+            "record" => Ok(Self::Record),
+            "method" => Ok(Self::Method),
+            "property" => Ok(Self::Property),
+            "field" => Ok(Self::Field),
+            "constructor" => Ok(Self::Constructor),
+            "delegate" => Ok(Self::Delegate),
+            "event" => Ok(Self::Event),
+            "enummember" => Ok(Self::EnumMember),
+            "storedprocedure" => Ok(Self::StoredProcedure),
+            "table" => Ok(Self::Table),
+            "view" => Ok(Self::View),
+            "sqlfunction" => Ok(Self::SqlFunction),
+            "userdefinedtype" => Ok(Self::UserDefinedType),
+            "column" => Ok(Self::Column),
+            "sqlindex" => Ok(Self::SqlIndex),
+            other => Err(format!("Unknown definition kind: '{}'", other)),
         }
     }
 }
@@ -157,8 +167,8 @@ pub struct DefIndexArgs {
 
     /// File extensions to parse, comma-separated.
     /// C# (.cs) uses tree-sitter-c-sharp grammar.
-    /// SQL (.sql) uses tree-sitter-sequel-tsql grammar (T-SQL support).
-    #[arg(short, long, default_value = "cs,sql")]
+    /// SQL (.sql) parsing is currently disabled (no compatible T-SQL grammar for tree-sitter 0.24).
+    #[arg(short, long, default_value = "cs")]
     pub ext: String,
 
     /// Number of parallel parsing threads. Each thread gets its own
@@ -197,18 +207,18 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                 Ok(e) => e,
                 Err(_) => return ignore::WalkState::Continue,
             };
-            if !entry.file_type().map_or(false, |ft| ft.is_file()) {
+            if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                 return ignore::WalkState::Continue;
             }
             let path = entry.path();
             let ext_match = path.extension()
                 .and_then(|e| e.to_str())
-                .map_or(false, |e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));
+                .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));
             if !ext_match {
                 return ignore::WalkState::Continue;
             }
             let clean = clean_path(&path.to_string_lossy());
-            all_files.lock().unwrap().push(clean);
+            all_files.lock().unwrap_or_else(|e| e.into_inner()).push(clean);
             file_count.fetch_add(1, Ordering::Relaxed);
             ignore::WalkState::Continue
         })
@@ -218,17 +228,10 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     let total_files = files.len();
     eprintln!("[def-index] Found {} files to parse", total_files);
 
-    // Check SQL grammar availability
-    let sql_available = {
-        let mut test_parser = tree_sitter::Parser::new();
-        match test_parser.set_language(&tree_sitter_sequel_tsql::LANGUAGE.into()) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("[def-index] Warning: SQL grammar not compatible ({}), skipping .sql files", e);
-                false
-            }
-        }
-    };
+    // SQL grammar is currently disabled — no compatible T-SQL grammar for tree-sitter 0.24.
+    // The parsing code (parse_sql_definitions, walk_sql_node) is retained for future use
+    // when a compatible grammar becomes available.
+    let sql_available = false;
 
     // ─── Parallel parsing ─────────────────────────────────────
     let num_threads = if args.threads > 0 {
@@ -238,7 +241,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
             .map(|n| n.get())
             .unwrap_or(4)
     };
-    let chunk_size = (total_files + num_threads - 1) / num_threads;
+    let chunk_size = total_files.div_ceil(num_threads);
     let chunks: Vec<Vec<(u32, String)>> = files.iter().enumerate()
         .map(|(i, f)| (i as u32, f.clone()))
         .collect::<Vec<_>>()
@@ -257,9 +260,8 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                     .expect("Error loading C# grammar");
 
                 let mut sql_parser = tree_sitter::Parser::new();
-                if sql_avail {
-                    let _ = sql_parser.set_language(&tree_sitter_sequel_tsql::LANGUAGE.into());
-                }
+                // SQL parser language will be set here when a compatible grammar is available
+                let _ = &sql_parser; // suppress unused warning
 
                 let mut chunk_defs: Vec<(u32, Vec<DefinitionEntry>)> = Vec::new();
                 let mut errors = 0usize;
@@ -716,8 +718,8 @@ fn extract_csharp_field_defs(
 
         for i in 0..var_decl.child_count() {
             let child = var_decl.child(i).unwrap();
-            if child.kind() == "variable_declarator" {
-                if let Some(name_node) = find_child_by_field(child, "name") {
+            if child.kind() == "variable_declarator"
+                && let Some(name_node) = find_child_by_field(child, "name") {
                     let name = node_text(name_node, source).to_string();
                     let sig = format!("{} {}", type_str, name);
 
@@ -734,7 +736,6 @@ fn extract_csharp_field_defs(
                         base_types: Vec::new(),
                     });
                 }
-            }
         }
     }
 }
@@ -871,11 +872,9 @@ fn walk_sql_node(
                     defs.push(def);
                     return;
                 }
-            } else {
-                if let Some(def) = extract_sql_named_def(node, source, file_id, DefinitionKind::SqlFunction) {
-                    defs.push(def);
-                    return;
-                }
+            } else if let Some(def) = extract_sql_named_def(node, source, file_id, DefinitionKind::SqlFunction) {
+                defs.push(def);
+                return;
             }
         }
         "create_procedure_statement" => {
@@ -971,15 +970,14 @@ fn find_sql_object_name(node: tree_sitter::Node, source: &[u8]) -> Option<String
         }
 
         // After keywords, the next identifier-like node is the name
-        if found_keyword {
-            if ck == "identifier" || ck == "dotted_name" || ck == "object_reference"
-               || ck == "schema_qualified_name" || child.is_named() {
+        if found_keyword
+            && (ck == "identifier" || ck == "dotted_name" || ck == "object_reference"
+               || ck == "schema_qualified_name" || child.is_named()) {
                 let text = node_text(child, source).to_string();
                 if !text.is_empty() && !text.starts_with('(') && !text.starts_with("AS") {
                     return Some(text);
                 }
             }
-        }
     }
 
     // Fallback: extract from raw text using regex-like approach
@@ -1016,7 +1014,7 @@ fn def_index_path_for(dir: &str, exts: &str) -> PathBuf {
     crate::index_dir().join(format!("{:016x}.didx", hash))
 }
 
-pub fn save_definition_index(index: &DefinitionIndex) -> Result<(), Box<dyn std::error::Error>> {
+pub fn save_definition_index(index: &DefinitionIndex) -> Result<(), crate::SearchError> {
     let dir = crate::index_dir();
     std::fs::create_dir_all(&dir)?;
     let exts_str = index.extensions.join(",");
@@ -1049,9 +1047,9 @@ pub fn find_definition_index_for_dir(dir: &str) -> Option<DefinitionIndex> {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("didx") {
-            if let Ok(data) = std::fs::read(&path) {
-                if let Ok(index) = bincode::deserialize::<DefinitionIndex>(&data) {
+        if path.extension().and_then(|e| e.to_str()) == Some("didx")
+            && let Ok(data) = std::fs::read(&path)
+                && let Ok(index) = bincode::deserialize::<DefinitionIndex>(&data) {
                     let idx_root = std::fs::canonicalize(&index.root)
                         .map(|p| clean_path(&p.to_string_lossy()))
                         .unwrap_or_else(|_| index.root.clone());
@@ -1059,8 +1057,6 @@ pub fn find_definition_index_for_dir(dir: &str) -> Option<DefinitionIndex> {
                         return Some(index);
                     }
                 }
-            }
-        }
     }
     None
 }
@@ -1197,8 +1193,48 @@ mod tests {
         ];
         for kind in kinds {
             let s = kind.as_str();
-            let parsed = DefinitionKind::from_str(s).unwrap();
+            let parsed: DefinitionKind = s.parse().unwrap();
             assert_eq!(parsed, kind);
+        }
+    }
+
+    #[test]
+    fn test_definition_kind_display() {
+        assert_eq!(format!("{}", DefinitionKind::Class), "class");
+        assert_eq!(format!("{}", DefinitionKind::StoredProcedure), "storedProcedure");
+        assert_eq!(format!("{}", DefinitionKind::EnumMember), "enumMember");
+    }
+
+    #[test]
+    fn test_definition_kind_parse_invalid() {
+        let result = "invalid_kind".parse::<DefinitionKind>();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("Unknown definition kind"));
+    }
+
+    #[test]
+    fn test_definition_kind_parse_case_insensitive() {
+        let parsed: DefinitionKind = "CLASS".parse().unwrap();
+        assert_eq!(parsed, DefinitionKind::Class);
+        let parsed: DefinitionKind = "StoredProcedure".parse().unwrap();
+        assert_eq!(parsed, DefinitionKind::StoredProcedure);
+    }
+
+    #[test]
+    fn test_definition_kind_roundtrip_all_variants() {
+        let all_kinds = vec![
+            DefinitionKind::Class, DefinitionKind::Interface, DefinitionKind::Enum,
+            DefinitionKind::Struct, DefinitionKind::Record, DefinitionKind::Method,
+            DefinitionKind::Property, DefinitionKind::Field, DefinitionKind::Constructor,
+            DefinitionKind::Delegate, DefinitionKind::Event, DefinitionKind::EnumMember,
+            DefinitionKind::StoredProcedure, DefinitionKind::Table, DefinitionKind::View,
+            DefinitionKind::SqlFunction, DefinitionKind::UserDefinedType,
+            DefinitionKind::Column, DefinitionKind::SqlIndex,
+        ];
+        for kind in all_kinds {
+            let s = kind.to_string();
+            let parsed: DefinitionKind = s.parse().unwrap_or_else(|e| panic!("Failed to parse '{}': {}", s, e));
+            assert_eq!(parsed, kind, "Roundtrip failed for {:?} -> '{}' -> {:?}", kind, s, parsed);
         }
     }
 
@@ -1289,65 +1325,10 @@ namespace MyApp
         assert_eq!(member_defs.len(), 3);
     }
 
-    #[test]
-    fn test_parse_sql_stored_procedure() {
-        let mut parser = tree_sitter::Parser::new();
-        if parser.set_language(&tree_sitter_sequel_tsql::LANGUAGE.into()).is_err() {
-            eprintln!("Skipping SQL test: grammar ABI version incompatible");
-            return;
-        }
-
-        let source = r#"
-CREATE PROCEDURE [dbo].[usp_GetIndexTenantMapping]
-    @IndexName NVARCHAR(256),
-    @ServiceName NVARCHAR(256)
-AS
-BEGIN
-    SELECT * FROM IndexTenantMapping
-    WHERE IndexName = @IndexName AND ServiceName = @ServiceName
-END
-"#;
-
-        let defs = parse_sql_definitions(&mut parser, source, 0);
-
-        // Should find at least one definition
-        if defs.is_empty() {
-            eprintln!("Warning: SQL grammar parsed but no definitions found (AST may differ)");
-            return;
-        }
-
-        let sp_defs: Vec<_> = defs.iter()
-            .filter(|d| d.kind == DefinitionKind::StoredProcedure || d.name.contains("usp_GetIndexTenantMapping"))
-            .collect();
-
-        if sp_defs.is_empty() {
-            eprintln!("SQL defs found: {:?}", defs.iter().map(|d| (&d.name, &d.kind)).collect::<Vec<_>>());
-        }
-    }
-
-    #[test]
-    fn test_parse_sql_create_table() {
-        let mut parser = tree_sitter::Parser::new();
-        if parser.set_language(&tree_sitter_sequel_tsql::LANGUAGE.into()).is_err() {
-            eprintln!("Skipping SQL test: grammar ABI version incompatible");
-            return;
-        }
-
-        let source = r#"
-CREATE TABLE [dbo].[IndexTenantMapping]
-(
-    [Id] INT IDENTITY(1,1) NOT NULL,
-    [IndexName] NVARCHAR(256) NOT NULL,
-    [TenantId] UNIQUEIDENTIFIER NOT NULL,
-    [Status] INT NOT NULL DEFAULT 0
-)
-"#;
-
-        let defs = parse_sql_definitions(&mut parser, source, 0);
-        if defs.is_empty() {
-            eprintln!("Warning: SQL grammar parsed but no definitions found (AST may differ)");
-        }
-    }
+    // SQL parsing tests removed: tree-sitter-sequel-tsql 0.4 requires language version 15,
+    // incompatible with tree-sitter 0.24 (supports 13-14). SQL parsing code
+    // (parse_sql_definitions, walk_sql_node) is retained for future use when a
+    // compatible T-SQL grammar becomes available.
 
     #[test]
     fn test_definition_index_build_and_search() {

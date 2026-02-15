@@ -23,7 +23,10 @@ dirs = "6"
 notify = "6"
 tree-sitter = "0.24"
 tree-sitter-c-sharp = "0.23"
-tree-sitter-sequel-tsql = "0.4"
+# tree-sitter-sequel-tsql removed: version 0.4 requires tree-sitter language version 15,
+# but tree-sitter 0.24 only supports versions 13-14. SQL parsing is disabled until a
+# compatible T-SQL grammar is available.
+thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
@@ -38,3 +41,4 @@ harness = false
 [profile.release]
 opt-level = 3
 lto = true
+strip = true

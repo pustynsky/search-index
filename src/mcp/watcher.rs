@@ -151,7 +151,7 @@ pub fn start_watcher(
 fn matches_extensions(path: &Path, extensions: &[String]) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
-        .map_or(false, |e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)))
+        .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)))
 }
 
 /// Build a ContentIndex with forward index populated (for watch mode)
@@ -196,8 +196,16 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
     if let Some(ref mut path_to_id) = index.path_to_id {
         if let Some(&file_id) = path_to_id.get(path) {
             // EXISTING FILE — remove old tokens, add new ones
-            if let Some(ref mut forward) = index.forward {
-                if let Some(old_tokens) = forward.remove(&file_id) {
+            // Subtract old token count from total before re-tokenizing
+            let old_count = if (file_id as usize) < index.file_token_counts.len() {
+                index.file_token_counts[file_id as usize] as u64
+            } else {
+                0u64
+            };
+            index.total_tokens = index.total_tokens.saturating_sub(old_count);
+
+            if let Some(ref mut forward) = index.forward
+                && let Some(old_tokens) = forward.remove(&file_id) {
                     for token in &old_tokens {
                         if let Some(postings) = index.index.get_mut(token) {
                             postings.retain(|p| p.file_id != file_id);
@@ -207,7 +215,6 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
                         }
                     }
                 }
-            }
 
             // Re-tokenize file
             let mut file_tokens: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
@@ -269,11 +276,23 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
 
 /// Remove a file from the index
 fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
-    if let Some(ref mut path_to_id) = index.path_to_id {
-        if let Some(&file_id) = path_to_id.get(path) {
+    if let Some(ref mut path_to_id) = index.path_to_id
+        && let Some(&file_id) = path_to_id.get(path) {
+            // Subtract this file's token count from total
+            let old_count = if (file_id as usize) < index.file_token_counts.len() {
+                index.file_token_counts[file_id as usize] as u64
+            } else {
+                0u64
+            };
+            index.total_tokens = index.total_tokens.saturating_sub(old_count);
+            // Zero out the file's token count (file stays in vec as tombstone)
+            if (file_id as usize) < index.file_token_counts.len() {
+                index.file_token_counts[file_id as usize] = 0;
+            }
+
             // Remove all tokens for this file from inverted index
-            if let Some(ref mut forward) = index.forward {
-                if let Some(old_tokens) = forward.remove(&file_id) {
+            if let Some(ref mut forward) = index.forward
+                && let Some(old_tokens) = forward.remove(&file_id) {
                     for token in &old_tokens {
                         if let Some(postings) = index.index.get_mut(token) {
                             postings.retain(|p| p.file_id != file_id);
@@ -283,11 +302,9 @@ fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
                         }
                     }
                 }
-            }
             path_to_id.remove(path);
             // Don't remove from files vec to preserve file_id stability
         }
-    }
 }
 
 #[cfg(test)]
@@ -472,5 +489,118 @@ mod tests {
 
         assert!(small_batch <= threshold, "small batch should use incremental");
         assert!(large_batch > threshold, "large batch should trigger full reindex");
+    }
+
+    #[test]
+    fn test_total_tokens_decremented_on_update() {
+        let dir = std::env::temp_dir().join("search_watcher_test_tokens_update");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let test_file = dir.join("test.cs");
+        std::fs::write(&test_file, "class Original { OldToken stuff; }").unwrap();
+
+        let clean = crate::clean_path(&test_file.to_string_lossy());
+        let mut index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![clean.clone()],
+            index: {
+                let mut m = HashMap::new();
+                m.insert("original".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+                m.insert("oldtoken".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+                m.insert("stuff".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+                m.insert("class".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+                m
+            },
+            total_tokens: 4,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![4],
+            forward: Some({
+                let mut m = HashMap::new();
+                m.insert(0u32, vec!["class".to_string(), "original".to_string(), "oldtoken".to_string(), "stuff".to_string()]);
+                m
+            }),
+            path_to_id: Some({
+                let mut m = HashMap::new();
+                m.insert(PathBuf::from(&clean), 0u32);
+                m
+            }),
+        };
+
+        // Update file with different content
+        std::fs::write(&test_file, "class Updated { NewToken stuff; }").unwrap();
+        update_file_in_index(&mut index, &PathBuf::from(&clean));
+
+        // total_tokens should equal sum of file_token_counts
+        let sum: u64 = index.file_token_counts.iter().map(|&c| c as u64).sum();
+        assert_eq!(index.total_tokens, sum,
+            "total_tokens ({}) should equal sum of file_token_counts ({})",
+            index.total_tokens, sum);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_total_tokens_decremented_on_remove() {
+        let mut index = make_test_index();
+        index = build_watch_index_from(index);
+
+        let initial_total = index.total_tokens;
+        let file0_tokens = index.file_token_counts[0] as u64;
+
+        remove_file_from_index(&mut index, &PathBuf::from("file0.cs"));
+
+        assert_eq!(index.total_tokens, initial_total - file0_tokens,
+            "total_tokens should decrease by file0's token count");
+    }
+
+    #[test]
+    fn test_total_tokens_consistency_after_multiple_ops() {
+        let dir = std::env::temp_dir().join("search_watcher_test_consistency");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let file1 = dir.join("a.cs");
+        let file2 = dir.join("b.cs");
+        std::fs::write(&file1, "class Alpha { }").unwrap();
+        std::fs::write(&file2, "class Beta { }").unwrap();
+
+        let mut index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![],
+            forward: Some(HashMap::new()),
+            path_to_id: Some(HashMap::new()),
+        };
+
+        // Add file1
+        let clean1 = PathBuf::from(crate::clean_path(&file1.to_string_lossy()));
+        update_file_in_index(&mut index, &clean1);
+
+        // Add file2
+        let clean2 = PathBuf::from(crate::clean_path(&file2.to_string_lossy()));
+        update_file_in_index(&mut index, &clean2);
+
+        // Update file1 with new content
+        std::fs::write(&file1, "class AlphaUpdated { NewMethod(); }").unwrap();
+        update_file_in_index(&mut index, &clean1);
+
+        // Remove file2
+        remove_file_from_index(&mut index, &clean2);
+
+        // Verify consistency: total_tokens == sum(file_token_counts) for non-removed files
+        let sum: u64 = index.file_token_counts.iter().map(|&c| c as u64).sum();
+        assert_eq!(index.total_tokens, sum,
+            "total_tokens ({}) should equal sum of file_token_counts ({}) after multiple operations",
+            index.total_tokens, sum);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

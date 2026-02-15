@@ -10,15 +10,52 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
 // ─── Core public types ───────────────────────────────────────────────
 
 /// Strip the `\\?\` extended-length path prefix that Windows canonicalize adds.
+#[must_use]
 pub fn clean_path(p: &str) -> String {
     p.strip_prefix(r"\\?\").unwrap_or(p).to_string()
 }
+
+// ─── File index types ────────────────────────────────────────────────
+
+/// An entry in the file index — represents a single file or directory.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FileEntry {
+    pub path: String,
+    pub size: u64,
+    pub modified: u64, // seconds since epoch
+    pub is_dir: bool,
+}
+
+/// File index: a flat list of all files/directories under a root.
+///
+/// Used for fast file-name search without filesystem walk.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct FileIndex {
+    pub root: String,
+    pub created_at: u64,
+    pub max_age_secs: u64,
+    pub entries: Vec<FileEntry>,
+}
+
+impl FileIndex {
+    /// Check if the index is older than its configured max age.
+    pub fn is_stale(&self) -> bool {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(std::time::Duration::ZERO)
+            .as_secs();
+        now.saturating_sub(self.created_at) > self.max_age_secs
+    }
+}
+
+// ─── Content index types ─────────────────────────────────────────────
 
 /// A posting: file_id + line numbers where the token appears.
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -57,12 +94,11 @@ pub struct ContentIndex {
 impl ContentIndex {
     /// Check if the index is older than its configured max age.
     pub fn is_stale(&self) -> bool {
-        use std::time::{SystemTime, UNIX_EPOCH};
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or(std::time::Duration::ZERO)
             .as_secs();
-        now - self.created_at > self.max_age_secs
+        now.saturating_sub(self.created_at) > self.max_age_secs
     }
 }
 
@@ -81,6 +117,7 @@ impl ContentIndex {
 /// assert!(tokens.contains(&"httpclient".to_string()));
 /// assert!(tokens.contains(&"_client".to_string()));
 /// ```
+#[must_use]
 pub fn tokenize(line: &str, min_len: usize) -> Vec<String> {
     line.split(|c: char| !c.is_alphanumeric() && c != '_')
         .filter(|s| s.len() >= min_len)

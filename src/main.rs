@@ -1,98 +1,28 @@
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use ignore::WalkBuilder;
 use regex::Regex;
-use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
 
+// Re-export core types from library crate
+pub use search::{clean_path, tokenize, ContentIndex, FileEntry, FileIndex, Posting};
+
 mod definitions;
+mod error;
+mod index;
 mod mcp;
 
-// ─── Helpers ─────────────────────────────────────────────────────────
-
-/// Strip the `\\?\` extended-length path prefix that Windows canonicalize adds
-pub fn clean_path(p: &str) -> String {
-    p.strip_prefix(r"\\?\").unwrap_or(p).to_string()
-}
-
-// ─── Index data structures ───────────────────────────────────────────
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct FileEntry {
-    pub path: String,
-    pub size: u64,
-    pub modified: u64, // seconds since epoch
-    pub is_dir: bool,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-pub struct FileIndex {
-    pub root: String,
-    pub created_at: u64,
-    pub max_age_secs: u64,
-    pub entries: Vec<FileEntry>,
-}
-
-impl FileIndex {
-    fn is_stale(&self) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        now - self.created_at > self.max_age_secs
-    }
-}
-
-// ─── Content (inverted) index data structures ────────────────────────
-
-/// A posting: file_id + line numbers where the token appears
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Posting {
-    pub file_id: u32,
-    pub lines: Vec<u32>,
-}
-
-/// Inverted index: token → list of postings
-#[derive(Serialize, Deserialize, Debug)]
-pub struct ContentIndex {
-    pub root: String,
-    pub created_at: u64,
-    pub max_age_secs: u64,
-    /// file_id → file path
-    pub files: Vec<String>,
-    /// token (lowercased) → postings
-    pub index: HashMap<String, Vec<Posting>>,
-    /// total tokens indexed
-    pub total_tokens: u64,
-    /// extensions that were indexed
-    pub extensions: Vec<String>,
-    /// file_id → total token count in that file (for TF-IDF)
-    pub file_token_counts: Vec<u32>,
-    /// Forward index: file_id → Vec<token> (only populated with --watch)
-    #[serde(default)]
-    pub forward: Option<HashMap<u32, Vec<String>>>,
-    /// Path → file_id lookup (only populated with --watch)
-    #[serde(default)]
-    pub path_to_id: Option<HashMap<PathBuf, u32>>,
-}
-
-impl ContentIndex {
-    fn is_stale(&self) -> bool {
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        now - self.created_at > self.max_age_secs
-    }
-}
+pub use error::SearchError;
+pub use index::{
+    build_content_index, build_index, content_index_path_for, find_content_index_for_dir,
+    index_dir, index_path_for, load_content_index, load_index, save_content_index, save_index,
+};
 
 // ─── CLI ─────────────────────────────────────────────────────────────
 
@@ -475,170 +405,9 @@ struct GrepArgs {
     phrase: bool,
 }
 
-// ─── Index storage ───────────────────────────────────────────────────
-
-fn index_dir() -> PathBuf {
-    let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join("search-index")
-}
-
-fn index_path_for(dir: &str) -> PathBuf {
-    let canonical = fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
-    let mut hasher = DefaultHasher::new();
-    canonical.to_string_lossy().hash(&mut hasher);
-    let hash = hasher.finish();
-    index_dir().join(format!("{:016x}.idx", hash))
-}
-
-pub fn save_index(index: &FileIndex) -> Result<(), Box<dyn std::error::Error>> {
-    let dir = index_dir();
-    fs::create_dir_all(&dir)?;
-    let path = index_path_for(&index.root);
-    let encoded = bincode::serialize(index)?;
-    fs::write(&path, encoded)?;
-    Ok(())
-}
-
-pub fn load_index(dir: &str) -> Option<FileIndex> {
-    let path = index_path_for(dir);
-    let data = fs::read(&path).ok()?;
-    bincode::deserialize(&data).ok()
-}
-
-fn content_index_path_for(dir: &str, exts: &str) -> PathBuf {
-    let canonical = fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
-    let mut hasher = DefaultHasher::new();
-    canonical.to_string_lossy().hash(&mut hasher);
-    exts.hash(&mut hasher);
-    let hash = hasher.finish();
-    index_dir().join(format!("{:016x}.cidx", hash))
-}
-
-pub fn save_content_index(index: &ContentIndex) -> Result<(), Box<dyn std::error::Error>> {
-    let dir = index_dir();
-    fs::create_dir_all(&dir)?;
-    let exts_str = index.extensions.join(",");
-    let path = content_index_path_for(&index.root, &exts_str);
-    let encoded = bincode::serialize(index)?;
-    fs::write(&path, encoded)?;
-    Ok(())
-}
-
-pub fn load_content_index(dir: &str, exts: &str) -> Option<ContentIndex> {
-    let path = content_index_path_for(dir, exts);
-    let data = fs::read(&path).ok()?;
-    bincode::deserialize(&data).ok()
-}
-
-/// Try to find any content index (.cidx) file matching the given directory
-pub fn find_content_index_for_dir(dir: &str) -> Option<ContentIndex> {
-    let idx_dir = index_dir();
-    if !idx_dir.exists() {
-        return None;
-    }
-    let canonical = fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
-    let clean = clean_path(&canonical.to_string_lossy());
-
-    for entry in fs::read_dir(&idx_dir).ok()?.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("cidx") {
-            if let Ok(data) = fs::read(&path) {
-                if let Ok(index) = bincode::deserialize::<ContentIndex>(&data) {
-                    if index.root == clean {
-                        return Some(index);
-                    }
-                }
-            }
-        }
-    }
-    None
-}
-
-// ─── Index building ──────────────────────────────────────────────────
-
-pub fn build_index(args: &IndexArgs) -> FileIndex {
-    let root = fs::canonicalize(&args.dir).unwrap_or_else(|_| PathBuf::from(&args.dir));
-    let root_str = clean_path(&root.to_string_lossy());
-
-    eprintln!("Indexing {}...", root_str);
-    let start = Instant::now();
-
-    let mut builder = WalkBuilder::new(&root);
-    builder.hidden(!args.hidden);
-    builder.git_ignore(!args.no_ignore);
-    builder.git_global(!args.no_ignore);
-    builder.git_exclude(!args.no_ignore);
-
-    let thread_count = if args.threads == 0 {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-    } else {
-        args.threads
-    };
-    builder.threads(thread_count);
-
-    let entries: Mutex<Vec<FileEntry>> = Mutex::new(Vec::new());
-
-    builder.build_parallel().run(|| {
-        let entries = &entries;
-        Box::new(move |result| {
-            if let Ok(entry) = result {
-                let path = clean_path(&entry.path().to_string_lossy());
-                let metadata = entry.metadata().ok();
-                let (size, modified, is_dir) = if let Some(m) = metadata {
-                    let mod_time = m
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    (m.len(), mod_time, m.is_dir())
-                } else {
-                    (0, 0, false)
-                };
-
-                let fe = FileEntry {
-                    path,
-                    size,
-                    modified,
-                    is_dir,
-                };
-
-                entries.lock().unwrap().push(fe);
-            }
-            ignore::WalkState::Continue
-        })
-    });
-
-    let entries = entries.into_inner().unwrap();
-    let count = entries.len();
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    let index = FileIndex {
-        root: root_str,
-        created_at: now,
-        max_age_secs: args.max_age_hours * 3600,
-        entries,
-    };
-
-    let elapsed = start.elapsed();
-    eprintln!(
-        "Indexed {} entries in {:.3}s",
-        count,
-        elapsed.as_secs_f64()
-    );
-
-    index
-}
-
 // ─── Live search (no index) ──────────────────────────────────────────
 
-fn cmd_find(args: FindArgs) {
+fn cmd_find(args: FindArgs) -> Result<(), SearchError> {
     let start = Instant::now();
 
     let pattern = if args.ignore_case {
@@ -648,15 +417,15 @@ fn cmd_find(args: FindArgs) {
     };
 
     let re = if args.regex {
-        match Regex::new(&if args.ignore_case {
+        let pat = if args.ignore_case {
             format!("(?i){}", &args.pattern)
         } else {
             args.pattern.clone()
-        }) {
+        };
+        match Regex::new(&pat) {
             Ok(r) => Some(r),
             Err(e) => {
-                eprintln!("Invalid regex: {}", e);
-                std::process::exit(1);
+                return Err(SearchError::InvalidRegex { pattern: pat, source: e });
             }
         }
     } else {
@@ -665,8 +434,7 @@ fn cmd_find(args: FindArgs) {
 
     let root = Path::new(&args.dir);
     if !root.exists() {
-        eprintln!("Directory does not exist: {}", args.dir);
-        std::process::exit(1);
+        return Err(SearchError::DirNotFound(args.dir.clone()));
     }
 
     let match_count = AtomicUsize::new(0);
@@ -707,7 +475,7 @@ fn cmd_find(args: FindArgs) {
                     Err(_) => return ignore::WalkState::Continue,
                 };
 
-                if !entry.file_type().map_or(false, |ft| ft.is_file()) {
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
                     return ignore::WalkState::Continue;
                 }
 
@@ -716,7 +484,7 @@ fn cmd_find(args: FindArgs) {
                         .path()
                         .extension()
                         .and_then(|e| e.to_str())
-                        .map_or(false, |e| e.eq_ignore_ascii_case(ext));
+                        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
                     if !matches_ext {
                         return ignore::WalkState::Continue;
                     }
@@ -791,7 +559,7 @@ fn cmd_find(args: FindArgs) {
                         .path()
                         .extension()
                         .and_then(|e| e.to_str())
-                        .map_or(false, |e| e.eq_ignore_ascii_case(ext));
+                        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
                     if !matches_ext {
                         return ignore::WalkState::Continue;
                     }
@@ -829,32 +597,27 @@ fn cmd_find(args: FindArgs) {
         "\n{} matches found among {} entries in {:.3}s ({} threads)",
         matches, files, elapsed.as_secs_f64(), thread_count
     );
+    Ok(())
 }
 
 // ─── Index command ───────────────────────────────────────────────────
 
-fn cmd_index(args: IndexArgs) {
+fn cmd_index(args: IndexArgs) -> Result<(), SearchError> {
     let index = build_index(&args);
-    match save_index(&index) {
-        Ok(()) => {
-            let path = index_path_for(&args.dir);
-            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            eprintln!(
-                "Index saved to {} ({:.1} MB)",
-                path.display(),
-                size as f64 / 1_048_576.0
-            );
-        }
-        Err(e) => {
-            eprintln!("Failed to save index: {}", e);
-            std::process::exit(1);
-        }
-    }
+    save_index(&index)?;
+    let path = index_path_for(&args.dir);
+    let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    eprintln!(
+        "Index saved to {} ({:.1} MB)",
+        path.display(),
+        size as f64 / 1_048_576.0
+    );
+    Ok(())
 }
 
 // ─── Fast search (from index) ────────────────────────────────────────
 
-fn cmd_fast(args: FastArgs) {
+fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
     let start = Instant::now();
 
     // Load or rebuild index
@@ -906,15 +669,15 @@ fn cmd_fast(args: FastArgs) {
     };
 
     let re = if args.regex {
-        match Regex::new(&if args.ignore_case {
+        let pat = if args.ignore_case {
             format!("(?i){}", &args.pattern)
         } else {
             args.pattern.clone()
-        }) {
+        };
+        match Regex::new(&pat) {
             Ok(r) => Some(r),
             Err(e) => {
-                eprintln!("Invalid regex: {}", e);
-                std::process::exit(1);
+                return Err(SearchError::InvalidRegex { pattern: pat, source: e });
             }
         }
     } else {
@@ -935,16 +698,14 @@ fn cmd_fast(args: FastArgs) {
         }
 
         // Size filters
-        if let Some(min) = args.min_size {
-            if entry.size < min {
+        if let Some(min) = args.min_size
+            && entry.size < min {
                 continue;
             }
-        }
-        if let Some(max) = args.max_size {
-            if entry.size > max {
+        if let Some(max) = args.max_size
+            && entry.size > max {
                 continue;
             }
-        }
 
         // Extension filter
         if let Some(ref ext) = args.ext {
@@ -952,7 +713,7 @@ fn cmd_fast(args: FastArgs) {
             let matches_ext = path
                 .extension()
                 .and_then(|e| e.to_str())
-                .map_or(false, |e| e.eq_ignore_ascii_case(ext));
+                .is_some_and(|e| e.eq_ignore_ascii_case(ext));
             if !matches_ext {
                 continue;
             }
@@ -1002,154 +763,28 @@ fn cmd_fast(args: FastArgs) {
         search_elapsed.as_secs_f64(),
         total_elapsed.as_secs_f64()
     );
-}
-
-// ─── Content index building ──────────────────────────────────────────
-
-/// Tokenize a line of text into lowercase tokens
-pub fn tokenize(line: &str, min_len: usize) -> Vec<String> {
-    line.split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|s| s.len() >= min_len)
-        .map(|s| s.to_lowercase())
-        .collect()
-}
-
-pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
-    let root = fs::canonicalize(&args.dir).unwrap_or_else(|_| PathBuf::from(&args.dir));
-    let root_str = clean_path(&root.to_string_lossy());
-    let extensions: Vec<String> = args.ext.split(',').map(|s| s.trim().to_lowercase()).collect();
-
-    eprintln!(
-        "Building content index for {} (extensions: {})...",
-        root_str,
-        extensions.join(", ")
-    );
-    let start = Instant::now();
-
-    let mut builder = WalkBuilder::new(&root);
-    builder.hidden(!args.hidden);
-    builder.git_ignore(!args.no_ignore);
-    builder.git_global(!args.no_ignore);
-    builder.git_exclude(!args.no_ignore);
-
-    let thread_count = if args.threads == 0 {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-    } else {
-        args.threads
-    };
-    builder.threads(thread_count);
-
-    let file_data: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
-
-    builder.build_parallel().run(|| {
-        let extensions = extensions.clone();
-        let file_data = &file_data;
-        Box::new(move |result| {
-            if let Ok(entry) = result {
-                if !entry.file_type().map_or(false, |ft| ft.is_file()) {
-                    return ignore::WalkState::Continue;
-                }
-                let ext_match = entry
-                    .path()
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .map_or(false, |e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));
-                if !ext_match {
-                    return ignore::WalkState::Continue;
-                }
-                let path = clean_path(&entry.path().to_string_lossy());
-                if let Ok(content) = fs::read_to_string(entry.path()) {
-                    file_data.lock().unwrap().push((path, content));
-                }
-            }
-            ignore::WalkState::Continue
-        })
-    });
-
-    let file_data = file_data.into_inner().unwrap();
-    let file_count = file_data.len();
-    let min_len = args.min_token_len;
-
-    let mut files: Vec<String> = Vec::with_capacity(file_count);
-    let mut file_token_counts: Vec<u32> = Vec::with_capacity(file_count);
-    let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
-    let mut total_tokens: u64 = 0;
-
-    for (path, content) in &file_data {
-        let file_id = files.len() as u32;
-        files.push(path.clone());
-        let mut file_tokens: HashMap<String, Vec<u32>> = HashMap::new();
-        let mut file_total: u32 = 0;
-
-        for (line_num, line) in content.lines().enumerate() {
-            for token in tokenize(line, min_len) {
-                total_tokens += 1;
-                file_total += 1;
-                file_tokens.entry(token).or_default().push((line_num + 1) as u32);
-            }
-        }
-
-        file_token_counts.push(file_total);
-
-        for (token, lines) in file_tokens {
-            index.entry(token).or_default().push(Posting { file_id, lines });
-        }
-    }
-
-    let unique_tokens = index.len();
-    let elapsed = start.elapsed();
-
-    eprintln!(
-        "Indexed {} files, {} unique tokens ({} total) in {:.3}s",
-        file_count, unique_tokens, total_tokens, elapsed.as_secs_f64()
-    );
-
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
-
-    ContentIndex {
-        root: root_str,
-        created_at: now,
-        max_age_secs: args.max_age_hours * 3600,
-        files,
-        index,
-        total_tokens,
-        extensions,
-        file_token_counts,
-        forward: None,
-        path_to_id: None,
-    }
+    Ok(())
 }
 
 // ─── Content index command ───────────────────────────────────────────
 
-fn cmd_content_index(args: ContentIndexArgs) {
+fn cmd_content_index(args: ContentIndexArgs) -> Result<(), SearchError> {
     let exts_str = args.ext.clone();
     let index = build_content_index(&args);
-    match save_content_index(&index) {
-        Ok(()) => {
-            let path = content_index_path_for(&args.dir, &exts_str);
-            let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            eprintln!(
-                "Content index saved to {} ({:.1} MB)",
-                path.display(),
-                size as f64 / 1_048_576.0
-            );
-        }
-        Err(e) => {
-            eprintln!("Failed to save content index: {}", e);
-            std::process::exit(1);
-        }
-    }
+    save_content_index(&index)?;
+    let path = content_index_path_for(&args.dir, &exts_str);
+    let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    eprintln!(
+        "Content index saved to {} ({:.1} MB)",
+        path.display(),
+        size as f64 / 1_048_576.0
+    );
+    Ok(())
 }
 
 // ─── Grep command (search from content index) ────────────────────────
 
-fn cmd_grep(args: GrepArgs) {
+fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     let start = Instant::now();
     let exts_for_load = args.ext.clone().unwrap_or_default();
 
@@ -1180,9 +815,7 @@ fn cmd_grep(args: GrepArgs) {
             match find_content_index_for_dir(&args.dir) {
                 Some(idx) => idx,
                 None => {
-                    eprintln!("No content index found for '{}'. Build one first:", args.dir);
-                    eprintln!("  search content-index -d {} -e cs", args.dir);
-                    std::process::exit(1);
+                    return Err(SearchError::IndexNotFound { dir: args.dir.clone() });
                 }
             }
         }
@@ -1198,8 +831,7 @@ fn cmd_grep(args: GrepArgs) {
         let phrase_tokens = tokenize(&phrase_lower, 2);
 
         if phrase_tokens.is_empty() {
-            eprintln!("Phrase '{}' has no indexable tokens (min length 2)", phrase);
-            std::process::exit(1);
+            return Err(SearchError::EmptyPhrase { phrase: phrase.to_string() });
         }
 
         // Build a whitespace-flexible regex from phrase tokens: "async void" → "async\s+void"
@@ -1207,11 +839,11 @@ fn cmd_grep(args: GrepArgs) {
             .map(|t| regex::escape(t))
             .collect::<Vec<_>>()
             .join(r"\s+");
-        let phrase_re = match Regex::new(&format!("(?i){}", phrase_regex_pattern)) {
+        let phrase_re_pat = format!("(?i){}", phrase_regex_pattern);
+        let phrase_re = match Regex::new(&phrase_re_pat) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("Failed to build phrase regex: {}", e);
-                std::process::exit(1);
+                return Err(SearchError::InvalidRegex { pattern: phrase_re_pat, source: e });
             }
         };
 
@@ -1228,7 +860,7 @@ fn cmd_grep(args: GrepArgs) {
                         if let Some(ref ext) = args.ext {
                             let m = Path::new(path).extension()
                                 .and_then(|e| e.to_str())
-                                .map_or(false, |e| e.eq_ignore_ascii_case(ext));
+                                .is_some_and(|e| e.eq_ignore_ascii_case(ext));
                             if !m { return false; }
                         }
                         // Apply exclude filters
@@ -1264,8 +896,8 @@ fn cmd_grep(args: GrepArgs) {
 
         for &file_id in &candidates {
             let file_path = &index.files[file_id as usize];
-            if let Ok(content) = fs::read_to_string(file_path) {
-                if phrase_re.is_match(&content) {
+            if let Ok(content) = fs::read_to_string(file_path)
+                && phrase_re.is_match(&content) {
                     // Find matching line numbers
                     let mut matching_lines = Vec::new();
                     for (line_num, line) in content.lines().enumerate() {
@@ -1280,7 +912,6 @@ fn cmd_grep(args: GrepArgs) {
                         });
                     }
                 }
-            }
         }
 
         let search_elapsed = search_start.elapsed();
@@ -1319,7 +950,7 @@ fn cmd_grep(args: GrepArgs) {
 
                         let mut prev: Option<usize> = None;
                         for &idx in &lines_to_show {
-                            if let Some(p) = prev { if idx > p + 1 { println!("--"); } }
+                            if let Some(p) = prev && idx > p + 1 { println!("--"); }
                             let marker = if match_lines_set.contains(&idx) { ">" } else { " " };
                             println!("{}{}:{}: {}", marker, result.file_path, idx + 1, lines_vec[idx]);
                             prev = Some(idx);
@@ -1345,7 +976,7 @@ fn cmd_grep(args: GrepArgs) {
             "Index load: {:.3}s | Search+Verify: {:.6}s | Total: {:.3}s",
             load_elapsed.as_secs_f64(), search_elapsed.as_secs_f64(), total_elapsed.as_secs_f64()
         );
-        return;
+        return Ok(());
     }
 
     // ─── Normal token search ────────────────────────────────
@@ -1375,8 +1006,7 @@ fn cmd_grep(args: GrepArgs) {
                     expanded.extend(matching);
                 }
                 Err(e) => {
-                    eprintln!("Invalid regex '{}': {}", pat, e);
-                    std::process::exit(1);
+                    return Err(SearchError::InvalidRegex { pattern: pat.clone(), source: e });
                 }
             }
         }
@@ -1413,7 +1043,7 @@ fn cmd_grep(args: GrepArgs) {
                     let matches = Path::new(file_path)
                         .extension()
                         .and_then(|e| e.to_str())
-                        .map_or(false, |e| e.eq_ignore_ascii_case(ext));
+                        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
                     if !matches {
                         continue;
                     }
@@ -1516,11 +1146,10 @@ fn cmd_grep(args: GrepArgs) {
                     let mut prev_idx: Option<usize> = None;
                     for &idx in &lines_to_show {
                         // Print separator between non-contiguous blocks
-                        if let Some(prev) = prev_idx {
-                            if idx > prev + 1 {
+                        if let Some(prev) = prev_idx
+                            && idx > prev + 1 {
                                 println!("--");
                             }
-                        }
                         let marker = if match_lines.contains(&idx) { ">" } else { " " };
                         println!("{}{}:{}: {}", marker, result.file_path, idx + 1, lines_vec[idx]);
                         prev_idx = Some(idx);
@@ -1554,6 +1183,7 @@ fn cmd_grep(args: GrepArgs) {
         "Index load: {:.3}s | Search+Rank: {:.6}s | Total: {:.3}s",
         load_elapsed.as_secs_f64(), search_elapsed.as_secs_f64(), total_elapsed.as_secs_f64()
     );
+    Ok(())
 }
 
 // ─── Info command ────────────────────────────────────────────────────
@@ -1582,8 +1212,8 @@ fn cmd_info() {
         let ext = path.extension().and_then(|e| e.to_str());
 
         if ext == Some("idx") {
-            if let Ok(data) = fs::read(&path) {
-                if let Ok(index) = bincode::deserialize::<FileIndex>(&data) {
+            if let Ok(data) = fs::read(&path)
+                && let Ok(index) = bincode::deserialize::<FileIndex>(&data) {
                     found = true;
                     let age_secs = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -1599,10 +1229,9 @@ fn cmd_info() {
                         size as f64 / 1_048_576.0, age_hours, stale
                     );
                 }
-            }
-        } else if ext == Some("cidx") {
-            if let Ok(data) = fs::read(&path) {
-                if let Ok(index) = bincode::deserialize::<ContentIndex>(&data) {
+        } else if ext == Some("cidx")
+            && let Ok(data) = fs::read(&path)
+                && let Ok(index) = bincode::deserialize::<ContentIndex>(&data) {
                     found = true;
                     let age_secs = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
@@ -1619,8 +1248,6 @@ fn cmd_info() {
                         size as f64 / 1_048_576.0, age_hours, stale
                     );
                 }
-            }
-        }
     }
 
     if !found {
@@ -1642,8 +1269,8 @@ pub fn cmd_info_json() -> serde_json::Value {
             let ext = path.extension().and_then(|e| e.to_str());
 
             if ext == Some("idx") {
-                if let Ok(data) = fs::read(&path) {
-                    if let Ok(index) = bincode::deserialize::<FileIndex>(&data) {
+                if let Ok(data) = fs::read(&path)
+                    && let Ok(index) = bincode::deserialize::<FileIndex>(&data) {
                         let age_secs = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
@@ -1659,10 +1286,9 @@ pub fn cmd_info_json() -> serde_json::Value {
                             "stale": index.is_stale(),
                         }));
                     }
-                }
-            } else if ext == Some("cidx") {
-                if let Ok(data) = fs::read(&path) {
-                    if let Ok(index) = bincode::deserialize::<ContentIndex>(&data) {
+            } else if ext == Some("cidx")
+                && let Ok(data) = fs::read(&path)
+                    && let Ok(index) = bincode::deserialize::<ContentIndex>(&data) {
                         let age_secs = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
                             .unwrap()
@@ -1680,8 +1306,6 @@ pub fn cmd_info_json() -> serde_json::Value {
                             "stale": index.is_stale(),
                         }));
                     }
-                }
-            }
         }
     }
 
@@ -1833,18 +1457,12 @@ fn cmd_serve(args: ServeArgs) {
     mcp::server::run_server(index, def_index, dir_str, exts_for_load);
 }
 
-fn cmd_def_index(args: definitions::DefIndexArgs) {
+fn cmd_def_index(args: definitions::DefIndexArgs) -> Result<(), SearchError> {
     let index = definitions::build_definition_index(&args);
-    match definitions::save_definition_index(&index) {
-        Ok(()) => {
-            eprintln!("[def-index] Done! {} definitions from {} files",
-                index.definitions.len(), index.files.len());
-        }
-        Err(e) => {
-            eprintln!("[def-index] Error saving index: {}", e);
-            std::process::exit(1);
-        }
-    }
+    definitions::save_definition_index(&index)?;
+    eprintln!("[def-index] Done! {} definitions from {} files",
+        index.definitions.len(), index.files.len());
+    Ok(())
 }
 
 // ─── Main ────────────────────────────────────────────────────────────
@@ -1852,15 +1470,20 @@ fn cmd_def_index(args: definitions::DefIndexArgs) {
 fn main() {
     let cli = Cli::parse();
 
-    match cli.command {
+    let result = match cli.command {
         Commands::Find(args) => cmd_find(args),
         Commands::Index(args) => cmd_index(args),
         Commands::Fast(args) => cmd_fast(args),
-        Commands::Info => cmd_info(),
+        Commands::Info => { cmd_info(); Ok(()) },
         Commands::ContentIndex(args) => cmd_content_index(args),
         Commands::Grep(args) => cmd_grep(args),
-        Commands::Serve(args) => cmd_serve(args),
+        Commands::Serve(args) => { cmd_serve(args); Ok(()) },
         Commands::DefIndex(args) => cmd_def_index(args),
+    };
+
+    if let Err(e) = result {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
     }
 }
 

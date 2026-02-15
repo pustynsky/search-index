@@ -1,8 +1,8 @@
-# search — High-Performance Code Search Engine
+# Search — High-Performance Code Search Engine
 
 Inverted index + AST-based code intelligence engine for large-scale codebases. Sub-microsecond content search, structural code navigation (classes, methods, call trees), and native MCP server for AI agent integration — in a single statically-linked Rust binary.
 
-**Measured on a real 49K-file C# codebase ([full benchmarks](docs/benchmarks.md)):**
+**Measured on a real C# codebase with 49,000 files ([full benchmarks](docs/benchmarks.md)):**
 
 | Metric | Value |
 |---|---|
@@ -23,6 +23,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. S
 | [Concurrency](docs/concurrency.md) | Thread model, lock strategy, watcher design |
 | [Trade-offs](docs/tradeoffs.md) | Design decisions with alternatives considered |
 | [Benchmarks](docs/benchmarks.md) | Performance data, scaling estimates, industry comparison |
+| [E2E Test Plan](docs/e2e-test-plan.md) | 24 end-to-end test cases with automation script |
 
 ## Features
 
