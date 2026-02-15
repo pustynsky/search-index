@@ -270,9 +270,9 @@ src/
 
 ## Supported Languages
 
-| Language   | Parser                  | Definition Types                                                                                           |
-| ---------- | ----------------------- | ---------------------------------------------------------------------------------------------------------- |
-| C# (.cs)   | tree-sitter-c-sharp     | class, interface, struct, enum, record, method, constructor, property, field, delegate, event, enum member |
-| SQL (.sql) | tree-sitter-sequel-tsql | stored procedure, table, view, function, user-defined type, column, index                                  |
+| Language   | Parser                  | Definition Types                                                                                           | Status |
+| ---------- | ----------------------- | ---------------------------------------------------------------------------------------------------------- | ------ |
+| C# (.cs)   | tree-sitter-c-sharp     | class, interface, struct, enum, record, method, constructor, property, field, delegate, event, enum member | ✅ Active |
+| SQL (.sql) | *(disabled)*            | stored procedure, table, view, function, user-defined type, column, index                                  | ⏸️ Disabled — `tree-sitter-sequel-tsql` 0.4 requires language version 15, incompatible with tree-sitter 0.24 (supports 13-14). Parsing code is retained for future use. |
 
 Content indexing (tokenizer) is language-agnostic — works with any text file.

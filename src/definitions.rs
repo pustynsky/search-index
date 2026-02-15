@@ -167,8 +167,8 @@ pub struct DefIndexArgs {
 
     /// File extensions to parse, comma-separated.
     /// C# (.cs) uses tree-sitter-c-sharp grammar.
-    /// SQL (.sql) uses tree-sitter-sequel-tsql grammar (T-SQL support).
-    #[arg(short, long, default_value = "cs,sql")]
+    /// SQL (.sql) parsing is currently disabled (no compatible T-SQL grammar for tree-sitter 0.24).
+    #[arg(short, long, default_value = "cs")]
     pub ext: String,
 
     /// Number of parallel parsing threads. Each thread gets its own
@@ -228,17 +228,10 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     let total_files = files.len();
     eprintln!("[def-index] Found {} files to parse", total_files);
 
-    // Check SQL grammar availability
-    let sql_available = {
-        let mut test_parser = tree_sitter::Parser::new();
-        match test_parser.set_language(&tree_sitter_sequel_tsql::LANGUAGE.into()) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("[def-index] Warning: SQL grammar not compatible ({}), skipping .sql files", e);
-                false
-            }
-        }
-    };
+    // SQL grammar is currently disabled — no compatible T-SQL grammar for tree-sitter 0.24.
+    // The parsing code (parse_sql_definitions, walk_sql_node) is retained for future use
+    // when a compatible grammar becomes available.
+    let sql_available = false;
 
     // ─── Parallel parsing ─────────────────────────────────────
     let num_threads = if args.threads > 0 {
@@ -267,9 +260,8 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                     .expect("Error loading C# grammar");
 
                 let mut sql_parser = tree_sitter::Parser::new();
-                if sql_avail {
-                    let _ = sql_parser.set_language(&tree_sitter_sequel_tsql::LANGUAGE.into());
-                }
+                // SQL parser language will be set here when a compatible grammar is available
+                let _ = &sql_parser; // suppress unused warning
 
                 let mut chunk_defs: Vec<(u32, Vec<DefinitionEntry>)> = Vec::new();
                 let mut errors = 0usize;
@@ -1333,65 +1325,10 @@ namespace MyApp
         assert_eq!(member_defs.len(), 3);
     }
 
-    #[test]
-    fn test_parse_sql_stored_procedure() {
-        let mut parser = tree_sitter::Parser::new();
-        if parser.set_language(&tree_sitter_sequel_tsql::LANGUAGE.into()).is_err() {
-            eprintln!("Skipping SQL test: grammar ABI version incompatible");
-            return;
-        }
-
-        let source = r#"
-CREATE PROCEDURE [dbo].[usp_GetIndexTenantMapping]
-    @IndexName NVARCHAR(256),
-    @ServiceName NVARCHAR(256)
-AS
-BEGIN
-    SELECT * FROM IndexTenantMapping
-    WHERE IndexName = @IndexName AND ServiceName = @ServiceName
-END
-"#;
-
-        let defs = parse_sql_definitions(&mut parser, source, 0);
-
-        // Should find at least one definition
-        if defs.is_empty() {
-            eprintln!("Warning: SQL grammar parsed but no definitions found (AST may differ)");
-            return;
-        }
-
-        let sp_defs: Vec<_> = defs.iter()
-            .filter(|d| d.kind == DefinitionKind::StoredProcedure || d.name.contains("usp_GetIndexTenantMapping"))
-            .collect();
-
-        if sp_defs.is_empty() {
-            eprintln!("SQL defs found: {:?}", defs.iter().map(|d| (&d.name, &d.kind)).collect::<Vec<_>>());
-        }
-    }
-
-    #[test]
-    fn test_parse_sql_create_table() {
-        let mut parser = tree_sitter::Parser::new();
-        if parser.set_language(&tree_sitter_sequel_tsql::LANGUAGE.into()).is_err() {
-            eprintln!("Skipping SQL test: grammar ABI version incompatible");
-            return;
-        }
-
-        let source = r#"
-CREATE TABLE [dbo].[IndexTenantMapping]
-(
-    [Id] INT IDENTITY(1,1) NOT NULL,
-    [IndexName] NVARCHAR(256) NOT NULL,
-    [TenantId] UNIQUEIDENTIFIER NOT NULL,
-    [Status] INT NOT NULL DEFAULT 0
-)
-"#;
-
-        let defs = parse_sql_definitions(&mut parser, source, 0);
-        if defs.is_empty() {
-            eprintln!("Warning: SQL grammar parsed but no definitions found (AST may differ)");
-        }
-    }
+    // SQL parsing tests removed: tree-sitter-sequel-tsql 0.4 requires language version 15,
+    // incompatible with tree-sitter 0.24 (supports 13-14). SQL parsing code
+    // (parse_sql_definitions, walk_sql_node) is retained for future use when a
+    // compatible T-SQL grammar becomes available.
 
     #[test]
     fn test_definition_index_build_and_search() {
