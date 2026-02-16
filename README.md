@@ -414,7 +414,7 @@ search serve --dir C:\Projects --ext cs --watch --debounce-ms 300 --bulk-thresho
 | Tool                  | Description                                                      |
 | --------------------- | ---------------------------------------------------------------- |
 | `search_grep`         | Search content index with TF-IDF ranking, regex, phrase, AND/OR  |
-| `search_definitions`  | Search code definitions: classes, methods, interfaces, enums, SPs. Supports `containsLine` to find which method/class contains a given line number. (requires `--definitions`) |
+| `search_definitions`  | Search code definitions: classes, methods, interfaces, enums, SPs. Supports `containsLine` to find which method/class contains a given line number. Supports `includeBody` to return source code inline. (requires `--definitions`) |
 | `search_callers`      | Find all callers of a method and build a recursive call tree (up or down). Combines grep index + AST definition index to trace call chains in a single request. (requires `--definitions`) |
 | `search_find`         | Live filesystem walk (⚠️ slow for large dirs)                    |
 | `search_fast`         | Search pre-built file name index (instant)                       |
@@ -525,7 +525,25 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 | `resolveInterfaces`    | Auto-resolve interface -> implementation (default: true)       |
 | `ext`                  | File extension filter (default: server's `--ext`)              |
 
-**`search_definitions` with `containsLine` -- find containing method by line number:**
+**`search_definitions` -- search code definitions (requires `--definitions`):**
+
+| Parameter            | Type    | Default | Description                                                        |
+| -------------------- | ------- | ------- | ------------------------------------------------------------------ |
+| `name`               | string  | —       | Substring or comma-separated OR search                             |
+| `kind`               | string  | —       | Filter by definition kind (class, method, property, etc.)          |
+| `attribute`          | string  | —       | Filter by C# attribute                                             |
+| `baseType`           | string  | —       | Filter by base type/interface                                      |
+| `file`               | string  | —       | Filter by file path substring                                      |
+| `parent`             | string  | —       | Filter by parent class name                                        |
+| `containsLine`       | integer | —       | Find definition containing a line number (requires `file`)         |
+| `regex`              | boolean | false   | Treat `name` as regex                                              |
+| `maxResults`         | integer | 100     | Max results returned                                               |
+| `excludeDir`         | array   | —       | Exclude directories                                                |
+| `includeBody`        | boolean | false   | Include source code body inline                                    |
+| `maxBodyLines`       | integer | 100     | Max lines per definition body (0 = unlimited)                      |
+| `maxTotalBodyLines`  | integer | 500     | Max total body lines across all results (0 = unlimited)            |
+
+**`containsLine` -- find containing method by line number:**
 
 Find which method/class contains a given line number. No more `read_file` just to figure out "what method is on line 812".
 
@@ -542,6 +560,65 @@ Find which method/class contains a given line number. No more `read_file` just t
 }
 ```
 
+**`includeBody` -- return source code inline:**
+
+Retrieve the actual source code of definitions without a separate `read_file` call. Three-level protection prevents response explosion:
+- **`maxBodyLines`** — caps lines per individual definition (default: 100, 0 = unlimited)
+- **`maxTotalBodyLines`** — caps total body lines across all results (default: 500, 0 = unlimited)
+- **`maxResults`** — caps the number of definitions returned (default: 100)
+
+When a definition's body exceeds `maxBodyLines`, the `body` array is truncated and `bodyTruncated: true` is set. When the global `maxTotalBodyLines` budget is exhausted, remaining definitions receive `bodyOmitted: true` with a `bodyWarning` message. If the source file cannot be read, `bodyError` is returned instead.
+
+```json
+// Request
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "search_definitions",
+    "arguments": {
+      "name": "GetCatalogEntriesAsync",
+      "includeBody": true,
+      "maxBodyLines": 10
+    }
+  }
+}
+
+// Response
+{
+  "definitions": [
+    {
+      "name": "GetCatalogEntriesAsync",
+      "kind": "method",
+      "file": "CatalogService.cs",
+      "lines": "142-189",
+      "parent": "CatalogService",
+      "bodyStartLine": 142,
+      "body": [
+        "public async Task<List<CatalogEntry>> GetCatalogEntriesAsync(int tenantId)",
+        "{",
+        "    var entries = await _repository.GetEntriesAsync(tenantId);",
+        "    if (entries == null)",
+        "    {",
+        "        _logger.LogWarning(\"No entries found for tenant {TenantId}\", tenantId);",
+        "        return new List<CatalogEntry>();",
+        "    }",
+        "    return entries.Where(e => e.IsActive).ToList();",
+        "}"
+      ],
+      "bodyTruncated": false
+    }
+  ],
+  "summary": {
+    "total": 1,
+    "searchTimeMs": 0.4,
+    "totalBodyLines": 10,
+    "totalBodyLinesReturned": 10
+  }
+}
+```
+
 **Manual testing (without AI):**
 
 ```bash
@@ -553,6 +630,7 @@ search serve --dir . --ext rs --definitions
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokenize"}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"ExecuteQueryAsync","depth":3}}}
 {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_definitions","arguments":{"file":"QueryService.cs","containsLine":812}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"GetCatalogEntriesAsync","includeBody":true,"maxBodyLines":10}}}
 ```
 
 ---
