@@ -197,6 +197,47 @@ cargo run -- fast "" -d $TEST_DIR --files-only
 
 ---
 
+### T09a: `fast` — Comma-separated multi-term search (OR logic)
+
+**Command:**
+
+```powershell
+cargo run -- fast "main,lib,handler" -d $TEST_DIR -e $TEST_EXT
+```
+
+**Expected:**
+
+- Exit code: 0
+- stdout: file paths matching ANY of the comma-separated terms (e.g., files containing "main", "lib", or "handler" in their name)
+- Returns more results than searching for a single term
+
+**Validates:** Comma-separated patterns are split and matched with OR logic. Each term is matched independently as a substring of the file name.
+
+---
+
+### T09b: `fast` — Comma-separated multi-term search via MCP `search_fast`
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_fast","arguments":{"pattern":"main,lib,handler","ext":"rs"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `"result"` containing search results
+- `summary.totalMatches` > 1 (matches files containing ANY of the terms)
+- `files` array contains paths matching "main", "lib", or "handler"
+
+**Validates:** MCP `search_fast` tool supports comma-separated multi-term OR search.
+
+---
+
 ### T10: `content-index` — Build content index
 
 **Command:**

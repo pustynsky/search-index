@@ -112,11 +112,11 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_fast".to_string(),
-            description: "Search pre-built file name index for instant results. Auto-builds index if not present.".to_string(),
+            description: "Search pre-built file name index for instant results. Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Example: pattern='ModelSchemaStorage,ScannerJobState' finds files whose name contains ANY of the terms.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string", "description": "File name pattern" },
+                    "pattern": { "type": "string", "description": "File name pattern. Comma-separated for multi-term OR search: 'ClassA,ClassB,ClassC' finds files matching ANY term. Single term: 'UserService' finds files containing 'UserService'." },
                     "dir": {
                         "type": "string",
                         "description": "Directory whose index to search"
@@ -1274,16 +1274,29 @@ fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         }
     };
 
-    let search_pattern = if ignore_case { pattern.to_lowercase() } else { pattern.clone() };
-    let re = if use_regex {
-        match regex::Regex::new(&if ignore_case {
-            format!("(?i){}", &pattern)
-        } else {
-            pattern.clone()
-        }) {
-            Ok(r) => Some(r),
-            Err(e) => return ToolCallResult::error(format!("Invalid regex: {}", e)),
+    // Split comma-separated patterns into multiple terms for OR matching
+    let terms: Vec<String> = pattern
+        .split(',')
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .collect();
+
+    let search_terms: Vec<String> = if ignore_case {
+        terms.iter().map(|t| t.to_lowercase()).collect()
+    } else {
+        terms.clone()
+    };
+
+    let re_list: Option<Vec<regex::Regex>> = if use_regex {
+        let mut regexes = Vec::with_capacity(terms.len());
+        for t in &terms {
+            let pat = if ignore_case { format!("(?i){}", t) } else { t.clone() };
+            match regex::Regex::new(&pat) {
+                Ok(r) => regexes.push(r),
+                Err(e) => return ToolCallResult::error(format!("Invalid regex '{}': {}", t, e)),
+            }
         }
+        Some(regexes)
     } else {
         None
     };
@@ -1309,10 +1322,10 @@ fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             .unwrap_or("");
         let search_name = if ignore_case { name.to_lowercase() } else { name.to_string() };
 
-        let matched = if let Some(ref re) = re {
-            re.is_match(&search_name)
+        let matched = if let Some(ref regexes) = re_list {
+            regexes.iter().any(|re| re.is_match(&search_name))
         } else {
-            search_name.contains(&search_pattern)
+            search_terms.iter().any(|term| search_name.contains(term.as_str()))
         };
 
         if matched {
@@ -4936,5 +4949,175 @@ mod tests {
         let bytes = output["summary"]["responseBytes"].as_u64().unwrap();
         let tokens = output["summary"]["estimatedTokens"].as_u64().unwrap();
         assert_eq!(tokens, bytes / 4, "estimatedTokens should be responseBytes / 4");
+    }
+
+    // --- search_fast comma-separated multi-term tests ---
+
+    /// Helper: create a temp dir with known files and build a file index for search_fast tests
+    fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
+        use std::io::Write;
+
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let tmp_dir = std::env::temp_dir().join(format!("search_fast_test_{}_{}", std::process::id(), id));
+        let _ = std::fs::create_dir_all(&tmp_dir);
+
+        // Create test files
+        for name in &[
+            "ModelSchemaStorage.cs",
+            "ModelSchemaManager.cs",
+            "ScannerJobState.cs",
+            "WorkspaceInfoUtils.cs",
+            "UserService.cs",
+            "OtherFile.txt",
+        ] {
+            let p = tmp_dir.join(name);
+            let mut f = std::fs::File::create(&p).unwrap();
+            writeln!(f, "// {}", name).unwrap();
+        }
+
+        // Build and save file index
+        let dir_str = tmp_dir.to_string_lossy().to_string();
+        let file_index = crate::build_index(&crate::IndexArgs {
+            dir: dir_str.clone(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false,
+            threads: 0,
+        });
+        let _ = crate::save_index(&file_index);
+
+        let content_idx = HashMap::new();
+        let content_index = ContentIndex {
+            root: dir_str.clone(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![],
+            index: content_idx,
+            total_tokens: 0,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(content_index)),
+            def_index: None,
+            server_dir: dir_str,
+            server_ext: "cs".to_string(),
+            metrics: false,
+        };
+
+        (ctx, tmp_dir)
+    }
+
+    #[test]
+    fn test_search_fast_single_pattern() {
+        let (ctx, _tmp) = make_search_fast_ctx();
+        let result = handle_search_fast(&ctx, &json!({"pattern": "ModelSchemaStorage"}));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let total = output["summary"]["totalMatches"].as_u64().unwrap();
+        assert_eq!(total, 1, "Single pattern should match exactly one file");
+        let files = output["files"].as_array().unwrap();
+        assert!(files[0]["path"].as_str().unwrap().contains("ModelSchemaStorage.cs"));
+    }
+
+    #[test]
+    fn test_search_fast_comma_separated_multi_term() {
+        let (ctx, _tmp) = make_search_fast_ctx();
+        let result = handle_search_fast(&ctx, &json!({
+            "pattern": "ModelSchemaStorage,ModelSchemaManager,ScannerJobState,WorkspaceInfoUtils"
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let total = output["summary"]["totalMatches"].as_u64().unwrap();
+        assert_eq!(total, 4, "Comma-separated pattern should match 4 files");
+        let files = output["files"].as_array().unwrap();
+        let paths: Vec<&str> = files.iter().map(|f| f["path"].as_str().unwrap()).collect();
+        assert!(paths.iter().any(|p| p.contains("ModelSchemaStorage")));
+        assert!(paths.iter().any(|p| p.contains("ModelSchemaManager")));
+        assert!(paths.iter().any(|p| p.contains("ScannerJobState")));
+        assert!(paths.iter().any(|p| p.contains("WorkspaceInfoUtils")));
+    }
+
+    #[test]
+    fn test_search_fast_comma_separated_with_ext_filter() {
+        let (ctx, _tmp) = make_search_fast_ctx();
+        let result = handle_search_fast(&ctx, &json!({
+            "pattern": "ModelSchemaStorage,OtherFile",
+            "ext": "cs"
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let total = output["summary"]["totalMatches"].as_u64().unwrap();
+        assert_eq!(total, 1, "With ext=cs, OtherFile.txt should be excluded");
+    }
+
+    #[test]
+    fn test_search_fast_comma_separated_no_matches() {
+        let (ctx, _tmp) = make_search_fast_ctx();
+        let result = handle_search_fast(&ctx, &json!({
+            "pattern": "NonExistentClass,AnotherMissing"
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let total = output["summary"]["totalMatches"].as_u64().unwrap();
+        assert_eq!(total, 0);
+    }
+
+    #[test]
+    fn test_search_fast_comma_separated_partial_matches() {
+        let (ctx, _tmp) = make_search_fast_ctx();
+        let result = handle_search_fast(&ctx, &json!({
+            "pattern": "ModelSchemaStorage,NonExistent,ScannerJobState"
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let total = output["summary"]["totalMatches"].as_u64().unwrap();
+        assert_eq!(total, 2, "Should match only the 2 existing files");
+    }
+
+    #[test]
+    fn test_search_fast_comma_separated_with_spaces() {
+        let (ctx, _tmp) = make_search_fast_ctx();
+        let result = handle_search_fast(&ctx, &json!({
+            "pattern": " ModelSchemaStorage , ScannerJobState "
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let total = output["summary"]["totalMatches"].as_u64().unwrap();
+        assert_eq!(total, 2, "Should trim whitespace around comma-separated terms");
+    }
+
+    #[test]
+    fn test_search_fast_comma_separated_count_only() {
+        let (ctx, _tmp) = make_search_fast_ctx();
+        let result = handle_search_fast(&ctx, &json!({
+            "pattern": "ModelSchemaStorage,ScannerJobState",
+            "countOnly": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let total = output["summary"]["totalMatches"].as_u64().unwrap();
+        assert_eq!(total, 2);
+        let files = output["files"].as_array().unwrap();
+        assert!(files.is_empty(), "countOnly should return no file details");
+    }
+
+    #[test]
+    fn test_search_fast_comma_separated_ignore_case() {
+        let (ctx, _tmp) = make_search_fast_ctx();
+        let result = handle_search_fast(&ctx, &json!({
+            "pattern": "modelschemastorage,scannerjobstate",
+            "ignoreCase": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let total = output["summary"]["totalMatches"].as_u64().unwrap();
+        assert_eq!(total, 2, "Case-insensitive multi-term should match");
     }
 }

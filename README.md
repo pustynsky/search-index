@@ -162,7 +162,7 @@ search index -d C:\Projects --hidden --no-ignore
 
 ### `search fast` — Search File Name Index
 
-Searches a pre-built file name index. Instant results.
+Searches a pre-built file name index. Instant results. Supports comma-separated patterns for multi-file lookup (OR logic).
 
 ```bash
 # Search by file name (substring match)
@@ -170,6 +170,9 @@ search fast "notepad" -d C:\Windows
 
 # With extension filter
 search fast "notepad" -d C:\Windows -e exe --files-only
+
+# Comma-separated multi-term search (OR logic) — find multiple files at once
+search fast "ModelSchemaStorage,ScannerJobState,WorkspaceInfoUtils" -d C:\Projects -e cs
 
 # Regex search
 search fast "config\.\w+" -d C:\Projects --regex
@@ -435,7 +438,7 @@ search serve --dir C:\Projects --ext cs --watch --definitions --metrics
 | `search_definitions`  | Search code definitions: classes, methods, interfaces, enums, SPs. Supports `containsLine` to find which method/class contains a given line number. Supports `includeBody` to return source code inline. (requires `--definitions`) |
 | `search_callers`      | Find all callers of a method and build a recursive call tree (up or down). Combines grep index + AST definition index to trace call chains in a single request. (requires `--definitions`) |
 | `search_find`         | Live filesystem walk (⚠️ slow for large dirs)                    |
-| `search_fast`         | Search pre-built file name index (instant)                       |
+| `search_fast`         | Search pre-built file name index (instant). Supports comma-separated patterns for multi-file lookup (OR logic). |
 | `search_info`         | Show all indexes with status, sizes, age                         |
 | `search_reindex`      | Force rebuild + reload content index                             |
 | `search_reindex_definitions` | Force rebuild + reload definition index (requires `--definitions`) |
