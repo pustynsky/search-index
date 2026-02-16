@@ -421,6 +421,35 @@ cargo run -- info
 
 ---
 
+### T19a: `cleanup` — Remove orphaned index files
+
+**Setup:**
+
+```powershell
+# Create a temp directory, index it, then delete the directory
+$tmp = New-Item -ItemType Directory -Path "$env:TEMP\search_cleanup_test_$(Get-Random)"
+cargo run -- index -d $tmp
+Remove-Item -Recurse -Force $tmp
+```
+
+**Command:**
+
+```powershell
+cargo run -- cleanup
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr: `Scanning for orphaned indexes in ...`
+- stderr: `Removed orphaned index: ... (root: ...search_cleanup_test...)`
+- stderr: `Removed N orphaned index file(s).`
+- After cleanup, `search info` should NOT list the deleted temp directory
+
+**Validates:** Orphaned index detection, safe removal, root field extraction from binary index files.
+
+---
+
 ### T20: `def-index` — Build definition index
 
 **Command:**

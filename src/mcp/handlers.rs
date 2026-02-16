@@ -3572,6 +3572,9 @@ mod tests {
     }
 
     fn cleanup_tmp(tmp_dir: &std::path::Path) {
+        // Clean up index files from the global search-index directory first
+        // (before removing the temp dir, so canonicalize still works)
+        crate::remove_index_files_for(&tmp_dir.to_string_lossy());
         let _ = std::fs::remove_dir_all(tmp_dir);
     }
 
@@ -5016,7 +5019,7 @@ mod tests {
 
     #[test]
     fn test_search_fast_single_pattern() {
-        let (ctx, _tmp) = make_search_fast_ctx();
+        let (ctx, tmp) = make_search_fast_ctx();
         let result = handle_search_fast(&ctx, &json!({"pattern": "ModelSchemaStorage"}));
         assert!(!result.is_error);
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -5024,11 +5027,12 @@ mod tests {
         assert_eq!(total, 1, "Single pattern should match exactly one file");
         let files = output["files"].as_array().unwrap();
         assert!(files[0]["path"].as_str().unwrap().contains("ModelSchemaStorage.cs"));
+        cleanup_tmp(&tmp);
     }
 
     #[test]
     fn test_search_fast_comma_separated_multi_term() {
-        let (ctx, _tmp) = make_search_fast_ctx();
+        let (ctx, tmp) = make_search_fast_ctx();
         let result = handle_search_fast(&ctx, &json!({
             "pattern": "ModelSchemaStorage,ModelSchemaManager,ScannerJobState,WorkspaceInfoUtils"
         }));
@@ -5042,11 +5046,12 @@ mod tests {
         assert!(paths.iter().any(|p| p.contains("ModelSchemaManager")));
         assert!(paths.iter().any(|p| p.contains("ScannerJobState")));
         assert!(paths.iter().any(|p| p.contains("WorkspaceInfoUtils")));
+        cleanup_tmp(&tmp);
     }
 
     #[test]
     fn test_search_fast_comma_separated_with_ext_filter() {
-        let (ctx, _tmp) = make_search_fast_ctx();
+        let (ctx, tmp) = make_search_fast_ctx();
         let result = handle_search_fast(&ctx, &json!({
             "pattern": "ModelSchemaStorage,OtherFile",
             "ext": "cs"
@@ -5055,11 +5060,12 @@ mod tests {
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
         let total = output["summary"]["totalMatches"].as_u64().unwrap();
         assert_eq!(total, 1, "With ext=cs, OtherFile.txt should be excluded");
+        cleanup_tmp(&tmp);
     }
 
     #[test]
     fn test_search_fast_comma_separated_no_matches() {
-        let (ctx, _tmp) = make_search_fast_ctx();
+        let (ctx, tmp) = make_search_fast_ctx();
         let result = handle_search_fast(&ctx, &json!({
             "pattern": "NonExistentClass,AnotherMissing"
         }));
@@ -5067,11 +5073,12 @@ mod tests {
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
         let total = output["summary"]["totalMatches"].as_u64().unwrap();
         assert_eq!(total, 0);
+        cleanup_tmp(&tmp);
     }
 
     #[test]
     fn test_search_fast_comma_separated_partial_matches() {
-        let (ctx, _tmp) = make_search_fast_ctx();
+        let (ctx, tmp) = make_search_fast_ctx();
         let result = handle_search_fast(&ctx, &json!({
             "pattern": "ModelSchemaStorage,NonExistent,ScannerJobState"
         }));
@@ -5079,11 +5086,12 @@ mod tests {
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
         let total = output["summary"]["totalMatches"].as_u64().unwrap();
         assert_eq!(total, 2, "Should match only the 2 existing files");
+        cleanup_tmp(&tmp);
     }
 
     #[test]
     fn test_search_fast_comma_separated_with_spaces() {
-        let (ctx, _tmp) = make_search_fast_ctx();
+        let (ctx, tmp) = make_search_fast_ctx();
         let result = handle_search_fast(&ctx, &json!({
             "pattern": " ModelSchemaStorage , ScannerJobState "
         }));
@@ -5091,11 +5099,12 @@ mod tests {
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
         let total = output["summary"]["totalMatches"].as_u64().unwrap();
         assert_eq!(total, 2, "Should trim whitespace around comma-separated terms");
+        cleanup_tmp(&tmp);
     }
 
     #[test]
     fn test_search_fast_comma_separated_count_only() {
-        let (ctx, _tmp) = make_search_fast_ctx();
+        let (ctx, tmp) = make_search_fast_ctx();
         let result = handle_search_fast(&ctx, &json!({
             "pattern": "ModelSchemaStorage,ScannerJobState",
             "countOnly": true
@@ -5106,11 +5115,12 @@ mod tests {
         assert_eq!(total, 2);
         let files = output["files"].as_array().unwrap();
         assert!(files.is_empty(), "countOnly should return no file details");
+        cleanup_tmp(&tmp);
     }
 
     #[test]
     fn test_search_fast_comma_separated_ignore_case() {
-        let (ctx, _tmp) = make_search_fast_ctx();
+        let (ctx, tmp) = make_search_fast_ctx();
         let result = handle_search_fast(&ctx, &json!({
             "pattern": "modelschemastorage,scannerjobstate",
             "ignoreCase": true
@@ -5119,5 +5129,6 @@ mod tests {
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
         let total = output["summary"]["totalMatches"].as_u64().unwrap();
         assert_eq!(total, 2, "Case-insensitive multi-term should match");
+        cleanup_tmp(&tmp);
     }
 }

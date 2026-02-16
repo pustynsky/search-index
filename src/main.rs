@@ -20,8 +20,9 @@ mod mcp;
 
 pub use error::SearchError;
 pub use index::{
-    build_content_index, build_index, content_index_path_for, find_content_index_for_dir,
-    index_dir, index_path_for, load_content_index, load_index, save_content_index, save_index,
+    build_content_index, build_index, cleanup_orphaned_indexes, content_index_path_for,
+    find_content_index_for_dir, index_dir, index_path_for, load_content_index, load_index,
+    remove_index_files_for, save_content_index, save_index,
 };
 
 // ─── CLI ─────────────────────────────────────────────────────────────
@@ -73,6 +74,11 @@ enum Commands {
     /// Uses tree-sitter to parse C# and SQL files and extract structural definitions.
     /// Index is saved to disk for fast loading.
     DefIndex(definitions::DefIndexArgs),
+
+    /// Remove orphaned index files whose root directories no longer exist.
+    /// Scans the index directory and removes .idx, .cidx, .didx files
+    /// that point to directories that have been deleted or moved.
+    Cleanup,
 }
 
 #[derive(Parser, Debug)]
@@ -1508,6 +1514,16 @@ fn main() {
         Commands::Grep(args) => cmd_grep(args),
         Commands::Serve(args) => { cmd_serve(args); Ok(()) },
         Commands::DefIndex(args) => cmd_def_index(args),
+        Commands::Cleanup => {
+            eprintln!("Scanning for orphaned indexes in {}...", index_dir().display());
+            let removed = cleanup_orphaned_indexes();
+            if removed == 0 {
+                eprintln!("No orphaned indexes found.");
+            } else {
+                eprintln!("Removed {} orphaned index file(s).", removed);
+            }
+            Ok(())
+        },
     };
 
     if let Err(e) = result {

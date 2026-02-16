@@ -91,6 +91,88 @@ pub fn find_content_index_for_dir(dir: &str) -> Option<ContentIndex> {
     None
 }
 
+/// Read the root field from a bincode-serialized index file without deserializing the whole file.
+/// Bincode stores a String as: u64 (length) + bytes. Since `root` is the first field in
+/// FileIndex, ContentIndex, and DefinitionIndex, we can read just the first few bytes.
+fn read_root_from_index_file(path: &std::path::Path) -> Option<String> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut len_buf = [0u8; 8];
+    file.read_exact(&mut len_buf).ok()?;
+    let str_len = u64::from_le_bytes(len_buf) as usize;
+    // Sanity check: root paths shouldn't be longer than 4KB
+    if str_len > 4096 {
+        return None;
+    }
+    let mut str_buf = vec![0u8; str_len];
+    file.read_exact(&mut str_buf).ok()?;
+    String::from_utf8(str_buf).ok()
+}
+
+/// Remove all index files (.idx, .cidx, .didx) associated with a given directory.
+/// Used by tests to prevent orphaned index files in the global index directory.
+/// Reads only the first few bytes of each file (the root field) to avoid
+/// deserializing large index files.
+pub fn remove_index_files_for(dir: &str) {
+    // Remove .idx file (direct hash lookup)
+    let idx_path = index_path_for(dir);
+    let _ = std::fs::remove_file(&idx_path);
+
+    // For .cidx and .didx, we don't know which extensions were used,
+    // so scan the index directory and check the root field (fast — reads ~200 bytes)
+    let canonical = std::fs::canonicalize(dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(dir));
+    let clean = crate::clean_path(&canonical.to_string_lossy());
+
+    let idx_dir = index_dir();
+    if let Ok(entries) = std::fs::read_dir(&idx_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|e| e.to_str());
+            if matches!(ext, Some("cidx") | Some("didx")) {
+                if let Some(root) = read_root_from_index_file(&path) {
+                    if root == clean {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Remove orphaned index files whose root directory no longer exists on disk.
+/// Returns the number of files removed.
+/// Reads only the root field from each file header (fast — no full deserialization).
+pub fn cleanup_orphaned_indexes() -> usize {
+    let idx_dir = index_dir();
+    if !idx_dir.exists() {
+        return 0;
+    }
+
+    let mut removed = 0;
+
+    if let Ok(entries) = std::fs::read_dir(&idx_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|e| e.to_str());
+            if !matches!(ext, Some("idx") | Some("cidx") | Some("didx")) {
+                continue;
+            }
+
+            if let Some(root) = read_root_from_index_file(&path) {
+                if !std::path::Path::new(&root).exists() {
+                    if std::fs::remove_file(&path).is_ok() {
+                        removed += 1;
+                        eprintln!("  Removed orphaned index: {} (root: {})", path.display(), root);
+                    }
+                }
+            }
+        }
+    }
+
+    removed
+}
+
 // ─── Index building ──────────────────────────────────────────────────
 
 pub fn build_index(args: &IndexArgs) -> FileIndex {

@@ -350,6 +350,25 @@ Index directory: C:\Users\you\AppData\Local\search-index
 
 ---
 
+### `search cleanup` — Remove Orphaned Indexes
+
+Scans the index directory and removes `.idx`, `.cidx`, `.didx` files whose root directories no longer exist on disk.
+
+```bash
+search cleanup
+```
+
+Example output:
+
+```
+Scanning for orphaned indexes in C:\Users\you\AppData\Local\search-index...
+  Removed orphaned index: abc123.idx (root: C:\Deleted\OldProject)
+  Removed orphaned index: def456.cidx (root: C:\Temp\test_dir_12345)
+Removed 2 orphaned index file(s).
+```
+
+---
+
 ### `search def-index` — Build Code Definition Index
 
 Parses C# and SQL files using tree-sitter to extract structural code definitions (classes, methods, interfaces, enums, stored procedures, tables, etc.).
