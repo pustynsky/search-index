@@ -576,23 +576,7 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
         if show_lines
             && let Ok(content) = std::fs::read_to_string(&r.file_path) {
-                let lines_vec: Vec<&str> = content.lines().collect();
-                let total_lines = lines_vec.len();
-
-                let mut lines_to_show: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
-                let mut match_lines_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
-
-                for &ln in &r.lines {
-                    let idx = (ln as usize).saturating_sub(1);
-                    if idx < total_lines {
-                        match_lines_set.insert(idx);
-                        let s = idx.saturating_sub(context_lines);
-                        let e = (idx + context_lines).min(total_lines - 1);
-                        for i in s..=e { lines_to_show.insert(i); }
-                    }
-                }
-
-                file_obj["lineContent"] = build_grouped_line_content(&lines_to_show, &lines_vec, &match_lines_set);
+                file_obj["lineContent"] = build_line_content_from_matches(&content, &r.lines, context_lines);
             }
 
         file_obj
@@ -752,23 +736,7 @@ fn handle_phrase_search(
         if show_lines {
             // Use cached content from phrase verification (no second read)
             if let Some(ref content) = r.content {
-                let lines_vec: Vec<&str> = content.lines().collect();
-                let total_lines = lines_vec.len();
-
-                let mut lines_to_show: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
-                let mut match_lines_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
-
-                for &ln in &r.lines {
-                    let idx = (ln as usize).saturating_sub(1);
-                    if idx < total_lines {
-                        match_lines_set.insert(idx);
-                        let s = idx.saturating_sub(context_lines);
-                        let e = (idx + context_lines).min(total_lines - 1);
-                        for i in s..=e { lines_to_show.insert(i); }
-                    }
-                }
-
-                file_obj["lineContent"] = build_grouped_line_content(&lines_to_show, &lines_vec, &match_lines_set);
+                file_obj["lineContent"] = build_line_content_from_matches(content, &r.lines, context_lines);
             }
         }
 
@@ -1118,8 +1086,34 @@ fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
 // ─── helper: inject body source code into definition JSON object ─────
 
-/// Build compact grouped lineContent for search_grep.
-/// Groups consecutive lines together, producing `[{startLine, lines[], matchIndices[]}]`.
+/// Build compact grouped lineContent for search_grep from raw file content.
+/// Computes context windows around match lines, then groups consecutive lines
+/// into `[{startLine, lines[], matchIndices[]}]`.
+fn build_line_content_from_matches(
+    content: &str,
+    match_lines: &[u32],
+    context_lines: usize,
+) -> Value {
+    let lines_vec: Vec<&str> = content.lines().collect();
+    let total_lines = lines_vec.len();
+
+    let mut lines_to_show = std::collections::BTreeSet::new();
+    let mut match_lines_set = std::collections::HashSet::new();
+
+    for &ln in match_lines {
+        let idx = (ln as usize).saturating_sub(1);
+        if idx < total_lines {
+            match_lines_set.insert(idx);
+            let s = idx.saturating_sub(context_lines);
+            let e = (idx + context_lines).min(total_lines - 1);
+            for i in s..=e { lines_to_show.insert(i); }
+        }
+    }
+
+    build_grouped_line_content(&lines_to_show, &lines_vec, &match_lines_set)
+}
+
+/// Groups consecutive lines into compact chunks: `[{startLine, lines[], matchIndices[]}]`.
 fn build_grouped_line_content(
     lines_to_show: &std::collections::BTreeSet<usize>,
     lines_vec: &[&str],
@@ -3474,6 +3468,107 @@ mod tests {
         assert_eq!(defs.len(), 1);
         assert!(defs[0].get("bodyError").is_some(), "Should have bodyError for missing file");
         assert_eq!(defs[0]["bodyError"], "failed to read file");
+    }
+
+    // ─── build_grouped_line_content tests ────────────────────────────────
+
+    #[test]
+    fn test_grouped_line_content_single_group() {
+        let lines_vec = vec!["line0", "line1", "line2", "line3", "line4"];
+        let mut lines_to_show = std::collections::BTreeSet::new();
+        lines_to_show.insert(1);
+        lines_to_show.insert(2);
+        lines_to_show.insert(3);
+        let mut match_lines_set = std::collections::HashSet::new();
+        match_lines_set.insert(2);
+
+        let result = build_grouped_line_content(&lines_to_show, &lines_vec, &match_lines_set);
+        let groups = result.as_array().unwrap();
+        assert_eq!(groups.len(), 1, "Should be one group for consecutive lines");
+        assert_eq!(groups[0]["startLine"], 2); // 0-based idx 1 → 1-based line 2
+        let lines = groups[0]["lines"].as_array().unwrap();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "line1");
+        assert_eq!(lines[1], "line2");
+        assert_eq!(lines[2], "line3");
+        let matches = groups[0]["matchIndices"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0], 1); // index 1 within the group
+    }
+
+    #[test]
+    fn test_grouped_line_content_two_groups() {
+        // Lines 1,2 and 5,6 — gap between 2 and 5
+        let lines_vec = vec!["L0", "L1", "L2", "L3", "L4", "L5", "L6"];
+        let mut lines_to_show = std::collections::BTreeSet::new();
+        for i in [1, 2, 5, 6] { lines_to_show.insert(i); }
+        let mut match_lines_set = std::collections::HashSet::new();
+        match_lines_set.insert(1);
+        match_lines_set.insert(6);
+
+        let result = build_grouped_line_content(&lines_to_show, &lines_vec, &match_lines_set);
+        let groups = result.as_array().unwrap();
+        assert_eq!(groups.len(), 2, "Should be two groups with a gap");
+
+        // Group 1: lines 1-2 (0-based), startLine=2 (1-based)
+        assert_eq!(groups[0]["startLine"], 2);
+        assert_eq!(groups[0]["lines"].as_array().unwrap().len(), 2);
+        let m0 = groups[0]["matchIndices"].as_array().unwrap();
+        assert_eq!(m0.len(), 1);
+        assert_eq!(m0[0], 0); // match at index 0
+
+        // Group 2: lines 5-6 (0-based), startLine=6 (1-based)
+        assert_eq!(groups[1]["startLine"], 6);
+        assert_eq!(groups[1]["lines"].as_array().unwrap().len(), 2);
+        let m1 = groups[1]["matchIndices"].as_array().unwrap();
+        assert_eq!(m1.len(), 1);
+        assert_eq!(m1[0], 1); // match at index 1
+    }
+
+    #[test]
+    fn test_grouped_line_content_no_matches() {
+        // Context-only lines, no matches
+        let lines_vec = vec!["A", "B", "C"];
+        let mut lines_to_show = std::collections::BTreeSet::new();
+        lines_to_show.insert(0);
+        lines_to_show.insert(1);
+        let match_lines_set = std::collections::HashSet::new(); // empty
+
+        let result = build_grouped_line_content(&lines_to_show, &lines_vec, &match_lines_set);
+        let groups = result.as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0]["startLine"], 1);
+        // matchIndices should be absent when empty
+        assert!(groups[0].get("matchIndices").is_none(), "matchIndices should be omitted when empty");
+    }
+
+    #[test]
+    fn test_grouped_line_content_empty() {
+        let lines_vec: Vec<&str> = vec![];
+        let lines_to_show = std::collections::BTreeSet::new();
+        let match_lines_set = std::collections::HashSet::new();
+
+        let result = build_grouped_line_content(&lines_to_show, &lines_vec, &match_lines_set);
+        let groups = result.as_array().unwrap();
+        assert_eq!(groups.len(), 0, "Empty input should produce empty groups");
+    }
+
+    #[test]
+    fn test_grouped_line_content_multiple_matches_in_group() {
+        let lines_vec = vec!["A", "B", "C", "D", "E"];
+        let mut lines_to_show = std::collections::BTreeSet::new();
+        for i in 0..5 { lines_to_show.insert(i); }
+        let mut match_lines_set = std::collections::HashSet::new();
+        match_lines_set.insert(1);
+        match_lines_set.insert(3);
+
+        let result = build_grouped_line_content(&lines_to_show, &lines_vec, &match_lines_set);
+        let groups = result.as_array().unwrap();
+        assert_eq!(groups.len(), 1);
+        let matches = groups[0]["matchIndices"].as_array().unwrap();
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0], 1);
+        assert_eq!(matches[1], 3);
     }
 
     // Note: is_csharp_noise_token tests removed — function was replaced by
