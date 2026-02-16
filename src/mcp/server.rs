@@ -166,6 +166,7 @@ fn handle_request(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use crate::TrigramIndex;
 
     fn make_ctx() -> HandlerContext {
         let index = ContentIndex {
@@ -177,6 +178,8 @@ mod tests {
             total_tokens: 0,
             extensions: vec![],
             file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None,
             path_to_id: None,
         };

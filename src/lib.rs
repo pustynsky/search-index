@@ -64,6 +64,30 @@ pub struct Posting {
     pub lines: Vec<u32>,
 }
 
+/// Trigram index for substring search.
+/// Maps 3-character sequences to tokens containing them.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct TrigramIndex {
+    /// All unique tokens from the inverted index, sorted alphabetically.
+    pub tokens: Vec<String>,
+    /// Trigram → sorted vec of token indices (into `tokens` vec).
+    pub trigram_map: HashMap<String, Vec<u32>>,
+}
+
+/// Generate trigrams (3-char sliding windows) from a token.
+/// Uses char-based windows for Unicode correctness.
+/// Returns empty vec for tokens shorter than 3 chars.
+#[must_use]
+pub fn generate_trigrams(token: &str) -> Vec<String> {
+    let chars: Vec<char> = token.chars().collect();
+    if chars.len() < 3 {
+        return vec![];
+    }
+    chars.windows(3)
+        .map(|w| w.iter().collect::<String>())
+        .collect()
+}
+
 /// Inverted index: token → list of postings.
 ///
 /// The core data structure for content search. Maps every token
@@ -83,6 +107,12 @@ pub struct ContentIndex {
     pub extensions: Vec<String>,
     /// file_id → total token count in that file (for TF-IDF)
     pub file_token_counts: Vec<u32>,
+    /// Trigram index for substring search
+    #[serde(default)]
+    pub trigram: TrigramIndex,
+    /// Whether the trigram index needs rebuilding before next substring search
+    #[serde(default)]
+    pub trigram_dirty: bool,
     /// Forward index: file_id → Vec<token> (only populated with --watch)
     #[serde(default)]
     pub forward: Option<HashMap<u32, Vec<String>>>,
@@ -171,6 +201,8 @@ mod lib_tests {
             total_tokens: 0,
             extensions: vec![],
             file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None,
             path_to_id: None,
         };
@@ -188,6 +220,117 @@ mod lib_tests {
         assert_eq!(decoded.file_id, 42);
         assert_eq!(decoded.lines, vec![1, 5, 10]);
     }
+#[cfg(test)]
+mod trigram_tests {
+    use super::*;
+
+    #[test]
+    fn test_generate_trigrams_basic() {
+        // "httpclient" → ["htt","ttp","tpc","pcl","cli","lie","ien","ent"]
+        let trigrams = generate_trigrams("httpclient");
+        assert_eq!(trigrams.len(), 8);
+        assert_eq!(trigrams[0], "htt");
+        assert_eq!(trigrams[7], "ent");
+    }
+
+    #[test]
+    fn test_generate_trigrams_short_1char() {
+        assert!(generate_trigrams("a").is_empty());
+    }
+
+    #[test]
+    fn test_generate_trigrams_short_2chars() {
+        assert!(generate_trigrams("ab").is_empty());
+    }
+
+    #[test]
+    fn test_generate_trigrams_exact_3chars() {
+        let trigrams = generate_trigrams("abc");
+        assert_eq!(trigrams, vec!["abc"]);
+    }
+
+    #[test]
+    fn test_generate_trigrams_4chars() {
+        let trigrams = generate_trigrams("abcd");
+        assert_eq!(trigrams, vec!["abc", "bcd"]);
+    }
+
+    #[test]
+    fn test_generate_trigrams_unicode() {
+        // Unicode chars should be handled correctly (char-based, not byte-based)
+        let trigrams = generate_trigrams("αβγδ");
+        assert_eq!(trigrams.len(), 2); // "αβγ", "βγδ"
+    }
+
+    #[test]
+    fn test_generate_trigrams_count() {
+        // Token of length N produces exactly max(0, N-2) trigrams
+        for len in 0..20 {
+            let token: String = (0..len).map(|i| (b'a' + (i % 26) as u8) as char).collect();
+            let expected = if len < 3 { 0 } else { len - 2 };
+            assert_eq!(generate_trigrams(&token).len(), expected, "len={}", len);
+        }
+    }
+
+    #[test]
+    fn test_generate_trigrams_deterministic() {
+        let a = generate_trigrams("databaseconnectionfactory");
+        let b = generate_trigrams("databaseconnectionfactory");
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_generate_trigrams_empty() {
+        assert!(generate_trigrams("").is_empty());
+    }
+
+    #[test]
+    fn test_trigram_index_serialization_roundtrip() {
+        let mut trigram_map = HashMap::new();
+        trigram_map.insert("abc".to_string(), vec![0, 1, 2]);
+        trigram_map.insert("bcd".to_string(), vec![1, 2]);
+        let ti = TrigramIndex {
+            tokens: vec!["abcdef".to_string(), "bcdefg".to_string(), "cdefgh".to_string()],
+            trigram_map,
+        };
+        let bytes = bincode::serialize(&ti).unwrap();
+        let ti2: TrigramIndex = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(ti.tokens, ti2.tokens);
+        assert_eq!(ti.trigram_map, ti2.trigram_map);
+    }
+
+    #[test]
+    fn test_content_index_with_trigram_serialization() {
+        // Create a ContentIndex with a non-empty trigram, serialize/deserialize
+        let ci = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec![],
+            file_token_counts: vec![],
+            trigram: TrigramIndex {
+                tokens: vec!["hello".to_string()],
+                trigram_map: {
+                    let mut m = HashMap::new();
+                    m.insert("hel".to_string(), vec![0]);
+                    m.insert("ell".to_string(), vec![0]);
+                    m.insert("llo".to_string(), vec![0]);
+                    m
+                },
+            },
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        let bytes = bincode::serialize(&ci).unwrap();
+        let ci2: ContentIndex = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(ci.trigram.tokens, ci2.trigram.tokens);
+        assert_eq!(ci.trigram.trigram_map.len(), ci2.trigram.trigram_map.len());
+    }
+}
 }
 
 // ─── Property-based tests (proptest) ─────────────────────────────────
@@ -363,6 +506,8 @@ mod property_tests {
                 total_tokens,
                 extensions: vec!["cs".to_string()],
                 file_token_counts: file_token_counts.clone(),
+                trigram: TrigramIndex::default(),
+                trigram_dirty: false,
                 forward: None,
                 path_to_id: None,
             };
