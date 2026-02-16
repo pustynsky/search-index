@@ -17,6 +17,7 @@ pub fn start_watcher(
     extensions: Vec<String>,
     debounce_ms: u64,
     bulk_threshold: usize,
+    index_base: PathBuf,
 ) -> notify::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
 
@@ -77,7 +78,7 @@ pub fn start_watcher(
                             threads: 0,
                             min_token_len: 2,
                         });
-                        if let Err(e) = save_content_index(&new_index) {
+                        if let Err(e) = save_content_index(&new_index, &index_base) {
                             warn!(error = %e, "Failed to save reindexed content to disk");
                         }
                         // Rebuild forward index for watch mode

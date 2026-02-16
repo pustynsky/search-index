@@ -1533,7 +1533,7 @@ fn find_sql_object_name(node: tree_sitter::Node, source: &[u8]) -> Option<String
 
 // ─── Index Persistence ───────────────────────────────────────────────
 
-fn def_index_path_for(dir: &str, exts: &str) -> PathBuf {
+fn def_index_path_for(dir: &str, exts: &str, index_base: &std::path::Path) -> PathBuf {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -1543,14 +1543,13 @@ fn def_index_path_for(dir: &str, exts: &str) -> PathBuf {
     exts.hash(&mut hasher);
     "definitions".hash(&mut hasher); // distinguish from content index
     let hash = hasher.finish();
-    crate::index_dir().join(format!("{:016x}.didx", hash))
+    index_base.join(format!("{:016x}.didx", hash))
 }
 
-pub fn save_definition_index(index: &DefinitionIndex) -> Result<(), crate::SearchError> {
-    let dir = crate::index_dir();
-    std::fs::create_dir_all(&dir)?;
+pub fn save_definition_index(index: &DefinitionIndex, index_base: &std::path::Path) -> Result<(), crate::SearchError> {
+    std::fs::create_dir_all(index_base)?;
     let exts_str = index.extensions.join(",");
-    let path = def_index_path_for(&index.root, &exts_str);
+    let path = def_index_path_for(&index.root, &exts_str, index_base);
     let encoded = bincode::serialize(index)?;
     std::fs::write(&path, &encoded)?;
     eprintln!(
@@ -1563,19 +1562,18 @@ pub fn save_definition_index(index: &DefinitionIndex) -> Result<(), crate::Searc
 }
 
 #[allow(dead_code)]
-pub fn load_definition_index(dir: &str, exts: &str) -> Option<DefinitionIndex> {
-    let path = def_index_path_for(dir, exts);
+pub fn load_definition_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Option<DefinitionIndex> {
+    let path = def_index_path_for(dir, exts, index_base);
     let data = std::fs::read(&path).ok()?;
     bincode::deserialize(&data).ok()
 }
 
 /// Try to find any definition index for a directory (any extension combo)
 #[allow(dead_code)]
-pub fn find_definition_index_for_dir(dir: &str) -> Option<DefinitionIndex> {
+pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path) -> Option<DefinitionIndex> {
     let canonical = std::fs::canonicalize(dir).ok()?;
     let dir_str = clean_path(&canonical.to_string_lossy());
-    let idx_dir = crate::index_dir();
-    let entries = std::fs::read_dir(&idx_dir).ok()?;
+    let entries = std::fs::read_dir(index_base).ok()?;
 
     for entry in entries.flatten() {
         let path = entry.path();

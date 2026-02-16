@@ -22,7 +22,7 @@ pub use error::SearchError;
 pub use index::{
     build_content_index, build_index, cleanup_orphaned_indexes, content_index_path_for,
     find_content_index_for_dir, index_dir, index_path_for, load_content_index, load_index,
-    remove_index_files_for, save_content_index, save_index,
+    save_content_index, save_index,
 };
 
 // ─── CLI ─────────────────────────────────────────────────────────────
@@ -617,9 +617,10 @@ fn cmd_find(args: FindArgs) -> Result<(), SearchError> {
 // ─── Index command ───────────────────────────────────────────────────
 
 fn cmd_index(args: IndexArgs) -> Result<(), SearchError> {
+    let idx_base = index_dir();
     let index = build_index(&args);
-    save_index(&index)?;
-    let path = index_path_for(&args.dir);
+    save_index(&index, &idx_base)?;
+    let path = index_path_for(&args.dir, &idx_base);
     let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     eprintln!(
         "Index saved to {} ({:.1} MB)",
@@ -634,8 +635,10 @@ fn cmd_index(args: IndexArgs) -> Result<(), SearchError> {
 fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
     let start = Instant::now();
 
+    let idx_base = index_dir();
+
     // Load or rebuild index
-    let index = match load_index(&args.dir) {
+    let index = match load_index(&args.dir, &idx_base) {
         Some(idx) => {
             if idx.is_stale() && args.auto_reindex {
                 eprintln!("Index is stale, rebuilding...");
@@ -646,7 +649,7 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
                     no_ignore: false,
                     threads: 0,
                 });
-                if let Err(e) = save_index(&new_index) {
+                if let Err(e) = save_index(&new_index, &idx_base) {
                     eprintln!("Warning: failed to save updated index: {}", e);
                 }
                 new_index
@@ -666,7 +669,7 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
                 no_ignore: false,
                 threads: 0,
             });
-            if let Err(e) = save_index(&new_index) {
+            if let Err(e) = save_index(&new_index, &idx_base) {
                 eprintln!("Warning: failed to save index: {}", e);
             }
             new_index
@@ -783,10 +786,11 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
 // ─── Content index command ───────────────────────────────────────────
 
 fn cmd_content_index(args: ContentIndexArgs) -> Result<(), SearchError> {
+    let idx_base = index_dir();
     let exts_str = args.ext.clone();
     let index = build_content_index(&args);
-    save_content_index(&index)?;
-    let path = content_index_path_for(&args.dir, &exts_str);
+    save_content_index(&index, &idx_base)?;
+    let path = content_index_path_for(&args.dir, &exts_str, &idx_base);
     let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
     eprintln!(
         "Content index saved to {} ({:.1} MB)",
@@ -800,9 +804,10 @@ fn cmd_content_index(args: ContentIndexArgs) -> Result<(), SearchError> {
 
 fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     let start = Instant::now();
+    let idx_base = index_dir();
     let exts_for_load = args.ext.clone().unwrap_or_default();
 
-    let index = match load_content_index(&args.dir, &exts_for_load) {
+    let index = match load_content_index(&args.dir, &exts_for_load, &idx_base) {
         Some(idx) => {
             if idx.is_stale() && args.auto_reindex {
                 eprintln!("Content index is stale, rebuilding...");
@@ -816,7 +821,7 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
                     threads: 0,
                     min_token_len: 2,
                 });
-                let _ = save_content_index(&new_idx);
+                let _ = save_content_index(&new_idx, &idx_base);
                 new_idx
             } else {
                 if idx.is_stale() {
@@ -826,7 +831,7 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
             }
         }
         None => {
-            match find_content_index_for_dir(&args.dir) {
+            match find_content_index_for_dir(&args.dir, &idx_base) {
                 Some(idx) => idx,
                 None => {
                     return Err(SearchError::IndexNotFound { dir: args.dir.clone() });
@@ -1375,15 +1380,17 @@ fn cmd_serve(args: ServeArgs) {
 
     info!(dir = %dir_str, ext = %exts_for_load, "Starting MCP server");
 
+    let idx_base = index_dir();
+
     // Load or build content index
     let start = Instant::now();
-    let index = match load_content_index(&dir_str, &exts_for_load) {
+    let index = match load_content_index(&dir_str, &exts_for_load, &idx_base) {
         Some(idx) => {
             info!(files = idx.files.len(), tokens = idx.index.len(), "Loaded content index");
             idx
         }
         None => {
-            match find_content_index_for_dir(&dir_str) {
+            match find_content_index_for_dir(&dir_str, &idx_base) {
                 Some(idx) => {
                     info!(files = idx.files.len(), tokens = idx.index.len(), "Found content index for directory");
                     idx
@@ -1399,7 +1406,7 @@ fn cmd_serve(args: ServeArgs) {
                         threads: 0,
                         min_token_len: 2,
                     });
-                    if let Err(e) = save_content_index(&new_idx) {
+                    if let Err(e) = save_content_index(&new_idx, &idx_base) {
                         warn!(error = %e, "Failed to save content index to disk");
                     }
                     new_idx
@@ -1431,14 +1438,14 @@ fn cmd_serve(args: ServeArgs) {
         let def_exts = "cs,sql";
 
         // Try to load existing definition index from disk first
-        let def_idx = match definitions::load_definition_index(&dir_str, def_exts) {
+        let def_idx = match definitions::load_definition_index(&dir_str, def_exts, &idx_base) {
             Some(idx) => {
                 info!(definitions = idx.definitions.len(), files = idx.files.len(),
                     "Loaded definition index from disk");
                 idx
             }
             None => {
-                match definitions::find_definition_index_for_dir(&dir_str) {
+                match definitions::find_definition_index_for_dir(&dir_str, &idx_base) {
                     Some(idx) => {
                         info!(definitions = idx.definitions.len(), files = idx.files.len(),
                             "Found definition index for directory");
@@ -1451,7 +1458,7 @@ fn cmd_serve(args: ServeArgs) {
                             ext: def_exts.to_string(),
                             threads: 0,
                         });
-                        if let Err(e) = definitions::save_definition_index(&new_idx) {
+                        if let Err(e) = definitions::save_definition_index(&new_idx, &idx_base) {
                             warn!(error = %e, "Failed to save definition index to disk");
                         }
                         new_idx
@@ -1483,18 +1490,20 @@ fn cmd_serve(args: ServeArgs) {
             extensions,
             args.debounce_ms,
             args.bulk_threshold,
+            idx_base.clone(),
         ) {
             warn!(error = %e, "Failed to start file watcher");
         }
     }
 
     // Start MCP server event loop
-    mcp::server::run_server(index, def_index, dir_str, exts_for_load, args.metrics);
+    mcp::server::run_server(index, def_index, dir_str, exts_for_load, args.metrics, idx_base);
 }
 
 fn cmd_def_index(args: definitions::DefIndexArgs) -> Result<(), SearchError> {
+    let idx_base = index_dir();
     let index = definitions::build_definition_index(&args);
-    definitions::save_definition_index(&index)?;
+    definitions::save_definition_index(&index, &idx_base)?;
     eprintln!("[def-index] Done! {} definitions from {} files",
         index.definitions.len(), index.files.len());
     Ok(())
@@ -1515,8 +1524,9 @@ fn main() {
         Commands::Serve(args) => { cmd_serve(args); Ok(()) },
         Commands::DefIndex(args) => cmd_def_index(args),
         Commands::Cleanup => {
-            eprintln!("Scanning for orphaned indexes in {}...", index_dir().display());
-            let removed = cleanup_orphaned_indexes();
+            let idx_base = index_dir();
+            eprintln!("Scanning for orphaned indexes in {}...", idx_base.display());
+            let removed = cleanup_orphaned_indexes(&idx_base);
             if removed == 0 {
                 eprintln!("No orphaned indexes found.");
             } else {

@@ -3,3 +3,8 @@ Cargo.lock
 *.ps1
 todo*.md
 proptest-regressions/
+
+# Index files (safety net — should never be created in repo)
+*.idx
+*.cidx
+*.didx

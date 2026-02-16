@@ -17,69 +17,68 @@ use crate::{ContentIndexArgs, IndexArgs};
 
 // ─── Index storage ───────────────────────────────────────────────────
 
+/// Default production index directory: `%LOCALAPPDATA%/search-index`.
+/// Tests should NOT use this — pass a test-local directory instead.
 pub fn index_dir() -> PathBuf {
     let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
     base.join("search-index")
 }
 
-pub fn index_path_for(dir: &str) -> PathBuf {
+pub fn index_path_for(dir: &str, index_base: &std::path::Path) -> PathBuf {
     let canonical = fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
     let mut hasher = DefaultHasher::new();
     canonical.to_string_lossy().hash(&mut hasher);
     let hash = hasher.finish();
-    index_dir().join(format!("{:016x}.idx", hash))
+    index_base.join(format!("{:016x}.idx", hash))
 }
 
-pub fn save_index(index: &FileIndex) -> Result<(), SearchError> {
-    let dir = index_dir();
-    fs::create_dir_all(&dir)?;
-    let path = index_path_for(&index.root);
+pub fn save_index(index: &FileIndex, index_base: &std::path::Path) -> Result<(), SearchError> {
+    fs::create_dir_all(index_base)?;
+    let path = index_path_for(&index.root, index_base);
     let encoded = bincode::serialize(index)?;
     fs::write(&path, encoded)?;
     Ok(())
 }
 
-pub fn load_index(dir: &str) -> Option<FileIndex> {
-    let path = index_path_for(dir);
+pub fn load_index(dir: &str, index_base: &std::path::Path) -> Option<FileIndex> {
+    let path = index_path_for(dir, index_base);
     let data = fs::read(&path).ok()?;
     bincode::deserialize(&data).ok()
 }
 
-pub fn content_index_path_for(dir: &str, exts: &str) -> PathBuf {
+pub fn content_index_path_for(dir: &str, exts: &str, index_base: &std::path::Path) -> PathBuf {
     let canonical = fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
     let mut hasher = DefaultHasher::new();
     canonical.to_string_lossy().hash(&mut hasher);
     exts.hash(&mut hasher);
     let hash = hasher.finish();
-    index_dir().join(format!("{:016x}.cidx", hash))
+    index_base.join(format!("{:016x}.cidx", hash))
 }
 
-pub fn save_content_index(index: &ContentIndex) -> Result<(), SearchError> {
-    let dir = index_dir();
-    fs::create_dir_all(&dir)?;
+pub fn save_content_index(index: &ContentIndex, index_base: &std::path::Path) -> Result<(), SearchError> {
+    fs::create_dir_all(index_base)?;
     let exts_str = index.extensions.join(",");
-    let path = content_index_path_for(&index.root, &exts_str);
+    let path = content_index_path_for(&index.root, &exts_str, index_base);
     let encoded = bincode::serialize(index)?;
     fs::write(&path, encoded)?;
     Ok(())
 }
 
-pub fn load_content_index(dir: &str, exts: &str) -> Option<ContentIndex> {
-    let path = content_index_path_for(dir, exts);
+pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Option<ContentIndex> {
+    let path = content_index_path_for(dir, exts, index_base);
     let data = fs::read(&path).ok()?;
     bincode::deserialize(&data).ok()
 }
 
 /// Try to find any content index (.cidx) file matching the given directory
-pub fn find_content_index_for_dir(dir: &str) -> Option<ContentIndex> {
-    let idx_dir = index_dir();
-    if !idx_dir.exists() {
+pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path) -> Option<ContentIndex> {
+    if !index_base.exists() {
         return None;
     }
     let canonical = fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
     let clean = clean_path(&canonical.to_string_lossy());
 
-    for entry in fs::read_dir(&idx_dir).ok()?.flatten() {
+    for entry in fs::read_dir(index_base).ok()?.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) == Some("cidx")
             && let Ok(data) = fs::read(&path)
@@ -109,49 +108,17 @@ fn read_root_from_index_file(path: &std::path::Path) -> Option<String> {
     String::from_utf8(str_buf).ok()
 }
 
-/// Remove all index files (.idx, .cidx, .didx) associated with a given directory.
-/// Used by tests to prevent orphaned index files in the global index directory.
-/// Reads only the first few bytes of each file (the root field) to avoid
-/// deserializing large index files.
-pub fn remove_index_files_for(dir: &str) {
-    // Remove .idx file (direct hash lookup)
-    let idx_path = index_path_for(dir);
-    let _ = std::fs::remove_file(&idx_path);
-
-    // For .cidx and .didx, we don't know which extensions were used,
-    // so scan the index directory and check the root field (fast — reads ~200 bytes)
-    let canonical = std::fs::canonicalize(dir)
-        .unwrap_or_else(|_| std::path::PathBuf::from(dir));
-    let clean = crate::clean_path(&canonical.to_string_lossy());
-
-    let idx_dir = index_dir();
-    if let Ok(entries) = std::fs::read_dir(&idx_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let ext = path.extension().and_then(|e| e.to_str());
-            if matches!(ext, Some("cidx") | Some("didx")) {
-                if let Some(root) = read_root_from_index_file(&path) {
-                    if root == clean {
-                        let _ = std::fs::remove_file(&path);
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// Remove orphaned index files whose root directory no longer exists on disk.
 /// Returns the number of files removed.
 /// Reads only the root field from each file header (fast — no full deserialization).
-pub fn cleanup_orphaned_indexes() -> usize {
-    let idx_dir = index_dir();
-    if !idx_dir.exists() {
+pub fn cleanup_orphaned_indexes(index_base: &std::path::Path) -> usize {
+    if !index_base.exists() {
         return 0;
     }
 
     let mut removed = 0;
 
-    if let Ok(entries) = std::fs::read_dir(&idx_dir) {
+    if let Ok(entries) = std::fs::read_dir(index_base) {
         for entry in entries.flatten() {
             let path = entry.path();
             let ext = path.extension().and_then(|e| e.to_str());

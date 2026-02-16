@@ -1,4 +1,5 @@
 use std::io::{self, BufRead, Write};
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 use serde_json::{json, Value};
@@ -16,6 +17,7 @@ pub fn run_server(
     server_dir: String,
     server_ext: String,
     metrics: bool,
+    index_base: PathBuf,
 ) {
     let ctx = HandlerContext {
         index,
@@ -23,6 +25,7 @@ pub fn run_server(
         server_dir,
         server_ext,
         metrics,
+        index_base,
     };
 
     let stdin = io::stdin();
@@ -191,6 +194,7 @@ mod tests {
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
             metrics: false,
+            index_base: std::path::PathBuf::from("."),
         }
     }
 

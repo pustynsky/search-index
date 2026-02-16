@@ -11,6 +11,7 @@ use crate::{
     build_content_index, clean_path, cmd_info_json,
     save_content_index, tokenize, ContentIndex, ContentIndexArgs,
 };
+use std::path::PathBuf;
 use crate::index::build_trigram_index;
 use search::generate_trigrams;
 use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionKind};
@@ -297,6 +298,10 @@ pub struct HandlerContext {
     pub server_dir: String,
     pub server_ext: String,
     pub metrics: bool,
+    /// Base directory for index file storage.
+    /// Production: `index_dir()` (`%LOCALAPPDATA%/search-index`).
+    /// Tests: test-local temp directory (prevents orphan files).
+    pub index_base: PathBuf,
 }
 
 /// Dispatch a tool call to the right handler.
@@ -404,7 +409,7 @@ fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> Tool
     });
 
     // Save to disk
-    if let Err(e) = crate::definitions::save_definition_index(&new_index) {
+    if let Err(e) = crate::definitions::save_definition_index(&new_index, &ctx.index_base) {
         warn!(error = %e, "Failed to save definition index to disk");
     }
 
@@ -1257,7 +1262,7 @@ fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let start = Instant::now();
 
     // Load file index
-    let index = match crate::load_index(&dir) {
+    let index = match crate::load_index(&dir, &ctx.index_base) {
         Some(idx) => idx,
         None => {
             // Auto-build
@@ -1269,7 +1274,7 @@ fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 no_ignore: false,
                 threads: 0,
             });
-            let _ = crate::save_index(&new_index);
+            let _ = crate::save_index(&new_index, &ctx.index_base);
             new_index
         }
     };
@@ -1397,7 +1402,7 @@ fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     });
 
     // Save to disk
-    if let Err(e) = save_content_index(&new_index) {
+    if let Err(e) = save_content_index(&new_index, &ctx.index_base) {
         warn!(error = %e, "Failed to save reindexed content to disk");
     }
 
@@ -2668,7 +2673,7 @@ mod tests {
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
         metrics: false,
-        };
+        index_base: PathBuf::from("."),        };
         let result = dispatch_tool(&ctx, "nonexistent_tool", &json!({}));
         assert!(result.is_error);
         assert!(result.content[0].text.contains("Unknown tool"));
@@ -2696,7 +2701,7 @@ mod tests {
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
         metrics: false,
-        };
+        index_base: PathBuf::from("."),        };
         let result = dispatch_tool(&ctx, "search_grep", &json!({}));
         assert!(result.is_error);
         assert!(result.content[0].text.contains("Missing required parameter: terms"));
@@ -2724,7 +2729,7 @@ mod tests {
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
         metrics: false,
-        };
+        index_base: PathBuf::from("."),        };
         let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
         assert!(!result.is_error);
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2758,7 +2763,7 @@ mod tests {
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
         metrics: false,
-        };
+        index_base: PathBuf::from("."),        };
         let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
         assert!(!result.is_error);
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2905,7 +2910,8 @@ mod tests {
             def_index: Some(Arc::new(RwLock::new(def_index))),
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
-        metrics: false,
+            metrics: false,
+            index_base: PathBuf::from("."),
         }
     }
 
@@ -2933,7 +2939,7 @@ mod tests {
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
         metrics: false,
-        };
+        index_base: PathBuf::from("."),        };
         let result = dispatch_tool(&ctx, "search_callers", &json!({"method": "Foo"}));
         assert!(result.is_error);
         assert!(result.content[0].text.contains("Definition index not available"));
@@ -3030,7 +3036,7 @@ mod tests {
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
         metrics: false,
-        };
+        index_base: PathBuf::from("."),        };
         let result = dispatch_tool(&ctx, "search_reindex_definitions", &json!({}));
         assert!(result.is_error);
         assert!(result.content[0].text.contains("Definition index not available"));
@@ -3382,7 +3388,7 @@ mod tests {
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
         metrics: false,
-        };
+        index_base: PathBuf::from("."),        };
 
         // Test 1: direction=down with class=IndexSearchService
         // Should find ShouldIssueVectorSearch, NOT TraceInformation
@@ -3566,15 +3572,14 @@ mod tests {
             server_dir: tmp_dir.to_string_lossy().to_string(),
             server_ext: "cs".to_string(),
         metrics: false,
-        };
+        index_base: PathBuf::from("."),        };
 
         (ctx, tmp_dir)
     }
 
     fn cleanup_tmp(tmp_dir: &std::path::Path) {
-        // Clean up index files from the global search-index directory first
-        // (before removing the temp dir, so canonicalize still works)
-        crate::remove_index_files_for(&tmp_dir.to_string_lossy());
+        // With explicit index_base, index files live inside tmp_dir,
+        // so removing the whole tmp_dir cleans up everything.
         let _ = std::fs::remove_dir_all(tmp_dir);
     }
 
@@ -3778,7 +3783,7 @@ mod tests {
             server_dir: tmp_dir.to_string_lossy().to_string(),
             server_ext: "cs".to_string(),
         metrics: false,
-        };
+        index_base: PathBuf::from("."),        };
 
         let result = dispatch_tool(&ctx, "search_definitions", &json!({
             "name": "StaleClass",
@@ -3852,7 +3857,7 @@ mod tests {
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
         metrics: false,
-        };
+        index_base: PathBuf::from("."),        };
 
         let result = dispatch_tool(&ctx, "search_definitions", &json!({
             "name": "GhostClass",
@@ -4061,9 +4066,8 @@ mod tests {
             def_index: None,
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
-
-        metrics: false,
-
+            metrics: false,
+            index_base: PathBuf::from("."),
         }
     }
 
@@ -4273,7 +4277,7 @@ mod tests {
 
         metrics: false,
 
-        };
+        index_base: PathBuf::from("."),        };
 
         // Should trigger rebuild and still find the token
         let result = dispatch_tool(&ctx, "search_grep", &json!({
@@ -4358,9 +4362,8 @@ mod tests {
             def_index: None,
             server_dir: tmp_dir.to_string_lossy().to_string(),
             server_ext: "cs".to_string(),
-
-        metrics: false,
-
+            metrics: false,
+            index_base: tmp_dir.join(".index"),
         };
 
         (ctx, tmp_dir)
@@ -4578,14 +4581,15 @@ mod tests {
         assert!(original_trigram_count > 0, "Trigram index should be populated");
         assert!(original_trigram_token_count > 0, "Trigram tokens should be populated");
 
-        // Save to disk
-        crate::save_content_index(&original_index).unwrap();
+        // Save to disk — use tmp_dir-based index so we don't pollute global dir
+        let idx_base = tmp_dir.join(".index");
+        crate::save_content_index(&original_index, &idx_base).unwrap();
         let root = original_index.root.clone();
         let exts = original_index.extensions.join(",");
         drop(original_index);
 
         // Load from disk
-        let loaded_index = crate::load_content_index(&root, &exts)
+        let loaded_index = crate::load_content_index(&root, &exts, &idx_base)
             .expect("Should load saved content index");
 
         // Verify structural equality
@@ -4604,7 +4608,7 @@ mod tests {
 
         metrics: false,
 
-        };
+        index_base: PathBuf::from("."),        };
 
         // Same substring search should produce same results
         let result = dispatch_tool(&loaded_ctx, "search_grep", &json!({
@@ -4839,7 +4843,7 @@ mod tests {
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
             metrics: false,
-        };
+        index_base: PathBuf::from("."),        };
         let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
         assert!(!result.is_error);
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -4875,6 +4879,7 @@ mod tests {
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
             metrics: true,
+            index_base: PathBuf::from("."),
         };
         let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
         assert!(!result.is_error);
@@ -4912,6 +4917,7 @@ mod tests {
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
             metrics: true,
+            index_base: PathBuf::from("."),
         };
         // Missing required "terms" param -> error
         let result = dispatch_tool(&ctx, "search_grep", &json!({}));
@@ -4944,6 +4950,7 @@ mod tests {
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
             metrics: true,
+            index_base: PathBuf::from("."),
         };
         let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "foo"}));
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -4988,7 +4995,8 @@ mod tests {
             no_ignore: false,
             threads: 0,
         });
-        let _ = crate::save_index(&file_index);
+        let idx_base = tmp_dir.join(".index");
+        let _ = crate::save_index(&file_index, &idx_base);
 
         let content_idx = HashMap::new();
         let content_index = ContentIndex {
@@ -5012,6 +5020,7 @@ mod tests {
             server_dir: dir_str,
             server_ext: "cs".to_string(),
             metrics: false,
+            index_base: idx_base,
         };
 
         (ctx, tmp_dir)
