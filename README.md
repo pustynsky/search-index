@@ -409,6 +409,9 @@ search serve --dir C:\Projects --ext cs,sql,csproj --watch
 
 # Custom debounce and bulk threshold
 search serve --dir C:\Projects --ext cs --watch --debounce-ms 300 --bulk-threshold 200
+
+# With performance metrics in every response (responseBytes, estimatedTokens)
+search serve --dir C:\Projects --ext cs --watch --definitions --metrics
 ```
 
 **Options:**
@@ -419,6 +422,7 @@ search serve --dir C:\Projects --ext cs --watch --debounce-ms 300 --bulk-thresho
 | `-e, --ext <EXTS>`     | File extensions, comma-separated (default: `cs`)                 |
 | `--watch`              | Watch for file changes and update indexes incrementally          |
 | `--definitions`        | Load (or build on first use) code definition index (tree-sitter AST). Cached to disk, instant on subsequent starts. |
+| `--metrics`            | Add `responseBytes` and `estimatedTokens` to every tool response summary. Off by default to keep responses lean for LLMs. |
 | `--debounce-ms <MS>`   | Debounce delay for file watcher (default: 500)                   |
 | `--bulk-threshold <N>` | File changes triggering full reindex (default: 100)              |
 | `--log-level <LEVEL>`  | Log level: error, warn, info, debug (default: info)              |
