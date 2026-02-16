@@ -808,6 +808,30 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
+### T28f: `serve` — search_definitions by attribute returns no duplicates
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"attribute":"<attribute_name>","kind":"class"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definition results
+- No duplicate entries: each class appears at most once, even if it has the same attribute applied multiple times (e.g., `[ServiceProvider]` and `[ServiceProvider("config")]`)
+- `totalResults` matches the count of unique definitions in the `definitions` array
+
+**Validates:** Attribute index deduplication — a class with multiple attributes normalizing to the same name (e.g., `Attr` and `Attr("arg")`) is indexed only once per attribute name.
+
+**Note:** Replace `<attribute_name>` with an attribute that some classes use multiple times with different arguments.
+
+---
+
 ### T29: `serve` — MCP search_callers (requires --definitions)
 
 **Command:**

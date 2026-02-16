@@ -344,11 +344,16 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                     .or_default()
                     .push(def_idx);
 
-                for attr in &def.attributes {
-                    let attr_name = attr.split('(').next().unwrap_or(attr).trim().to_lowercase();
-                    attribute_index.entry(attr_name)
-                        .or_default()
-                        .push(def_idx);
+                {
+                    let mut seen_attrs = std::collections::HashSet::new();
+                    for attr in &def.attributes {
+                        let attr_name = attr.split('(').next().unwrap_or(attr).trim().to_lowercase();
+                        if seen_attrs.insert(attr_name.clone()) {
+                            attribute_index.entry(attr_name)
+                                .or_default()
+                                .push(def_idx);
+                        }
+                    }
                 }
 
                 for bt in &def.base_types {
@@ -1643,11 +1648,16 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
             .or_default()
             .push(def_idx);
 
-        for attr in &def.attributes {
-            let attr_name = attr.split('(').next().unwrap_or(attr).trim().to_lowercase();
-            index.attribute_index.entry(attr_name)
-                .or_default()
-                .push(def_idx);
+        {
+            let mut seen_attrs = std::collections::HashSet::new();
+            for attr in &def.attributes {
+                let attr_name = attr.split('(').next().unwrap_or(attr).trim().to_lowercase();
+                if seen_attrs.insert(attr_name.clone()) {
+                    index.attribute_index.entry(attr_name)
+                        .or_default()
+                        .push(def_idx);
+                }
+            }
         }
 
         for bt in &def.base_types {
@@ -1913,6 +1923,59 @@ namespace MyApp
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+    #[test]
+    fn test_attribute_index_no_duplicates_for_same_attr_name() {
+        // A class with two attributes that normalize to the same name
+        // (e.g., [Obsolete] and [Obsolete("Use NewService instead")])
+        // should only appear ONCE in the attribute_index bucket.
+        let dir = std::env::temp_dir().join("search_attr_dedup_test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(
+            dir.join("service.cs"),
+            r#"
+[Obsolete]
+[Obsolete("Use NewService instead")]
+public class MyService { }
+
+[Obsolete]
+public class OtherService { }
+"#,
+        ).unwrap();
+
+        let args = DefIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            threads: 1,
+        };
+
+        let index = build_definition_index(&args);
+
+        // Both classes should be found via attribute_index
+        let attr_indices = index.attribute_index.get("obsolete").expect("attribute index should have 'obsolete'");
+
+        // Each class should appear exactly once — no duplicates
+        let mut sorted = attr_indices.clone();
+        sorted.sort();
+        let deduped_len = {
+            let mut d = sorted.clone();
+            d.dedup();
+            d.len()
+        };
+
+        assert_eq!(
+            attr_indices.len(), deduped_len,
+            "attribute_index has duplicate def_idx entries! raw={:?}", attr_indices
+        );
+
+        // MyService has [Obsolete] twice but should only appear once in the index
+        // OtherService has [Obsolete] once
+        assert_eq!(attr_indices.len(), 2, "Expected 2 unique classes with [Obsolete]");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
 
     #[test]
     fn test_definition_index_serialization() {

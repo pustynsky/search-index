@@ -1798,9 +1798,14 @@ fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     }
 
     // If no filters applied, return all definitions (up to max)
-    let candidates = candidate_indices.unwrap_or_else(|| {
+    let mut candidates = candidate_indices.unwrap_or_else(|| {
         (0..index.definitions.len() as u32).collect()
     });
+
+    // Deduplicate candidate indices (a definition may appear multiple times
+    // if e.g. multiple attributes normalize to the same name)
+    candidates.sort_unstable();
+    candidates.dedup();
 
     // Apply remaining filters (file, parent, excludeDir) on actual entries
     let mut results: Vec<&crate::definitions::DefinitionEntry> = candidates.iter()
