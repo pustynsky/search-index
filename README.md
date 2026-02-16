@@ -594,6 +594,7 @@ When a definition's body exceeds `maxBodyLines`, the `body` array is truncated a
       "file": "CatalogService.cs",
       "lines": "142-189",
       "parent": "CatalogService",
+      "bodyStartLine": 142,
       "body": [
         "public async Task<List<CatalogEntry>> GetCatalogEntriesAsync(int tenantId)",
         "{",

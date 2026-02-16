@@ -49,7 +49,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "showLines": {
                         "type": "boolean",
-                        "description": "Include actual source code line content from matching files in the results. When true, each result file includes a 'lineContent' array with line numbers and text. Use this to READ the actual code at match locations without needing a separate read_file call. Combine with contextLines to see surrounding code. (default: false)"
+                        "description": "Include source code from matching files. Returns groups of consecutive lines, each with startLine (1-based), lines (string array), and matchIndices (0-based indices of matching lines within the group). Groups are separated when there are gaps in line numbers. (default: false)"
                     },
                     "contextLines": {
                         "type": "integer",
@@ -578,7 +578,6 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             && let Ok(content) = std::fs::read_to_string(&r.file_path) {
                 let lines_vec: Vec<&str> = content.lines().collect();
                 let total_lines = lines_vec.len();
-                let mut line_content = Vec::new();
 
                 let mut lines_to_show: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
                 let mut match_lines_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -593,15 +592,7 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                     }
                 }
 
-                for &idx in &lines_to_show {
-                    line_content.push(json!({
-                        "line": idx + 1,
-                        "text": lines_vec[idx],
-                        "isMatch": match_lines_set.contains(&idx),
-                    }));
-                }
-
-                file_obj["lineContent"] = json!(line_content);
+                file_obj["lineContent"] = build_grouped_line_content(&lines_to_show, &lines_vec, &match_lines_set);
             }
 
         file_obj
@@ -763,7 +754,6 @@ fn handle_phrase_search(
             if let Some(ref content) = r.content {
                 let lines_vec: Vec<&str> = content.lines().collect();
                 let total_lines = lines_vec.len();
-                let mut line_content = Vec::new();
 
                 let mut lines_to_show: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
                 let mut match_lines_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
@@ -778,15 +768,7 @@ fn handle_phrase_search(
                     }
                 }
 
-                for &idx in &lines_to_show {
-                    line_content.push(json!({
-                        "line": idx + 1,
-                        "text": lines_vec[idx],
-                        "isMatch": match_lines_set.contains(&idx),
-                    }));
-                }
-
-                file_obj["lineContent"] = json!(line_content);
+                file_obj["lineContent"] = build_grouped_line_content(&lines_to_show, &lines_vec, &match_lines_set);
             }
         }
 
@@ -1136,6 +1118,60 @@ fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
 // ─── helper: inject body source code into definition JSON object ─────
 
+/// Build compact grouped lineContent for search_grep.
+/// Groups consecutive lines together, producing `[{startLine, lines[], matchIndices[]}]`.
+fn build_grouped_line_content(
+    lines_to_show: &std::collections::BTreeSet<usize>,
+    lines_vec: &[&str],
+    match_lines_set: &std::collections::HashSet<usize>,
+) -> Value {
+    let mut groups: Vec<Value> = Vec::new();
+    let mut current_group_start: Option<usize> = None;
+    let mut current_group_lines: Vec<&str> = Vec::new();
+    let mut current_group_matches: Vec<usize> = Vec::new();
+
+    let ordered_lines: Vec<usize> = lines_to_show.iter().cloned().collect();
+
+    for (i, &idx) in ordered_lines.iter().enumerate() {
+        let is_consecutive = i > 0 && idx == ordered_lines[i - 1] + 1;
+
+        if !is_consecutive && !current_group_lines.is_empty() {
+            let mut group = json!({
+                "startLine": current_group_start.unwrap() + 1,
+                "lines": current_group_lines,
+            });
+            if !current_group_matches.is_empty() {
+                group["matchIndices"] = json!(current_group_matches);
+            }
+            groups.push(group);
+            current_group_lines = Vec::new();
+            current_group_matches = Vec::new();
+        }
+
+        if current_group_lines.is_empty() {
+            current_group_start = Some(idx);
+        }
+
+        if match_lines_set.contains(&idx) {
+            current_group_matches.push(current_group_lines.len());
+        }
+        current_group_lines.push(lines_vec[idx]);
+    }
+
+    if !current_group_lines.is_empty() {
+        let mut group = json!({
+            "startLine": current_group_start.unwrap() + 1,
+            "lines": current_group_lines,
+        });
+        if !current_group_matches.is_empty() {
+            group["matchIndices"] = json!(current_group_matches);
+        }
+        groups.push(group);
+    }
+
+    json!(groups)
+}
+
 fn inject_body_into_obj(
     obj: &mut Value,
     file_path: &str,
@@ -1203,17 +1239,9 @@ fn inject_body_into_obj(
             let truncated = total_body_lines_in_def > effective_max;
             let lines_to_emit = if truncated { effective_max } else { total_body_lines_in_def };
 
-            let body_array: Vec<Value> = body_lines[..lines_to_emit]
-                .iter()
-                .enumerate()
-                .map(|(i, text)| {
-                    json!({
-                        "line": start_idx + i + 1,
-                        "text": *text,
-                    })
-                })
-                .collect();
+            let body_array: Vec<&str> = body_lines[..lines_to_emit].to_vec();
 
+            obj["bodyStartLine"] = json!(start_idx + 1);
             obj["body"] = json!(body_array);
 
             if truncated {
@@ -3180,10 +3208,9 @@ mod tests {
         let body = defs[0]["body"].as_array().unwrap();
         // DoWork is lines 3-8, so 6 lines
         assert_eq!(body.len(), 6);
-        assert_eq!(body[0]["line"], 3);
-        assert_eq!(body[0]["text"], "// line 3");
-        assert_eq!(body[5]["line"], 8);
-        assert_eq!(body[5]["text"], "// line 8");
+        assert_eq!(defs[0]["bodyStartLine"], 3);
+        assert_eq!(body[0], "// line 3");
+        assert_eq!(body[5], "// line 8");
         // Should not be truncated
         assert!(defs[0].get("bodyTruncated").is_none());
         // Summary should have totalBodyLinesReturned
@@ -3270,7 +3297,7 @@ mod tests {
         assert_eq!(defs[0]["name"], "DoWork");
         let body = defs[0]["body"].as_array().unwrap();
         assert!(!body.is_empty(), "Body should be present for containsLine with includeBody");
-        assert_eq!(body[0]["line"], 3);
+        assert_eq!(defs[0]["bodyStartLine"], 3);
         // Summary should have totalBodyLinesReturned
         assert!(output["summary"]["totalBodyLinesReturned"].as_u64().unwrap() > 0);
         cleanup_tmp(&tmp_dir);

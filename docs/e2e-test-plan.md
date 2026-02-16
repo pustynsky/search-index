@@ -535,6 +535,61 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
+### T27a: `serve` — search_grep with `showLines: true` (compact grouped format)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"<some_known_token>","showLines":true,"contextLines":2,"maxResults":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with search results
+- Each file object contains a `"lineContent"` array
+- Each element in `lineContent` is a group with:
+  - `"startLine"` (integer, 1-based) — first line number in the group
+  - `"lines"` (string array) — source code lines in order
+  - `"matchIndices"` (integer array, 0-based, optional) — indices within `lines` where matches occur
+- Groups are separated when there are gaps in line numbers
+- No old-format fields (`line`, `text`, `isMatch`) are present
+
+**Validates:** `showLines` returns compact grouped format with `startLine`, `lines[]`, and `matchIndices[]`. Context lines appear around matches.
+
+**Note:** Replace `<some_known_token>` with a token that exists in the indexed codebase.
+
+---
+
+### T27b: `serve` — search_grep phrase search with `showLines: true` (compact grouped format)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"<some_known_phrase>","phrase":true,"showLines":true,"contextLines":1,"maxResults":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with search results
+- Each file object contains a `"lineContent"` array with compact grouped format (same as T27a)
+- Phrase search code path produces identical format to token search path
+
+**Validates:** Phrase search path also uses compact grouped `lineContent` format (both code paths produce consistent output).
+
+**Note:** Replace `<some_known_phrase>` with an exact phrase that exists in the indexed codebase.
+
+---
+
 ### T28: `serve` — MCP search_definitions (requires --definitions)
 
 **Command:**
@@ -576,7 +631,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 **Expected:**
 
 - stdout: JSON-RPC response with definition results
-- Each definition object contains a `"body"` array field with `{line, text}` objects
+- Each definition object contains a `"bodyStartLine"` (integer, 1-based) and `"body"` array field (string array of source lines)
 - `summary` object includes `"totalBodyLinesReturned"` field
 
 **Validates:** `includeBody` flag causes body content to be returned alongside definitions.
@@ -649,7 +704,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 - stdout: JSON-RPC response with definition results
 - Result includes `"containingDefinitions"` array
-- Each containing definition has a `"body"` array with `{line, text}` objects
+- Each containing definition has a `"bodyStartLine"` (integer, 1-based) and `"body"` array (string array of source lines)
 
 **Validates:** `includeBody` works together with `containsLine` mode, body is attached to containing definitions.
 
