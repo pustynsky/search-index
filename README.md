@@ -172,7 +172,7 @@ search fast "notepad" -d C:\Windows
 search fast "notepad" -d C:\Windows -e exe --files-only
 
 # Comma-separated multi-term search (OR logic) — find multiple files at once
-search fast "ModelSchemaStorage,ScannerJobState,WorkspaceInfoUtils" -d C:\Projects -e cs
+search fast "UserService,OrderProcessor,PaymentHandler" -d C:\Projects -e cs
 
 # Regex search
 search fast "config\.\w+" -d C:\Projects --regex

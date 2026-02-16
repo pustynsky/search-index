@@ -112,7 +112,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_fast".to_string(),
-            description: "Search pre-built file name index for instant results. Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Example: pattern='ModelSchemaStorage,ScannerJobState' finds files whose name contains ANY of the terms.".to_string(),
+            description: "Search pre-built file name index for instant results. Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Example: pattern='UserService,OrderProcessor' finds files whose name contains ANY of the terms.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
