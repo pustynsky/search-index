@@ -21,7 +21,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "search_grep".to_string(),
-            description: "Search file contents using an inverted index with TF-IDF ranking. Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). IMPORTANT: When searching for all usages of a class/interface, use multi-term OR search to find ALL naming variants in ONE query. Example: to find all usages of MyClass, search for 'MyClass,IMyClass,MyClassFactory' with mode='or'. This is much faster than making separate queries for each variant. Comma-separated terms with mode='or' finds files containing ANY of the terms; mode='and' finds files containing ALL terms. Use substring=true to find tokens containing a substring (e.g., 'DatabaseConn' finds 'databaseconnectionfactory').".to_string(),
+            description: "Search file contents using an inverted index with TF-IDF ranking. Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). IMPORTANT: When searching for all usages of a class/interface, use multi-term OR search to find ALL naming variants in ONE query. Example: to find all usages of MyClass, search for 'MyClass,IMyClass,MyClassFactory' with mode='or'. This is much faster than making separate queries for each variant. Comma-separated terms with mode='or' finds files containing ANY of the terms; mode='and' finds files containing ALL terms. IMPORTANT FOR C#/JAVA: Use substring=true when searching for identifiers that may appear as part of compound names. Default exact-token mode will NOT find 'UserService' inside 'DeleteUserServiceCacheEntry'. Substring search uses a trigram index and is fast (~1ms). Example: terms='DatabaseConn', substring=true finds 'databaseconnectionfactory', 'idatabaseconnection', etc.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -86,7 +86,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_find".to_string(),
-            description: "Search for files by name using live filesystem walk. No index needed. [!] WARNING: This performs a live filesystem walk and may be slow for large directories (10-30s). For instant results, use search_fast with a pre-built file name index.".to_string(),
+            description: "[SLOW — USE search_fast INSTEAD] Search for files by name using live filesystem walk. This is 90x+ slower than search_fast (~3s vs ~35ms). Only use when: (1) no file name index exists, or (2) you need to search outside the indexed directory. For all normal file lookups, use search_fast.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -113,7 +113,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_fast".to_string(),
-            description: "Search pre-built file name index for instant results. Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Example: pattern='UserService,OrderProcessor' finds files whose name contains ANY of the terms.".to_string(),
+            description: "PREFERRED file lookup tool — searches pre-built file name index. 90x+ faster than search_find (~35ms vs ~3s for 100K files). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Example: pattern='UserService,OrderProcessor' finds files whose name contains ANY of the terms. Always use this instead of search_find for file name lookups.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -237,7 +237,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_callers".to_string(),
-            description: "Find all callers of a method and build a call tree (up or down). Combines grep index (to find where a method name appears) with AST definition index (to determine which method/class contains each call site). Returns a hierarchical call tree. This is the most powerful tool for tracing call chains -- replaces 7+ sequential search_grep + read_file calls with a single request. Requires server started with --definitions flag.".to_string(),
+            description: "RECOMMENDED for call chain analysis — find all callers of a method and build a call tree (up or down) in a SINGLE sub-millisecond request. Replaces 7+ sequential search_grep + read_file calls. Combines grep index with AST definition index. Returns a hierarchical call tree with method signatures, file paths, and line numbers. IMPORTANT: Always specify the 'class' parameter when you know the containing class — without it, results may mix callers from unrelated classes that have a method with the same name. DI-aware: class='UserService' automatically includes callers using IUserService. Requires server started with --definitions flag.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -247,7 +247,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "class": {
                         "type": "string",
-                        "description": "Parent class name to scope the search. Without this, callers of ALL methods with this name are found (may mix results from unrelated classes). With class specified, only callers that reference this class or its interfaces are returned. DI-aware: automatically includes callers that use the interface (e.g., class='UserService' also finds callers using IUserService). Example: 'UserService'"
+                        "description": "STRONGLY RECOMMENDED: Parent class name to scope the search. Without this, callers of ALL methods with this name across the entire codebase are found, which may mix results from unrelated classes and produce misleading call trees. Always specify when you know the containing class. DI-aware: automatically includes callers that use the interface (e.g., class='UserService' also finds callers using IUserService). Example: 'UserService'"
                     },
                     "depth": {
                         "type": "integer",
@@ -288,6 +288,15 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "required": ["method"]
             }),
         },
+        ToolDefinition {
+            name: "search_help".to_string(),
+            description: "Show best practices and usage tips for search-index tools. Call this when unsure which tool to use or how to optimize queries. Returns a concise guide with tool selection priorities, performance tiers, and common pitfalls.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "required": []
+            }),
+        },
     ]
 }
 
@@ -322,6 +331,7 @@ pub fn dispatch_tool(
         "search_reindex_definitions" => handle_search_reindex_definitions(ctx, arguments),
         "search_definitions" => handle_search_definitions(ctx, arguments),
         "search_callers" => handle_search_callers(ctx, arguments),
+        "search_help" => handle_search_help(),
         _ => return ToolCallResult::error(format!("Unknown tool: {}", tool_name)),
     };
 
@@ -368,6 +378,60 @@ fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start: Instant) 
         // Not valid JSON or no summary -- return as-is
         result
     }
+}
+
+// --- search_help handler ---------------------------------------------
+
+fn handle_search_help() -> ToolCallResult {
+    let help = json!({
+        "bestPractices": [
+            {
+                "rule": "File lookup: use search_fast, not search_find",
+                "why": "search_fast uses a pre-built index (~35ms). search_find does a live filesystem walk (~3s). 90x+ faster.",
+                "example": "search_fast with pattern='UserService' instead of search_find"
+            },
+            {
+                "rule": "C#/Java substring search: use substring=true",
+                "why": "Default exact-token mode won't find 'UserService' inside compound identifiers like 'DeleteUserServiceCacheEntry'. Substring mode uses trigram index (~1ms).",
+                "example": "search_grep with terms='UserService', substring=true"
+            },
+            {
+                "rule": "Call chain tracing: use search_callers",
+                "why": "Single sub-millisecond request replaces 7+ sequential search_grep + read_file calls. Returns a complete call tree.",
+                "example": "search_callers with method='GetUserAsync', class='UserService', depth=2"
+            },
+            {
+                "rule": "Always specify class in search_callers",
+                "why": "Without class, results mix callers from ALL classes with a method of that name. Produces misleading call trees.",
+                "example": "search_callers with method='ExecuteAsync', class='OrderProcessor' (not just method='ExecuteAsync')"
+            },
+            {
+                "rule": "Read method source: use search_definitions with includeBody=true",
+                "why": "Returns method body inline, eliminating read_file round-trips. Use maxBodyLines/maxTotalBodyLines for budget control.",
+                "example": "search_definitions with parent='UserService', includeBody=true, maxBodyLines=20"
+            },
+            {
+                "rule": "Reconnaissance: use countOnly=true",
+                "why": "Returns ~46 tokens (just counts) vs 265+ tokens for full results. Perfect for 'how many files use X?' questions.",
+                "example": "search_grep with terms='HttpClient', countOnly=true"
+            }
+        ],
+        "performanceTiers": {
+            "instant_sub1ms": ["search_grep exact/OR/AND", "search_callers", "search_definitions baseType/attribute"],
+            "fast_1to10ms": ["search_grep substring/showLines", "search_definitions containsLine"],
+            "quick_10to100ms": ["search_fast", "search_definitions name/parent/includeBody", "search_grep regex/phrase"],
+            "slow_over1s": ["search_find (live filesystem walk)"]
+        },
+        "toolPriority": [
+            "1. search_callers — call trees (<1ms)",
+            "2. search_definitions — structural search (<1ms for baseType/attribute)",
+            "3. search_grep — content search (<1ms for exact tokens)",
+            "4. search_fast — file name lookup (~35ms)",
+            "5. search_find — live walk (~3s, last resort)"
+        ]
+    });
+
+    ToolCallResult::success(serde_json::to_string_pretty(&help).unwrap())
 }
 
 // --- search_reindex_definitions handler ------------------------------
@@ -2593,7 +2657,7 @@ mod tests {
     #[test]
     fn test_tool_definitions_count() {
         let tools = tool_definitions();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
     }
 
     #[test]
@@ -2608,6 +2672,7 @@ mod tests {
         assert!(names.contains(&"search_reindex_definitions"));
         assert!(names.contains(&"search_definitions"));
         assert!(names.contains(&"search_callers"));
+        assert!(names.contains(&"search_help"));
     }
 
     #[test]
@@ -2653,7 +2718,7 @@ mod tests {
     fn test_search_find_has_slow_warning() {
         let tools = tool_definitions();
         let find = tools.iter().find(|t| t.name == "search_find").unwrap();
-        assert!(find.description.contains("WARNING"), "search_find should have slow warning");
+        assert!(find.description.contains("SLOW") || find.description.contains("search_fast"), "search_find should discourage use and point to search_fast");
     }
 
     #[test]

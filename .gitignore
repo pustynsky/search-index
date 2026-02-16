@@ -8,3 +8,4 @@ proptest-regressions/
 *.idx
 *.cidx
 *.didx
+.vscode/settings.json

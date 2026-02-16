@@ -45,6 +45,10 @@ pub struct InitializeResult {
     pub capabilities: ServerCapabilities,
     #[serde(rename = "serverInfo")]
     pub server_info: ServerInfo,
+    /// MCP server-level instructions for LLM clients.
+    /// Provides best practices and tool selection guidance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -151,7 +155,42 @@ impl InitializeResult {
                 name: "search-index".to_string(),
                 version: "0.3.0".to_string(),
             },
+            instructions: Some(Self::instructions_text().to_string()),
         }
+    }
+
+    /// Server-level best practices for LLM tool selection.
+    /// These address gaps that are NOT discoverable from individual tool descriptions alone.
+    fn instructions_text() -> &'static str {
+        concat!(
+            "search-index MCP server — Best Practices for Tool Selection\n",
+            "\n",
+            "1. FILE LOOKUP: Always use search_fast (indexed, ~35ms) instead of search_find (live filesystem walk, ~3s). ",
+            "search_fast is 90x+ faster. Only use search_find when no index exists or you need to search outside the indexed directory.\n",
+            "\n",
+            "2. SUBSTRING SEARCH: In C#/Java codebases with compound identifiers (e.g., UserServiceCache, ",
+            "DeleteUserServiceCacheEntry), use search_grep with substring=true. Default exact-token mode will NOT find ",
+            "'UserService' inside 'DeleteUserServiceCacheEntry'. Substring mode uses a trigram index and is fast (~1ms).\n",
+            "\n",
+            "3. CALL CHAIN TRACING: Use search_callers instead of manually chaining search_grep + read_file calls. ",
+            "search_callers builds a complete call tree in a single sub-millisecond request, replacing 7+ sequential tool calls. ",
+            "Always specify the class parameter when you know the containing class — without it, results may mix callers from ",
+            "unrelated classes that happen to have a method with the same name.\n",
+            "\n",
+            "4. READING METHOD SOURCE: Use search_definitions with includeBody=true instead of read_file for reading method ",
+            "source code. It returns the exact method body inline, eliminating round-trips. Use maxBodyLines and ",
+            "maxTotalBodyLines to control response size.\n",
+            "\n",
+            "5. RECONNAISSANCE: Use search_grep with countOnly=true for quick 'how many files use X?' checks — returns ~46 tokens ",
+            "vs 265+ for full results.\n",
+            "\n",
+            "6. TOOL PRIORITY ORDER: For finding code, prefer tools in this order:\n",
+            "   - search_callers (call trees, <1ms)\n",
+            "   - search_definitions (structural: classes, methods, interfaces, <1ms for baseType/attribute)\n",
+            "   - search_grep (content search, <1ms for exact tokens)\n",
+            "   - search_fast (file name lookup, ~35ms)\n",
+            "   - search_find (live walk, ~3s — last resort)\n",
+        )
     }
 }
 
@@ -203,6 +242,20 @@ mod tests {
         assert_eq!(json["capabilities"]["tools"]["listChanged"], false);
         assert_eq!(json["serverInfo"]["name"], "search-index");
         assert_eq!(json["serverInfo"]["version"], "0.3.0");
+    }
+
+    #[test]
+    fn test_initialize_includes_instructions() {
+        let result = InitializeResult::new();
+        let json = serde_json::to_value(&result).unwrap();
+        let instructions = json["instructions"].as_str().unwrap();
+        assert!(instructions.contains("search_fast"), "instructions should mention search_fast");
+        assert!(instructions.contains("search_find"), "instructions should mention search_find");
+        assert!(instructions.contains("substring"), "instructions should mention substring search");
+        assert!(instructions.contains("search_callers"), "instructions should mention search_callers");
+        assert!(instructions.contains("class"), "instructions should mention class parameter");
+        assert!(instructions.contains("includeBody"), "instructions should mention includeBody");
+        assert!(instructions.contains("countOnly"), "instructions should mention countOnly");
     }
 
     #[test]

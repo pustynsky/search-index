@@ -461,6 +461,7 @@ search serve --dir C:\Projects --ext cs --watch --definitions --metrics
 | `search_info`         | Show all indexes with status, sizes, age                         |
 | `search_reindex`      | Force rebuild + reload content index                             |
 | `search_reindex_definitions` | Force rebuild + reload definition index (requires `--definitions`) |
+| `search_help`         | Returns best practices guide for tool selection, performance tiers, and common pitfalls |
 
 **Setup in VS Code (step-by-step):**
 
@@ -497,7 +498,7 @@ search serve --dir C:\Projects --ext cs --watch --definitions --metrics
    }
    ```
 
-4. **Restart VS Code** — the MCP server starts automatically. Your AI agent (Copilot, Roo, Claude) now has access to all 8 MCP tools: `search_grep`, `search_definitions`, `search_callers`, `search_find`, `search_fast`, `search_info`, `search_reindex`, and `search_reindex_definitions`.
+4. **Restart VS Code** — the MCP server starts automatically. Your AI agent (Copilot, Roo, Claude) now has access to all 9 MCP tools: `search_grep`, `search_definitions`, `search_callers`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_reindex_definitions`, and `search_help`. The server also sends an `instructions` field during MCP initialization with best practices for tool selection.
 
 5. **Verify** — ask the AI: _"Use search_grep to find all files containing HttpClient"_
 

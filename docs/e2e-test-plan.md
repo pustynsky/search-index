@@ -574,7 +574,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 **Expected:**
 
-- stdout: JSON-RPC response with 7 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_definitions`, `search_callers`
+- stdout: JSON-RPC response with 9 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_reindex_definitions`, `search_definitions`, `search_callers`, `search_help`
 - Each tool has `name`, `description`, `inputSchema`
 - `search_definitions` inputSchema includes `includeBody` (boolean), `maxBodyLines` (integer), and `maxTotalBodyLines` (integer) parameters
 
@@ -1024,6 +1024,52 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 **Validates:** Reindex flow rebuilds trigram index alongside content index.
 
 **Status:** ✅ Implemented (covered by `e2e_reindex_rebuilds_trigram` unit test)
+
+---
+
+### T39: `serve` — MCP initialize includes `instructions` field
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- JSON-RPC response `result` contains `instructions` field (string)
+- `instructions` mentions `search_fast`, `search_find`, `substring`, `search_callers`, `class`, `includeBody`, `countOnly`
+- Provides LLM-readable best practices for tool selection
+
+**Validates:** MCP server-level instructions for LLM tool selection guidance.
+
+**Status:** ✅ Implemented (covered by `test_initialize_includes_instructions` unit test)
+
+---
+
+### T40: `serve` — MCP search_help returns best practices
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_help","arguments":{}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- JSON response with `bestPractices` array (6 items covering file lookup, substring, call chain, class param, includeBody, countOnly)
+- `performanceTiers` object with instant/fast/quick/slow tiers
+- `toolPriority` array with recommended tool order
+
+**Validates:** On-demand best practices guide for LLMs.
 
 ---
 
