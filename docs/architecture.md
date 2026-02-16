@@ -27,6 +27,7 @@ graph TB
     subgraph Indexes["Index Layer"]
         FI[FileIndex<br/>.idx]
         CI[ContentIndex<br/>.cidx]
+        TRI[TrigramIndex<br/>in .cidx]
         DI[DefinitionIndex<br/>.didx]
     end
 
@@ -42,7 +43,7 @@ graph TB
 
     FIND --> WALK
     INDEX --> WALK --> FI
-    CIDX --> WALK --> TOK --> CI
+    CIDX --> WALK --> TOK --> CI --> TRI
     DIDX --> WALK --> TSP --> DI
     FAST --> FI
     GREP --> CI --> TFIDF
@@ -65,7 +66,7 @@ Three independent index types, each optimized for a different query pattern:
 | Index             | File    | Data Structure                  | Lookup                  | Purpose                  |
 | ----------------- | ------- | ------------------------------- | ----------------------- | ------------------------ |
 | `FileIndex`       | `.idx`  | `Vec<FileEntry>`                | O(n) scan               | File name search         |
-| `ContentIndex`    | `.cidx` | `HashMap<String, Vec<Posting>>` | O(1) per token          | Full-text content search |
+| `ContentIndex`    | `.cidx` | `HashMap<String, Vec<Posting>>` + `TrigramIndex` | O(1) per token, O(1) substring via trigrams | Full-text content search + substring search |
 | `DefinitionIndex` | `.didx` | Multi-index `HashMap` set       | O(1) per name/kind/attr | Structural code search   |
 
 All indexes are:
@@ -133,7 +134,90 @@ The `method_calls` map stores pre-computed call sites for each method/constructo
 
 The multi-index design enables compound queries: "find all public async methods in classes that implement `IQueryHandler` and have `[ServiceProvider]` attribute" — resolved via set intersection of index lookups.
 
-### 4. MCP Server
+### 4. Trigram Index (Substring Search)
+
+The trigram index enables fast substring matching within indexed tokens. It solves the compound-identifier problem: when the tokenizer produces a single token like `databaseconnectionfactory`, a search for `DatabaseConnection` would fail with exact token lookup. The trigram index makes this possible in ~0.07ms.
+
+#### Data Structure
+
+```rust
+pub struct TrigramIndex {
+    /// All unique tokens from the inverted index, sorted alphabetically.
+    pub tokens: Vec<String>,
+    /// Trigram → sorted vec of token indices (into `tokens` vec).
+    pub trigram_map: HashMap<String, Vec<u32>>,
+}
+```
+
+The `TrigramIndex` is a field of `ContentIndex` (not `Option` — always built):
+
+```rust
+pub struct ContentIndex {
+    // ... existing fields ...
+    pub trigram: TrigramIndex,        // always populated
+    pub trigram_dirty: bool,          // lazy rebuild flag for watcher
+}
+```
+
+#### How It Works
+
+A **trigram** is a 3-character sliding window over a string:
+
+```
+Token:    "httpclient"
+Trigrams: "htt", "ttp", "tpc", "pcl", "cli", "lie", "ien", "ent"
+```
+
+The trigram index maps each trigram to all tokens containing it:
+
+```
+"htt" → [httpclient, httphandler, httpcontext, ...]
+"cli" → [httpclient, clickhandler, clientbase, ...]
+```
+
+**Searching for substring** `"httpcli"`:
+
+1. Generate query trigrams: `"htt"`, `"ttp"`, `"tpc"`, `"pcl"`, `"cli"`
+2. Intersect posting lists (sorted merge) — only tokens in ALL lists survive
+3. Verify candidates with `token.contains("httpcli")` — filters trigram false positives
+4. Look up verified tokens in the main inverted index → file postings + TF-IDF scoring
+
+#### Index Build
+
+The trigram index is built automatically at the end of `build_content_index()` in [`index.rs`](../src/index.rs):
+
+```mermaid
+graph LR
+    A[Inverted Index Keys] -->|collect + sort| B[tokens Vec]
+    B -->|sliding windows of 3| C[trigram_map]
+    C -->|sort + dedup posting lists| D[TrigramIndex]
+```
+
+Build time is ~200ms for 754K tokens — negligible compared to the main index build (~7–16s).
+
+#### Memory Overhead
+
+| Component               | Size       |
+| ----------------------- | ---------- |
+| `tokens: Vec<String>`   | ~11 MB     |
+| `trigram_map` values     | ~40 MB     |
+| `trigram_map` keys       | ~0.1 MB    |
+| HashMap overhead         | ~5 MB      |
+| **Total trigram index**  | **~56 MB** |
+
+This is ~23% overhead on top of the 242 MB content index.
+
+#### Watcher Integration (Lazy Rebuild)
+
+Rather than performing complex incremental updates to the trigram index on every file change, the watcher uses a **lazy rebuild strategy**:
+
+1. On file change: watcher updates the main inverted index incrementally (as before) and sets `trigram_dirty = true`
+2. On next substring search: if `trigram_dirty`, the trigram index is rebuilt from scratch (~200ms), then `trigram_dirty = false`
+3. On bulk reindex (changes > threshold): trigram is rebuilt alongside the main index
+
+This keeps the watcher fast (no O(n) index shifting) while amortizing the trigram rebuild cost.
+
+### 5. MCP Server
 
 JSON-RPC 2.0 event loop over stdio. Designed for AI agent integration (VS Code Copilot, Roo, Claude).
 
@@ -166,7 +250,7 @@ sequenceDiagram
 - **Indexes held in `Arc<RwLock<T>>`** — watcher thread writes, server thread reads
 - **All logging to stderr** — stdout is exclusively for JSON-RPC protocol messages
 
-### 5. File Watcher
+### 6. File Watcher
 
 OS-level filesystem notifications (via `notify` crate / `ReadDirectoryChangesW` on Windows) with debounced batch processing.
 

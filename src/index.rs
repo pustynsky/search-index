@@ -11,7 +11,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 
 use crate::error::SearchError;
-use search::{clean_path, tokenize, ContentIndex, FileEntry, FileIndex, Posting};
+use search::{clean_path, generate_trigrams, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex};
 
 use crate::{ContentIndexArgs, IndexArgs};
 
@@ -260,6 +260,15 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
     }
 
     let unique_tokens = index.len();
+
+    // Build trigram index from inverted index tokens
+    let trigram = build_trigram_index(&index);
+    eprintln!(
+        "Trigram index: {} trigrams, {} tokens",
+        trigram.trigram_map.len(),
+        trigram.tokens.len()
+    );
+
     let elapsed = start.elapsed();
 
     eprintln!(
@@ -281,7 +290,122 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
         total_tokens,
         extensions,
         file_token_counts,
+        trigram,
+        trigram_dirty: false,
         forward: None,
         path_to_id: None,
+    }
+}
+
+/// Build a trigram index from the inverted index's token keys.
+pub fn build_trigram_index(inverted: &HashMap<String, Vec<Posting>>) -> TrigramIndex {
+    let mut tokens: Vec<String> = inverted.keys().cloned().collect();
+    tokens.sort();
+
+    let mut trigram_map: HashMap<String, Vec<u32>> = HashMap::new();
+
+    for (idx, token) in tokens.iter().enumerate() {
+        let trigrams = generate_trigrams(token);
+        for trigram in trigrams {
+            trigram_map.entry(trigram).or_default().push(idx as u32);
+        }
+    }
+
+    // Sort and dedup posting lists
+    for list in trigram_map.values_mut() {
+        list.sort();
+        list.dedup();
+    }
+
+    TrigramIndex { tokens, trigram_map }
+}
+#[cfg(test)]
+mod index_tests {
+    use std::collections::HashMap;
+    use search::Posting;
+    use crate::index::build_trigram_index;
+
+    #[test]
+    fn test_build_trigram_index_basic() {
+        let mut inverted: HashMap<String, Vec<Posting>> = HashMap::new();
+        inverted.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+        inverted.insert("httphandler".to_string(), vec![Posting { file_id: 1, lines: vec![5] }]);
+        inverted.insert("ab".to_string(), vec![Posting { file_id: 2, lines: vec![10] }]); // too short for trigrams
+
+        let ti = build_trigram_index(&inverted);
+
+        // Tokens should be sorted
+        assert_eq!(ti.tokens, vec!["ab", "httpclient", "httphandler"]);
+
+        // "htt" should map to both http tokens
+        let htt = ti.trigram_map.get("htt").unwrap();
+        assert_eq!(htt.len(), 2); // indices of httpclient and httphandler
+
+        // "cli" should only map to httpclient
+        let cli = ti.trigram_map.get("cli").unwrap();
+        assert_eq!(cli.len(), 1);
+
+        // "ab" should not generate any trigrams (too short)
+        // but "ab" should still be in tokens list
+        assert!(ti.tokens.contains(&"ab".to_string()));
+    }
+
+    #[test]
+    fn test_build_trigram_index_empty() {
+        let inverted: HashMap<String, Vec<Posting>> = HashMap::new();
+        let ti = build_trigram_index(&inverted);
+        assert!(ti.tokens.is_empty());
+        assert!(ti.trigram_map.is_empty());
+    }
+
+    #[test]
+    fn test_build_trigram_index_sorted_posting_lists() {
+        let mut inverted: HashMap<String, Vec<Posting>> = HashMap::new();
+        inverted.insert("abcdef".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+        inverted.insert("abcxyz".to_string(), vec![Posting { file_id: 1, lines: vec![2] }]);
+
+        let ti = build_trigram_index(&inverted);
+
+        // All posting lists should be sorted
+        for (_, list) in &ti.trigram_map {
+            for window in list.windows(2) {
+                assert!(window[0] <= window[1], "Posting list not sorted");
+            }
+        }
+    }
+
+    #[test]
+    fn test_build_trigram_index_single_token() {
+        let mut inverted: HashMap<String, Vec<Posting>> = HashMap::new();
+        inverted.insert("foobar".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+
+        let ti = build_trigram_index(&inverted);
+
+        assert_eq!(ti.tokens, vec!["foobar"]);
+        // "foobar" has 4 trigrams: foo, oob, oba, bar
+        assert_eq!(ti.trigram_map.len(), 4);
+        assert!(ti.trigram_map.contains_key("foo"));
+        assert!(ti.trigram_map.contains_key("oob"));
+        assert!(ti.trigram_map.contains_key("oba"));
+        assert!(ti.trigram_map.contains_key("bar"));
+    }
+
+    #[test]
+    fn test_build_trigram_index_deduplicates() {
+        // Two tokens sharing the same trigram should appear once each in the posting list
+        let mut inverted: HashMap<String, Vec<Posting>> = HashMap::new();
+        inverted.insert("abc".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+        inverted.insert("abcdef".to_string(), vec![Posting { file_id: 1, lines: vec![2] }]);
+
+        let ti = build_trigram_index(&inverted);
+
+        let abc_list = ti.trigram_map.get("abc").unwrap();
+        // Both "abc" (idx 0) and "abcdef" (idx 1) share trigram "abc"
+        assert_eq!(abc_list.len(), 2);
+        // Should be deduped (no duplicates)
+        let mut deduped = abc_list.clone();
+        deduped.sort();
+        deduped.dedup();
+        assert_eq!(abc_list.len(), deduped.len());
     }
 }

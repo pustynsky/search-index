@@ -25,7 +25,8 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 | [Concurrency](docs/concurrency.md) | Thread model, lock strategy, watcher design |
 | [Trade-offs](docs/tradeoffs.md) | Design decisions with alternatives considered |
 | [Benchmarks](docs/benchmarks.md) | Performance data, scaling estimates, industry comparison |
-| [E2E Test Plan](docs/e2e-test-plan.md) | 30 end-to-end test cases (24 CLI + 6 MCP) with automation script |
+| [E2E Test Plan](docs/e2e-test-plan.md) | 40+ end-to-end test cases (24 CLI + 16 MCP) with automation script |
+| [Substring Search Design](docs/substring-search-design.md) | Trigram index design, search algorithm, watcher integration |
 
 ## Features
 
@@ -40,6 +41,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Code definition index** — tree-sitter AST parsing of C# (classes, methods, interfaces, properties, enums) and SQL (stored procedures, tables) for structural code search
 - **Parallel parsing** — multi-threaded tree-sitter parsing across all CPU cores (~16-32s for 48K files, varies by CPU)
 - **File watcher** — incremental index updates on file changes (<1s per file for content + definition indexes)
+- **Substring search** — trigram-indexed substring matching within tokens (e.g., `DatabaseConnection` finds `databaseconnectionfactory`) — ~0.07ms vs ~44ms for regex
 
 ## Performance
 
@@ -284,6 +286,17 @@ search grep "HttpClient" -d C:\Projects -e cs
 - TF-IDF scores are summed across matching terms — files matching more terms rank higher
 - Output shows `X/N terms` indicating how many of the search terms were found in each file
 
+**Substring search (`--substring`):**
+
+- Finds tokens that **contain** the search term as a substring
+- Uses a trigram index for fast matching (~0.07ms) — much faster than regex scanning (~12–44ms)
+- Solves the compound-identifier problem: searching `DatabaseConnection` finds the token `databaseconnectionfactory` even though it's stored as a single token in the inverted index
+- For queries shorter than 4 characters, a warning is included in the response (trigram matching is less selective for very short queries)
+- Mutually exclusive with `--regex` and `--phrase`
+- Example: `search grep "DatabaseConn" -d C:\Projects -e cs --substring`
+- In MCP mode: `{ "terms": "DatabaseConn", "substring": true }`
+- Response includes `matchedTokens` field listing which index tokens matched the substring
+
 **Regex search (`-r, --regex`):**
 
 - Pattern is matched against all indexed tokens using Rust regex syntax
@@ -311,6 +324,7 @@ search grep "HttpClient" -d C:\Projects -e cs
 | `-B, --before <N>`  | Show N lines before each match (with --show-lines)        |
 | `-A, --after <N>`   | Show N lines after each match (with --show-lines)         |
 | `--phrase`          | Phrase search: find exact phrase via index + verification |
+| `--substring`       | Substring search via trigram index (MCP: `substring: true`) |
 
 ---
 
@@ -719,7 +733,7 @@ This means:
 ## Testing
 
 ```bash
-# Run all tests (138 tests: 116 main + 21 lib + 1 doctest)
+# Run all tests (200 tests: 167 main + 32 lib + 1 doctest)
 cargo test
 
 # Run property-based tests only
@@ -743,7 +757,8 @@ cargo test -- --nocapture
 | Integration | Build + search ContentIndex, build FileIndex, MCP server end-to-end |
 | MCP Protocol | JSON-RPC parsing, initialize, tools/list, tools/call, notifications, errors |
 | MCP Handlers | Tool definitions, grep dispatch, callers, definitions, containsLine |
-| File Watcher | Forward index, incremental update, file removal, bulk threshold |
+| Substring/Trigram | Trigram generation, trigram index build, sorted intersection, substring search (partial match, full match, no match, short query, case-insensitive, multi-term, mutually exclusive modes, dirty rebuild), 13 e2e integration tests |
+| File Watcher | Forward index, incremental update, file removal, bulk threshold, trigram dirty flag |
 | Definitions | C# parsing, SQL parsing, incremental update, serialization |
 | Property tests (proptest) | Tokenizer invariants (always lowercase, min length, deterministic, valid chars, monotonic), posting roundtrip, index consistency, TF-IDF ordering, clean_path idempotency |
 | Benchmarks (criterion) | Tokenizer throughput, index lookup latency, TF-IDF scoring, regex scan, serialization |

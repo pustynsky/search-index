@@ -4,7 +4,7 @@
 
 This document defines end-to-end tests for the `search` binary. These tests exercise
 real CLI commands against a real directory to verify the full pipeline: indexing, searching,
-output format, and all feature flags.
+output format, and all feature flags (including substring search via trigram index).
 
 **Run these tests after every major refactoring, before merging PRs, and after dependency upgrades.**
 
@@ -786,6 +786,153 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 **Validates:** class parameter works for direction=down (bug fix), callee tree building.
 
 ---
+
+### T33: `serve` — search_grep with `substring: true` (basic)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokeniz","substring":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with search results
+- Result content includes files containing tokens that have `tokeniz` as a substring (e.g., `tokenize`)
+- Result includes `matchedTokens` field listing matched index tokens
+- `summary.totalFiles` > 0
+
+**Validates:** Substring search via trigram index, `matchedTokens` in response.
+
+**Status:** ✅ Implemented (covered by `e2e_substring_search_full_pipeline` unit test)
+
+---
+
+### T34: `serve` — search_grep with `substring: true` + short query warning
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"fn","substring":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with search results
+- Result includes a `"warning"` field about short substring queries (<4 chars)
+
+**Validates:** Short query warning for substring search.
+
+**Status:** ✅ Implemented (covered by `e2e_substring_search_short_query_warning` unit test)
+
+---
+
+### T35: `serve` — search_grep with `substring: true` + `showLines: true`
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokeniz","substring":true,"showLines":true,"maxResults":2}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with search results
+- Each file object contains a `"lineContent"` array with compact grouped format
+- Lines contain the matched substring
+
+**Validates:** Substring search combined with `showLines`.
+
+**Status:** ✅ Implemented (covered by `e2e_substring_search_with_show_lines` unit test)
+
+---
+
+### T36: `serve` — search_grep `substring: true` mutually exclusive with `regex`
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"test","substring":true,"regex":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC error response indicating `substring` and `regex` are mutually exclusive
+
+**Validates:** Mutual exclusivity between substring and regex modes.
+
+**Status:** ✅ Implemented (covered by `e2e_substring_mutually_exclusive_with_regex` unit test)
+
+---
+
+### T37: `serve` — search_grep `substring: true` mutually exclusive with `phrase`
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"pub fn","substring":true,"phrase":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC error response indicating `substring` and `phrase` are mutually exclusive
+
+**Validates:** Mutual exclusivity between substring and phrase modes.
+
+**Status:** ✅ Implemented (covered by `e2e_substring_mutually_exclusive_with_phrase` unit test)
+
+---
+
+### T38: `serve` — search_reindex rebuilds trigram index
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_reindex","arguments":{}}}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokeniz","substring":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- Reindex response: success
+- Subsequent substring search: works correctly, `totalFiles` > 0
+
+**Validates:** Reindex flow rebuilds trigram index alongside content index.
+
+**Status:** ✅ Implemented (covered by `e2e_reindex_rebuilds_trigram` unit test)
+
+---
+
 
 ## Automation Script
 

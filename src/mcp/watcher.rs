@@ -112,6 +112,8 @@ pub fn start_watcher(
                             for path in &dirty_clean {
                                 update_file_in_index(&mut idx, path);
                             }
+                            // Mark trigram index as dirty — will be rebuilt lazily on next substring search
+                            idx.trigram_dirty = true;
                         }
                         Err(e) => {
                             error!(error = %e, "Failed to acquire content index write lock");
@@ -311,6 +313,7 @@ fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use crate::TrigramIndex;
 
     fn make_test_index() -> ContentIndex {
         let mut idx = HashMap::new();
@@ -335,6 +338,8 @@ mod tests {
             total_tokens: 100,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![50, 30],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None,
             path_to_id: None,
         }
@@ -422,6 +427,8 @@ mod tests {
             total_tokens: 10,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![5],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: Some({
                 let mut m = HashMap::new();
                 m.insert(0u32, vec!["original".to_string(), "oldtoken".to_string()]);
@@ -517,6 +524,8 @@ mod tests {
             total_tokens: 4,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![4],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: Some({
                 let mut m = HashMap::new();
                 m.insert(0u32, vec!["class".to_string(), "original".to_string(), "oldtoken".to_string(), "stuff".to_string()]);
@@ -576,6 +585,8 @@ mod tests {
             total_tokens: 0,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: Some(HashMap::new()),
             path_to_id: Some(HashMap::new()),
         };

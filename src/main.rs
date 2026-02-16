@@ -11,7 +11,7 @@ use regex::Regex;
 use tracing::{info, warn};
 
 // Re-export core types from library crate
-pub use search::{clean_path, tokenize, ContentIndex, FileEntry, FileIndex, Posting};
+pub use search::{clean_path, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex};
 
 mod definitions;
 mod error;
@@ -1625,6 +1625,8 @@ mod tests {
             total_tokens: 0,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None,
             path_to_id: None,
         };
@@ -1646,6 +1648,8 @@ mod tests {
             total_tokens: 0,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None,
             path_to_id: None,
         };
@@ -1704,6 +1708,8 @@ mod tests {
             total_tokens: 100,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![50],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None,
             path_to_id: None,
         };

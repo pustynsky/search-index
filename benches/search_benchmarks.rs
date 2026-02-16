@@ -9,7 +9,7 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use std::collections::HashMap;
 
 // Import from the search crate
-use search::{tokenize, ContentIndex, Posting};
+use search::{generate_trigrams, tokenize, ContentIndex, Posting, TrigramIndex};
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
@@ -79,6 +79,8 @@ fn build_synthetic_index(num_files: usize, tokens_per_file: usize) -> ContentInd
         total_tokens,
         extensions: vec!["cs".to_string()],
         file_token_counts,
+        trigram: TrigramIndex::default(),
+        trigram_dirty: false,
         forward: None,
         path_to_id: None,
     }
@@ -367,6 +369,184 @@ fn bench_serialization(c: &mut Criterion) {
     group.finish();
 }
 
+// ─── Trigram / Substring Benchmarks ─────────────────────────────────
+
+/// Build a TrigramIndex from an inverted index (mirrors build_trigram_index in index.rs)
+fn build_trigram_for_bench(inverted: &HashMap<String, Vec<Posting>>) -> TrigramIndex {
+    let mut tokens: Vec<String> = inverted.keys().cloned().collect();
+    tokens.sort();
+
+    let mut trigram_map: HashMap<String, Vec<u32>> = HashMap::new();
+
+    for (idx, token) in tokens.iter().enumerate() {
+        let trigrams = generate_trigrams(token);
+        for trigram in trigrams {
+            trigram_map.entry(trigram).or_default().push(idx as u32);
+        }
+    }
+
+    for list in trigram_map.values_mut() {
+        list.sort();
+        list.dedup();
+    }
+
+    TrigramIndex { tokens, trigram_map }
+}
+
+/// Sorted intersection of two u32 slices (mirrors sorted_intersect in handlers.rs)
+fn sorted_intersect(a: &[u32], b: &[u32]) -> Vec<u32> {
+    let mut result = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Equal => { result.push(a[i]); i += 1; j += 1; }
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+        }
+    }
+    result
+}
+
+fn bench_trigram_build(c: &mut Criterion) {
+    let mut group = c.benchmark_group("trigram_build");
+    group.sample_size(10);
+
+    for &num_files in &[1_000, 10_000, 50_000] {
+        let index = build_synthetic_index(num_files, 200);
+
+        group.bench_with_input(
+            BenchmarkId::new("build_trigram_index", num_files),
+            &index,
+            |b, index| {
+                b.iter(|| {
+                    black_box(build_trigram_for_bench(&index.index));
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_substring_search(c: &mut Criterion) {
+    let mut group = c.benchmark_group("substring_search");
+
+    for &num_files in &[1_000, 10_000, 50_000] {
+        let index = build_synthetic_index(num_files, 200);
+        let trigram = build_trigram_for_bench(&index.index);
+
+        // Long query (10+ chars) — uses trigram intersection
+        group.bench_with_input(
+            BenchmarkId::new("long_query_12chars", num_files),
+            &(&index, &trigram),
+            |b, &(index, trigram)| {
+                b.iter(|| {
+                    let query = "rarehttpclie"; // 12 chars, partial match
+                    let query_lower = query.to_lowercase();
+                    let query_trigrams = generate_trigrams(&query_lower);
+
+                    let mut candidates: Option<Vec<u32>> = None;
+                    for tri in &query_trigrams {
+                        if let Some(list) = trigram.trigram_map.get(tri) {
+                            candidates = Some(match candidates {
+                                None => list.clone(),
+                                Some(prev) => sorted_intersect(&prev, list),
+                            });
+                        }
+                    }
+
+                    let verified: Vec<&str> = candidates.unwrap_or_default().iter()
+                        .filter_map(|&idx| trigram.tokens.get(idx as usize))
+                        .filter(|t| t.contains(&query_lower))
+                        .map(|t| t.as_str())
+                        .collect();
+
+                    // Look up in main index
+                    for token in &verified {
+                        black_box(index.index.get(*token));
+                    }
+                    black_box(verified.len());
+                })
+            },
+        );
+
+        // Short query (2 chars) — linear scan fallback
+        group.bench_with_input(
+            BenchmarkId::new("short_query_2chars", num_files),
+            &(&index, &trigram),
+            |b, &(_index, trigram)| {
+                b.iter(|| {
+                    let query = "cl"; // 2 chars — falls back to linear scan
+                    let matches: Vec<&str> = trigram.tokens.iter()
+                        .filter(|t| t.contains(query))
+                        .map(|t| t.as_str())
+                        .collect();
+                    black_box(matches.len());
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_substring_vs_regex(c: &mut Criterion) {
+    let mut group = c.benchmark_group("substring_vs_regex");
+
+    let index = build_synthetic_index(10_000, 200);
+    let trigram = build_trigram_for_bench(&index.index);
+
+    // Substring search via trigram
+    group.bench_function("trigram_substring", |b| {
+        b.iter(|| {
+            let query = "rarehttpclie";
+            let query_lower = query.to_lowercase();
+            let query_trigrams = generate_trigrams(&query_lower);
+
+            let mut candidates: Option<Vec<u32>> = None;
+            for tri in &query_trigrams {
+                if let Some(list) = trigram.trigram_map.get(tri) {
+                    candidates = Some(match candidates {
+                        None => list.clone(),
+                        Some(prev) => sorted_intersect(&prev, list),
+                    });
+                }
+            }
+
+            let verified: Vec<&str> = candidates.unwrap_or_default().iter()
+                .filter_map(|&idx| trigram.tokens.get(idx as usize))
+                .filter(|t| t.contains(&query_lower))
+                .map(|t| t.as_str())
+                .collect();
+            black_box(verified.len());
+        })
+    });
+
+    // Equivalent regex scan of all keys
+    group.bench_function("regex_scan_all_keys", |b| {
+        let re = regex::Regex::new("(?i).*rarehttpclie.*").unwrap();
+        b.iter(|| {
+            let matches: Vec<&String> = index.index.keys()
+                .filter(|k| re.is_match(k))
+                .collect();
+            black_box(matches.len());
+        })
+    });
+
+    // Linear contains() scan of all keys
+    group.bench_function("linear_contains_scan", |b| {
+        b.iter(|| {
+            let query = "rarehttpclie";
+            let matches: Vec<&String> = index.index.keys()
+                .filter(|k| k.contains(query))
+                .collect();
+            black_box(matches.len());
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_tokenize,
@@ -375,5 +555,8 @@ criterion_group!(
     bench_regex_scan,
     bench_index_build,
     bench_serialization,
+    bench_trigram_build,
+    bench_substring_search,
+    bench_substring_vs_regex,
 );
 criterion_main!(benches);

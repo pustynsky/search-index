@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -11,6 +11,8 @@ use crate::{
     build_content_index, clean_path, cmd_info_json,
     save_content_index, tokenize, ContentIndex, ContentIndexArgs,
 };
+use crate::index::build_trigram_index;
+use search::generate_trigrams;
 use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionKind};
 
 /// Return all tool definitions for tools/list
@@ -18,13 +20,13 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "search_grep".to_string(),
-            description: "Search file contents using an inverted index with TF-IDF ranking. Supports exact tokens, multi-term OR/AND, regex, phrase search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). IMPORTANT: When searching for all usages of a class/interface, use multi-term OR search to find ALL naming variants in ONE query. Example: to find all usages of MyClass, search for 'MyClass,IMyClass,MyClassFactory' with mode='or'. This is much faster than making separate queries for each variant. Comma-separated terms with mode='or' finds files containing ANY of the terms; mode='and' finds files containing ALL terms.".to_string(),
+            description: "Search file contents using an inverted index with TF-IDF ranking. Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). IMPORTANT: When searching for all usages of a class/interface, use multi-term OR search to find ALL naming variants in ONE query. Example: to find all usages of MyClass, search for 'MyClass,IMyClass,MyClassFactory' with mode='or'. This is much faster than making separate queries for each variant. Comma-separated terms with mode='or' finds files containing ANY of the terms; mode='and' finds files containing ALL terms. Use substring=true to find tokens containing a substring (e.g., 'DatabaseConn' finds 'databaseconnectionfactory').".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "terms": {
                         "type": "string",
-                        "description": "Search terms. Comma-separated for multi-term search. Single token: 'HttpClient'. Multi-term OR/AND: 'HttpClient,ILogger,Task' (finds files with ANY term when mode='or', or ALL terms when mode='and'). Always use comma-separated multi-term OR search when looking for all usages of a class — include the class name, its interface, and related types in one query. Phrase (use with phrase=true): 'new HttpClient'. Regex (use with regex=true): 'I.*Cache'"
+                        "description": "Search terms. Comma-separated for multi-term search. Single token: 'HttpClient'. Multi-term OR/AND: 'HttpClient,ILogger,Task' (finds files with ANY term when mode='or', or ALL terms when mode='and'). Always use comma-separated multi-term OR search when looking for all usages of a class â€” include the class name, its interface, and related types in one query. Phrase (use with phrase=true): 'new HttpClient'. Regex (use with regex=true): 'I.*Cache'"
                     },
                     "dir": {
                         "type": "string",
@@ -72,6 +74,10 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "countOnly": {
                         "type": "boolean",
                         "description": "Return only file count and occurrence count (default: false)"
+                    },
+                    "substring": {
+                        "type": "boolean",
+                        "description": "Treat each term as a substring to match within tokens (default: false). Example: 'DatabaseConn' with substring=true finds tokens like 'databaseconnectionfactory'. Uses trigram index for fast matching. For queries shorter than 4 chars, a warning is included. Mutually exclusive with 'regex' and 'phrase'."
                     }
                 },
                 "required": ["terms"]
@@ -79,7 +85,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_find".to_string(),
-            description: "Search for files by name using live filesystem walk. No index needed. ⚠️ WARNING: This performs a live filesystem walk and may be slow for large directories (10-30s). For instant results, use search_fast with a pre-built file name index.".to_string(),
+            description: "Search for files by name using live filesystem walk. No index needed. âš ï¸ WARNING: This performs a live filesystem walk and may be slow for large directories (10-30s). For instant results, use search_fast with a pre-built file name index.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -163,7 +169,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_definitions".to_string(),
-            description: "Search C# and SQL code definitions — classes, interfaces, methods, properties, enums, stored procedures, tables. Uses pre-built tree-sitter AST index for instant results (~0.001s). Requires server started with --definitions flag. Supports 'containsLine' to find which method/class contains a given line number (no more manual read_file!). Supports 'includeBody' to return actual source code inline, eliminating read_file calls.".to_string(),
+            description: "Search C# and SQL code definitions â€” classes, interfaces, methods, properties, enums, stored procedures, tables. Uses pre-built tree-sitter AST index for instant results (~0.001s). Requires server started with --definitions flag. Supports 'containsLine' to find which method/class contains a given line number (no more manual read_file!). Supports 'includeBody' to return actual source code inline, eliminating read_file calls.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -194,7 +200,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "containsLine": {
                         "type": "integer",
-                        "description": "Find the definition(s) that contain this line number. Returns the innermost method/property and its parent class. Must be used with 'file' parameter. Example: file='UserService.cs', containsLine=42 → returns GetUserAsync (lines 35-50), parent: UserService"
+                        "description": "Find the definition(s) that contain this line number. Returns the innermost method/property and its parent class. Must be used with 'file' parameter. Example: file='UserService.cs', containsLine=42 â†’ returns GetUserAsync (lines 35-50), parent: UserService"
                     },
                     "regex": {
                         "type": "boolean",
@@ -227,7 +233,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_callers".to_string(),
-            description: "Find all callers of a method and build a call tree (up or down). Combines grep index (to find where a method name appears) with AST definition index (to determine which method/class contains each call site). Returns a hierarchical call tree. This is the most powerful tool for tracing call chains — replaces 7+ sequential search_grep + read_file calls with a single request. Requires server started with --definitions flag.".to_string(),
+            description: "Find all callers of a method and build a call tree (up or down). Combines grep index (to find where a method name appears) with AST definition index (to determine which method/class contains each call site). Returns a hierarchical call tree. This is the most powerful tool for tracing call chains â€” replaces 7+ sequential search_grep + read_file calls with a single request. Requires server started with --definitions flag.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -281,7 +287,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
-/// Context for tool handlers — shared state
+/// Context for tool handlers â€” shared state
 pub struct HandlerContext {
     pub index: Arc<RwLock<ContentIndex>>,
     pub def_index: Option<Arc<RwLock<DefinitionIndex>>>,
@@ -308,7 +314,7 @@ pub fn dispatch_tool(
     }
 }
 
-// ─── search_reindex_definitions handler ──────────────────────────────
+// â”€â”€â”€ search_reindex_definitions handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index_arc = match &ctx.def_index {
@@ -382,7 +388,7 @@ fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> Tool
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
-// ─── search_grep handler ─────────────────────────────────────────────
+// â”€â”€â”€ search_grep handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let terms_str = match args.get("terms").and_then(|v| v.as_str()) {
@@ -390,7 +396,7 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         None => return ToolCallResult::error("Missing required parameter: terms".to_string()),
     };
 
-    // Check dir parameter — must match server dir or be absent
+    // Check dir parameter â€” must match server dir or be absent
     if let Some(dir) = args.get("dir").and_then(|v| v.as_str()) {
         let requested = std::fs::canonicalize(dir)
             .map(|p| clean_path(&p.to_string_lossy()))
@@ -410,6 +416,7 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let mode_and = args.get("mode").and_then(|v| v.as_str()) == Some("and");
     let use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
     let use_phrase = args.get("phrase").and_then(|v| v.as_bool()).unwrap_or(false);
+    let use_substring = args.get("substring").and_then(|v| v.as_bool()).unwrap_or(false);
     let show_lines = args.get("showLines").and_then(|v| v.as_bool()).unwrap_or(false);
     let context_lines = args.get("contextLines").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
     let max_results = args.get("maxResults").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
@@ -425,12 +432,40 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
     let search_start = Instant::now();
 
+    // â”€â”€â”€ Mutual exclusivity check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if use_substring && (use_regex || use_phrase) {
+        return ToolCallResult::error(
+            "substring is mutually exclusive with regex and phrase".to_string(),
+        );
+    }
+
+    // â”€â”€â”€ Substring: check if trigram index needs rebuild â”€â”€â”€â”€â”€
+    if use_substring {
+        let needs_rebuild = ctx.index.read().map(|idx| idx.trigram_dirty).unwrap_or(false);
+        if needs_rebuild {
+            if let Ok(mut idx) = ctx.index.write() {
+                if idx.trigram_dirty {
+                    idx.trigram = build_trigram_index(&idx.index);
+                    idx.trigram_dirty = false;
+                    eprintln!("[substring] Rebuilt trigram index: {} tokens, {} trigrams",
+                        idx.trigram.tokens.len(), idx.trigram.trigram_map.len());
+                }
+            }
+        }
+    }
+
     let index = match ctx.index.read() {
         Ok(idx) => idx,
         Err(e) => return ToolCallResult::error(format!("Failed to acquire index lock: {}", e)),
     };
 
-    // ─── Phrase search mode ─────────────────────────────────
+    // â”€â”€â”€ Substring search mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    if use_substring {
+        return handle_substring_search(ctx, &index, &terms_str, &ext_filter, &exclude_dir, &exclude,
+            show_lines, context_lines, max_results, mode_and, count_only, search_start);
+    }
+
+    // â”€â”€â”€ Phrase search mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     if use_phrase {
         return handle_phrase_search(
             &index, &terms_str, &ext_filter, &exclude_dir, &exclude,
@@ -438,7 +473,7 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         );
     }
 
-    // ─── Normal token search ────────────────────────────────
+    // â”€â”€â”€ Normal token search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     let raw_terms: Vec<String> = terms_str
         .split(',')
         .map(|s| s.trim().to_lowercase())
@@ -606,6 +641,247 @@ struct FileScoreEntry {
     occurrences: usize,
     terms_matched: usize,
 }
+/// Merge-intersect two sorted u32 slices. Returns sorted intersection.
+fn sorted_intersect(a: &[u32], b: &[u32]) -> Vec<u32> {
+    let mut result = Vec::new();
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Equal => { result.push(a[i]); i += 1; j += 1; }
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+        }
+    }
+    result
+}
+
+/// Substring search using the trigram index.
+fn handle_substring_search(
+    _ctx: &HandlerContext,
+    index: &ContentIndex,
+    terms_str: &str,
+    ext_filter: &Option<String>,
+    exclude_dir: &[String],
+    exclude: &[String],
+    show_lines: bool,
+    context_lines: usize,
+    max_results_param: usize,
+    mode_and: bool,
+    count_only: bool,
+    _search_start: Instant,
+) -> ToolCallResult {
+    let max_results = if max_results_param == 0 { 0 } else { max_results_param };
+
+    let raw_terms: Vec<String> = terms_str
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if raw_terms.is_empty() {
+        return ToolCallResult::error("No search terms provided".to_string());
+    }
+
+    let trigram_idx = &index.trigram;
+    let total_docs = index.files.len() as f64;
+    let search_mode = if mode_and { "and" } else { "or" };
+
+    // Track warnings
+    let mut warnings: Vec<String> = Vec::new();
+    let has_short_query = raw_terms.iter().any(|t| t.len() < 4);
+    if has_short_query {
+        warnings.push("Short substring query (<4 chars) may return broad results".to_string());
+    }
+
+    // For each term, find matching tokens via trigram index
+    let mut all_matched_tokens: Vec<String> = Vec::new();
+    let mut file_scores: HashMap<u32, FileScoreEntry> = HashMap::new();
+    let term_count = raw_terms.len();
+
+    for term in &raw_terms {
+        // Find tokens that contain this term as a substring
+        let matched_token_indices: Vec<u32> = if term.len() < 3 {
+            // Linear scan for very short terms (no trigrams possible)
+            trigram_idx.tokens.iter().enumerate()
+                .filter(|(_, tok)| tok.contains(term.as_str()))
+                .map(|(i, _)| i as u32)
+                .collect()
+        } else {
+            // Use trigram index: intersect posting lists for all trigrams of the term
+            let trigrams = generate_trigrams(term);
+            if trigrams.is_empty() {
+                Vec::new()
+            } else {
+                // Get candidate token indices by intersecting trigram posting lists
+                let mut candidates: Option<Vec<u32>> = None;
+                for tri in &trigrams {
+                    if let Some(posting_list) = trigram_idx.trigram_map.get(tri) {
+                        candidates = Some(match candidates {
+                            None => posting_list.clone(),
+                            Some(prev) => sorted_intersect(&prev, posting_list),
+                        });
+                    } else {
+                        // Trigram not found â†’ no candidates
+                        candidates = Some(Vec::new());
+                        break;
+                    }
+                }
+
+                let candidate_indices = candidates.unwrap_or_default();
+
+                // Verify candidates: check that the token actually contains the substring
+                candidate_indices.into_iter()
+                    .filter(|&idx| {
+                        if let Some(tok) = trigram_idx.tokens.get(idx as usize) {
+                            tok.contains(term.as_str())
+                        } else {
+                            false
+                        }
+                    })
+                    .collect()
+            }
+        };
+
+        // Collect matched token names
+        let matched_tokens: Vec<String> = matched_token_indices.iter()
+            .filter_map(|&idx| trigram_idx.tokens.get(idx as usize).cloned())
+            .collect();
+        all_matched_tokens.extend(matched_tokens.iter().cloned());
+
+        // For each matched token, look up in main inverted index to get file postings
+        for token in &matched_tokens {
+            let token_key: &str = token.as_str();
+            if let Some(postings) = index.index.get(token_key) {
+                let doc_freq = postings.len() as f64;
+                let idf = if doc_freq > 0.0 { (total_docs / doc_freq).ln() } else { 0.0 };
+
+                for posting in postings {
+                    let file_path = &index.files[posting.file_id as usize];
+
+                    // Extension filter
+                    if let Some(ext) = ext_filter {
+                        let matches = Path::new(file_path)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .is_some_and(|e| e.eq_ignore_ascii_case(ext));
+                        if !matches { continue; }
+                    }
+
+                    // Exclude dir filter
+                    if exclude_dir.iter().any(|excl| {
+                        file_path.to_lowercase().contains(&excl.to_lowercase())
+                    }) { continue; }
+
+                    // Exclude pattern filter
+                    if exclude.iter().any(|excl| {
+                        file_path.to_lowercase().contains(&excl.to_lowercase())
+                    }) { continue; }
+
+                    let occurrences = posting.lines.len();
+                    let file_total = if (posting.file_id as usize) < index.file_token_counts.len() {
+                        index.file_token_counts[posting.file_id as usize] as f64
+                    } else {
+                        1.0
+                    };
+                    let tf = occurrences as f64 / file_total;
+                    let tf_idf = tf * idf;
+
+                    let entry = file_scores.entry(posting.file_id).or_insert(FileScoreEntry {
+                        file_path: file_path.clone(),
+                        lines: Vec::new(),
+                        tf_idf: 0.0,
+                        occurrences: 0,
+                        terms_matched: 0,
+                    });
+                    entry.tf_idf += tf_idf;
+                    entry.occurrences += occurrences;
+                    entry.lines.extend_from_slice(&posting.lines);
+                    entry.terms_matched += 1;
+                }
+            }
+        }
+    }
+
+    // Dedup matched tokens
+    all_matched_tokens.sort();
+    all_matched_tokens.dedup();
+
+    // Filter by AND mode
+    let mut results: Vec<FileScoreEntry> = file_scores
+        .into_values()
+        .filter(|fs| !mode_and || fs.terms_matched >= term_count)
+        .collect();
+
+    // Sort/dedup lines
+    for result in &mut results {
+        result.lines.sort();
+        result.lines.dedup();
+    }
+
+    // Sort by TF-IDF descending
+    results.sort_by(|a, b| b.tf_idf.partial_cmp(&a.tf_idf).unwrap_or(std::cmp::Ordering::Equal));
+
+    let total_files = results.len();
+    let total_occurrences: usize = results.iter().map(|r| r.occurrences).sum();
+
+    // Apply max_results
+    if max_results > 0 {
+        results.truncate(max_results);
+    }
+
+    if count_only {
+        let mut summary = json!({
+            "totalFiles": total_files,
+            "totalOccurrences": total_occurrences,
+            "termsSearched": raw_terms,
+            "searchMode": format!("substring-{}", search_mode),
+            "matchedTokens": all_matched_tokens,
+        });
+        if !warnings.is_empty() {
+            summary["warning"] = json!(warnings[0]);
+        }
+        let output = json!({
+            "summary": summary
+        });
+        return ToolCallResult::success(output.to_string());
+    }
+
+    // Build JSON output
+    let files_json: Vec<Value> = results.iter().map(|r| {
+        let mut file_obj = json!({
+            "path": r.file_path,
+            "score": (r.tf_idf * 10000.0).round() / 10000.0,
+            "occurrences": r.occurrences,
+            "lines": r.lines,
+        });
+
+        if show_lines {
+            if let Ok(content) = std::fs::read_to_string(&r.file_path) {
+                file_obj["lineContent"] = build_line_content_from_matches(&content, &r.lines, context_lines);
+            }
+        }
+
+        file_obj
+    }).collect();
+
+    let mut summary = json!({
+        "totalFiles": total_files,
+        "totalOccurrences": total_occurrences,
+        "termsSearched": raw_terms,
+        "searchMode": format!("substring-{}", search_mode),
+        "matchedTokens": all_matched_tokens,
+    });
+    if !warnings.is_empty() {
+        summary["warning"] = json!(warnings[0]);
+    }
+    let output = json!({
+        "files": files_json,
+        "summary": summary
+    });
+
+    ToolCallResult::success(output.to_string())
+}
+
 
 fn handle_phrase_search(
     index: &ContentIndex,
@@ -760,7 +1036,7 @@ fn handle_phrase_search(
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
-// ─── search_find handler ─────────────────────────────────────────────
+// â”€â”€â”€ search_find handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn handle_search_find(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
@@ -911,7 +1187,7 @@ fn handle_search_find(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
-// ─── search_fast handler ─────────────────────────────────────────────
+// â”€â”€â”€ search_fast handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
@@ -1014,14 +1290,14 @@ fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
-// ─── search_info handler ─────────────────────────────────────────────
+// â”€â”€â”€ search_info handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn handle_search_info() -> ToolCallResult {
     let info = cmd_info_json();
     ToolCallResult::success(serde_json::to_string(&info).unwrap())
 }
 
-// ─── search_reindex handler ──────────────────────────────────────────
+// â”€â”€â”€ search_reindex handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or(&ctx.server_dir);
@@ -1084,7 +1360,7 @@ fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
-// ─── helper: inject body source code into definition JSON object ─────
+// â”€â”€â”€ helper: inject body source code into definition JSON object â”€â”€â”€â”€â”€
 
 /// Build compact grouped lineContent for search_grep from raw file content.
 /// Computes context windows around match lines, then groups consecutive lines
@@ -1248,7 +1524,7 @@ fn inject_body_into_obj(
     }
 }
 
-// ─── search_definitions handler ──────────────────────────────────────
+// â”€â”€â”€ search_definitions handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index = match &ctx.def_index {
@@ -1282,7 +1558,7 @@ fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     let max_body_lines = args.get("maxBodyLines").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
     let max_total_body_lines = args.get("maxTotalBodyLines").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
 
-    // ─── containsLine: find containing method/class by line number ───
+    // â”€â”€â”€ containsLine: find containing method/class by line number â”€â”€â”€
     if let Some(line_num) = contains_line {
         if file_filter.is_none() {
             return ToolCallResult::error(
@@ -1560,7 +1836,7 @@ fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
-// ─── search_callers handler ──────────────────────────────────────────
+// â”€â”€â”€ search_callers handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index = match &ctx.def_index {
@@ -1772,7 +2048,7 @@ fn find_containing_method(
 }
 
 /// Build a caller tree recursively (direction = "up").
-/// `parent_class` is used to disambiguate common method names — when recursing,
+/// `parent_class` is used to disambiguate common method names â€” when recursing,
 /// we pass the parent class of the method being searched so that we only find
 /// callers that actually reference that specific class (not any unrelated class
 /// with a method of the same name).
@@ -2186,7 +2462,7 @@ fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex) -> Vec<u32> {
         }
 
         if let Some(ref recv_type) = call.receiver_type {
-            // We have receiver type info — use it to disambiguate
+            // We have receiver type info â€” use it to disambiguate
             let recv_lower = recv_type.to_lowercase();
 
             if let Some(ref parent) = def.parent {
@@ -2225,7 +2501,7 @@ fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex) -> Vec<u32> {
                 // This is already handled by the direct match above.
             }
         } else {
-            // No receiver type — accept any matching method/constructor
+            // No receiver type â€” accept any matching method/constructor
             // (this handles simple calls like Foo() within the same class)
             resolved.push(di);
         }
@@ -2238,6 +2514,7 @@ fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex) -> Vec<u32> {
 mod tests {
     use super::*;
     use crate::Posting;
+    use crate::TrigramIndex;
 
     #[test]
     fn test_tool_definitions_count() {
@@ -2295,6 +2572,8 @@ mod tests {
             total_tokens: 0,
             extensions: vec![],
             file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None,
             path_to_id: None,
         };
@@ -2320,6 +2599,8 @@ mod tests {
             total_tokens: 0,
             extensions: vec![],
             file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None,
             path_to_id: None,
         };
@@ -2345,6 +2626,8 @@ mod tests {
             total_tokens: 0,
             extensions: vec![],
             file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None,
             path_to_id: None,
         };
@@ -2376,6 +2659,8 @@ mod tests {
             total_tokens: 100,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![50],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None,
             path_to_id: None,
         };
@@ -2393,7 +2678,7 @@ mod tests {
         assert_eq!(output["files"][0]["occurrences"], 2);
     }
 
-    // ─── Helper: create a context with both content + definition indexes ───
+    // â”€â”€â”€ Helper: create a context with both content + definition indexes â”€â”€â”€
 
     fn make_ctx_with_defs() -> HandlerContext {
         use crate::definitions::*;
@@ -2433,6 +2718,8 @@ mod tests {
             total_tokens: 500,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![100, 50, 200],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None,
             path_to_id: None,
         };
@@ -2532,7 +2819,7 @@ mod tests {
         }
     }
 
-    // ─── search_callers tests ───
+    // â”€â”€â”€ search_callers tests â”€â”€â”€
 
     #[test]
     fn test_search_callers_missing_method() {
@@ -2547,7 +2834,8 @@ mod tests {
         let index = ContentIndex {
             root: ".".to_string(), created_at: 0, max_age_secs: 3600,
             files: vec![], index: HashMap::new(), total_tokens: 0,
-            extensions: vec![], file_token_counts: vec![], forward: None, path_to_id: None,
+            extensions: vec![], file_token_counts: vec![],
+            trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
         };
         let ctx = HandlerContext {
             index: Arc::new(RwLock::new(index)),
@@ -2635,14 +2923,15 @@ mod tests {
         }
     }
 
-    // ─── search_reindex_definitions tests ───
+    // â”€â”€â”€ search_reindex_definitions tests â”€â”€â”€
 
     #[test]
     fn test_reindex_definitions_no_def_index() {
         let index = ContentIndex {
             root: ".".to_string(), created_at: 0, max_age_secs: 3600,
             files: vec![], index: HashMap::new(), total_tokens: 0,
-            extensions: vec![], file_token_counts: vec![], forward: None, path_to_id: None,
+            extensions: vec![], file_token_counts: vec![],
+            trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
         };
         let ctx = HandlerContext {
             index: Arc::new(RwLock::new(index)),
@@ -2664,7 +2953,7 @@ mod tests {
         assert!(props.contains_key("ext"), "Should have ext parameter");
     }
 
-    // ─── containsLine tests ───
+    // â”€â”€â”€ containsLine tests â”€â”€â”€
 
     #[test]
     fn test_contains_line_requires_file() {
@@ -2723,7 +3012,7 @@ mod tests {
         assert!(defs.is_empty(), "Should find no definitions for line 999");
     }
 
-    // ─── find_containing_method tests ───
+    // â”€â”€â”€ find_containing_method tests â”€â”€â”€
 
     #[test]
     fn test_find_containing_method_innermost() {
@@ -2746,7 +3035,7 @@ mod tests {
         assert!(result.is_none());
     }
 
-    // ─── search_callers schema tests ───
+    // â”€â”€â”€ search_callers schema tests â”€â”€â”€
 
     #[test]
     fn test_search_callers_has_required_params() {
@@ -2773,7 +3062,7 @@ mod tests {
         let props = defs.input_schema["properties"].as_object().unwrap();
         assert!(props.contains_key("containsLine"), "Should have containsLine parameter");
     }
-    // ─── resolve_call_site tests ───
+    // â”€â”€â”€ resolve_call_site tests â”€â”€â”€
 
     #[test]
     fn test_resolve_call_site_with_class_scope() {
@@ -2882,7 +3171,7 @@ mod tests {
         }), "Should resolve IService.Execute to ServiceA.Execute");
     }
 
-    // ─── search_callers "down" direction + class filter tests ───
+    // â”€â”€â”€ search_callers "down" direction + class filter tests â”€â”€â”€
 
     #[test]
     fn test_search_callers_down_class_filter() {
@@ -2990,6 +3279,8 @@ mod tests {
             index: HashMap::new(), total_tokens: 0,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![100, 100],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None, path_to_id: None,
         };
 
@@ -3044,7 +3335,7 @@ mod tests {
         assert!(!callee_names2.contains(&"ShouldIssueVectorSearch"),
             "Should NOT contain ShouldIssueVectorSearch, got: {:?}", callee_names2);
 
-        // Test 3: direction=down WITHOUT class filter → should get callees from BOTH classes
+        // Test 3: direction=down WITHOUT class filter â†’ should get callees from BOTH classes
         let result3 = dispatch_tool(&ctx, "search_callers", &json!({
             "method": "SearchInternalAsync",
             "direction": "down",
@@ -3067,7 +3358,7 @@ mod tests {
             "Should have ambiguity warning when no class filter and multiple classes have same method");
     }
 
-    // ─── includeBody tests ───
+    // â”€â”€â”€ includeBody tests â”€â”€â”€
 
     /// Helper: create temp files with known content + build HandlerContext with DefinitionIndex pointing to them
     fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
@@ -3080,7 +3371,7 @@ mod tests {
         let tmp_dir = std::env::temp_dir().join(format!("search_test_{}_{}", std::process::id(), id));
         let _ = std::fs::create_dir_all(&tmp_dir);
 
-        // File 0: MyService.cs — 15 lines
+        // File 0: MyService.cs â€” 15 lines
         let file0_path = tmp_dir.join("MyService.cs");
         {
             let mut f = std::fs::File::create(&file0_path).unwrap();
@@ -3089,7 +3380,7 @@ mod tests {
             }
         }
 
-        // File 1: BigFile.cs — 25 lines
+        // File 1: BigFile.cs â€” 25 lines
         let file1_path = tmp_dir.join("BigFile.cs");
         {
             let mut f = std::fs::File::create(&file1_path).unwrap();
@@ -3170,6 +3461,8 @@ mod tests {
             total_tokens: 0,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![0, 0],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None,
             path_to_id: None,
         };
@@ -3376,6 +3669,8 @@ mod tests {
             total_tokens: 0,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![0],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None,
             path_to_id: None,
         };
@@ -3447,6 +3742,8 @@ mod tests {
             total_tokens: 0,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![0],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
             forward: None,
             path_to_id: None,
         };
@@ -3470,7 +3767,7 @@ mod tests {
         assert_eq!(defs[0]["bodyError"], "failed to read file");
     }
 
-    // ─── build_grouped_line_content tests ────────────────────────────────
+    // â”€â”€â”€ build_grouped_line_content tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn test_grouped_line_content_single_group() {
@@ -3485,7 +3782,7 @@ mod tests {
         let result = build_grouped_line_content(&lines_to_show, &lines_vec, &match_lines_set);
         let groups = result.as_array().unwrap();
         assert_eq!(groups.len(), 1, "Should be one group for consecutive lines");
-        assert_eq!(groups[0]["startLine"], 2); // 0-based idx 1 → 1-based line 2
+        assert_eq!(groups[0]["startLine"], 2); // 0-based idx 1 â†’ 1-based line 2
         let lines = groups[0]["lines"].as_array().unwrap();
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0], "line1");
@@ -3498,7 +3795,7 @@ mod tests {
 
     #[test]
     fn test_grouped_line_content_two_groups() {
-        // Lines 1,2 and 5,6 — gap between 2 and 5
+        // Lines 1,2 and 5,6 â€” gap between 2 and 5
         let lines_vec = vec!["L0", "L1", "L2", "L3", "L4", "L5", "L6"];
         let mut lines_to_show = std::collections::BTreeSet::new();
         for i in [1, 2, 5, 6] { lines_to_show.insert(i); }
@@ -3571,6 +3868,841 @@ mod tests {
         assert_eq!(matches[1], 3);
     }
 
-    // Note: is_csharp_noise_token tests removed — function was replaced by
+    // Note: is_csharp_noise_token tests removed â€” function was replaced by
     // AST-based call extraction which doesn't need noise filtering.
+
+    // â”€â”€â”€ sorted_intersect tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    #[test]
+    fn test_sorted_intersect_basic() {
+        assert_eq!(sorted_intersect(&[1, 3, 5, 7], &[2, 3, 5, 8]), vec![3, 5]);
+    }
+
+    #[test]
+    fn test_sorted_intersect_empty_left() {
+        let empty: Vec<u32> = vec![];
+        assert_eq!(sorted_intersect(&[], &[1, 2, 3]), empty);
+    }
+
+    #[test]
+    fn test_sorted_intersect_empty_right() {
+        let empty: Vec<u32> = vec![];
+        assert_eq!(sorted_intersect(&[1, 2, 3], &[]), empty);
+    }
+
+    #[test]
+    fn test_sorted_intersect_both_empty() {
+        let empty: Vec<u32> = vec![];
+        assert_eq!(sorted_intersect(&[], &[]), empty);
+    }
+
+    #[test]
+    fn test_sorted_intersect_disjoint() {
+        let empty: Vec<u32> = vec![];
+        assert_eq!(sorted_intersect(&[1, 2, 3], &[4, 5, 6]), empty);
+    }
+
+    #[test]
+    fn test_sorted_intersect_identical() {
+        assert_eq!(sorted_intersect(&[1, 2, 3], &[1, 2, 3]), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_sorted_intersect_single_match() {
+        assert_eq!(sorted_intersect(&[1, 5, 10], &[3, 5, 8]), vec![5]);
+    }
+
+    // â”€â”€â”€ Substring search handler integration tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /// Helper: build a HandlerContext with a ContentIndex containing given tokens
+    /// mapped to given files. Builds trigram index automatically.
+    fn make_substring_ctx(
+        tokens_to_files: Vec<(&str, u32, Vec<u32>)>,
+        files: Vec<&str>,
+    ) -> HandlerContext {
+        let mut index_map: HashMap<String, Vec<Posting>> = HashMap::new();
+        for (token, file_id, lines) in &tokens_to_files {
+            index_map.entry(token.to_string()).or_default().push(Posting {
+                file_id: *file_id,
+                lines: lines.clone(),
+            });
+        }
+
+        let file_token_counts: Vec<u32> = {
+            let mut counts = vec![0u32; files.len()];
+            for (_, file_id, lines) in &tokens_to_files {
+                if (*file_id as usize) < counts.len() {
+                    counts[*file_id as usize] += lines.len() as u32;
+                }
+            }
+            counts
+        };
+
+        let total_tokens: u64 = file_token_counts.iter().map(|&c| c as u64).sum();
+
+        let trigram = build_trigram_index(&index_map);
+
+        let content_index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: files.iter().map(|s| s.to_string()).collect(),
+            index: index_map,
+            total_tokens,
+            extensions: vec!["cs".to_string()],
+            file_token_counts,
+            trigram,
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+
+        HandlerContext {
+            index: Arc::new(RwLock::new(content_index)),
+            def_index: None,
+            server_dir: ".".to_string(),
+            server_ext: "cs".to_string(),
+
+        }
+    }
+
+    #[test]
+    fn test_substring_search_finds_partial_match() {
+        // Index with token "databaseconnectionfactory"
+        let ctx = make_substring_ctx(
+            vec![("databaseconnectionfactory", 0, vec![10])],
+            vec!["C:\\test\\Activity.cs"],
+        );
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "databaseconn",
+            "substring": true
+        }));
+        assert!(!result.is_error, "Expected success, got error: {:?}", result.content);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["summary"]["totalFiles"], 1);
+        let matched_tokens = output["summary"]["matchedTokens"].as_array().unwrap();
+        assert!(matched_tokens.iter().any(|t| t.as_str() == Some("databaseconnectionfactory")));
+    }
+
+    #[test]
+    fn test_substring_search_no_match() {
+        let ctx = make_substring_ctx(
+            vec![("httpclient", 0, vec![5])],
+            vec!["C:\\test\\Program.cs"],
+        );
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "xyznonexistent",
+            "substring": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["summary"]["totalFiles"], 0);
+    }
+
+    #[test]
+    fn test_substring_search_full_token_match() {
+        let ctx = make_substring_ctx(
+            vec![("httpclient", 0, vec![5, 12])],
+            vec!["C:\\test\\Program.cs"],
+        );
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "httpclient",
+            "substring": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["summary"]["totalFiles"], 1);
+        assert_eq!(output["files"][0]["occurrences"], 2);
+    }
+
+    #[test]
+    fn test_substring_search_case_insensitive() {
+        // Token is already lowercase in the index
+        let ctx = make_substring_ctx(
+            vec![("httpclient", 0, vec![5])],
+            vec!["C:\\test\\Program.cs"],
+        );
+        // Query with mixed case â€” should be lowercased before matching
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "HttpCli",
+            "substring": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["summary"]["totalFiles"], 1);
+    }
+
+    #[test]
+    fn test_substring_search_short_query_warning() {
+        let ctx = make_substring_ctx(
+            vec![("ab_something", 0, vec![1])],
+            vec!["C:\\test\\File.cs"],
+        );
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "ab",
+            "substring": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        // Short query should produce a warning
+        assert!(output["summary"]["warning"].is_string(),
+            "Expected warning for short query, got: {:?}", output["summary"]);
+    }
+
+    #[test]
+    fn test_substring_search_mutually_exclusive_with_regex() {
+        let ctx = make_substring_ctx(
+            vec![("httpclient", 0, vec![5])],
+            vec!["C:\\test\\Program.cs"],
+        );
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "http",
+            "substring": true,
+            "regex": true
+        }));
+        assert!(result.is_error);
+        assert!(result.content[0].text.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn test_substring_search_mutually_exclusive_with_phrase() {
+        let ctx = make_substring_ctx(
+            vec![("httpclient", 0, vec![5])],
+            vec!["C:\\test\\Program.cs"],
+        );
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "http",
+            "substring": true,
+            "phrase": true
+        }));
+        assert!(result.is_error);
+        assert!(result.content[0].text.contains("mutually exclusive"));
+    }
+
+    #[test]
+    fn test_substring_search_multi_term_or() {
+        let ctx = make_substring_ctx(
+            vec![
+                ("httpclient", 0, vec![5]),
+                ("grpchandler", 1, vec![10]),
+            ],
+            vec!["C:\\test\\Http.cs", "C:\\test\\Grpc.cs"],
+        );
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "httpcli,grpchan",
+            "substring": true,
+            "mode": "or"
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["summary"]["totalFiles"], 2);
+    }
+
+    #[test]
+    fn test_substring_search_multi_term_and() {
+        // Both tokens in the same file (file 0)
+        let ctx = make_substring_ctx(
+            vec![
+                ("httpclient", 0, vec![5]),
+                ("grpchandler", 0, vec![10]),
+                ("grpchandler", 1, vec![20]),  // also in file 1 but without httpclient
+            ],
+            vec!["C:\\test\\Both.cs", "C:\\test\\GrpcOnly.cs"],
+        );
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "httpcli,grpchan",
+            "substring": true,
+            "mode": "and"
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        // Only file 0 contains both terms
+        assert_eq!(output["summary"]["totalFiles"], 1);
+        assert_eq!(output["files"][0]["path"], "C:\\test\\Both.cs");
+    }
+
+    #[test]
+    fn test_substring_search_count_only() {
+        let ctx = make_substring_ctx(
+            vec![
+                ("httpclient", 0, vec![5, 12]),
+                ("httphandler", 1, vec![3]),
+            ],
+            vec!["C:\\test\\Client.cs", "C:\\test\\Handler.cs"],
+        );
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "http",
+            "substring": true,
+            "countOnly": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["summary"]["totalFiles"], 2);
+        assert_eq!(output["summary"]["totalOccurrences"], 3);
+        // countOnly should NOT include "files" array
+        assert!(output.get("files").is_none());
+    }
+
+    #[test]
+    fn test_substring_search_trigram_dirty_triggers_rebuild() {
+        // Create context with trigram_dirty=true to test lazy rebuild
+        let mut index_map: HashMap<String, Vec<Posting>> = HashMap::new();
+        index_map.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
+
+        let content_index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec!["C:\\test\\Program.cs".to_string()],
+            index: index_map,
+            total_tokens: 1,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![1],
+            trigram: TrigramIndex::default(), // empty trigram
+            trigram_dirty: true,              // needs rebuild
+            forward: None,
+            path_to_id: None,
+        };
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(content_index)),
+            def_index: None,
+            server_dir: ".".to_string(),
+            server_ext: "cs".to_string(),
+
+        };
+
+        // Should trigger rebuild and still find the token
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "httpcli",
+            "substring": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["summary"]["totalFiles"], 1);
+
+        // Verify trigram_dirty is now false
+        let idx = ctx.index.read().unwrap();
+        assert!(!idx.trigram_dirty, "trigram_dirty should be false after rebuild");
+        assert!(!idx.trigram.tokens.is_empty(), "trigram tokens should be populated after rebuild");
+    }
+
+    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // E2E tests: build real index from files on disk â†’ query via dispatch_tool
+    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+    /// Helper: create a temp dir with source files containing compound identifiers,
+    /// build a real content index from it, and return a HandlerContext.
+    fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
+        use std::io::Write;
+
+        static E2E_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = E2E_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let tmp_dir = std::env::temp_dir().join(format!("search_e2e_{}_{}", std::process::id(), id));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        // File 1: Service.cs with compound identifiers
+        {
+            let mut f = std::fs::File::create(tmp_dir.join("Service.cs")).unwrap();
+            writeln!(f, "using System;").unwrap();
+            writeln!(f, "namespace MyApp {{").unwrap();
+            writeln!(f, "    public class DatabaseConnectionFactory {{").unwrap();
+            writeln!(f, "        private HttpClientHandler _handler;").unwrap();
+            writeln!(f, "        public void Execute() {{").unwrap();
+            writeln!(f, "            var provider = new GrpcServiceProvider();").unwrap();
+            writeln!(f, "            _handler.Send();").unwrap();
+            writeln!(f, "        }}").unwrap();
+            writeln!(f, "    }}").unwrap();
+            writeln!(f, "}}").unwrap();
+        }
+
+        // File 2: Controller.cs with different identifiers
+        {
+            let mut f = std::fs::File::create(tmp_dir.join("Controller.cs")).unwrap();
+            writeln!(f, "using System;").unwrap();
+            writeln!(f, "namespace MyApp {{").unwrap();
+            writeln!(f, "    public class UserController {{").unwrap();
+            writeln!(f, "        private readonly HttpClientHandler _client;").unwrap();
+            writeln!(f, "        public async Task<IActionResult> GetAsync() {{").unwrap();
+            writeln!(f, "            return Ok();").unwrap();
+            writeln!(f, "        }}").unwrap();
+            writeln!(f, "    }}").unwrap();
+            writeln!(f, "}}").unwrap();
+        }
+
+        // File 3: Util.cs with unique token
+        {
+            let mut f = std::fs::File::create(tmp_dir.join("Util.cs")).unwrap();
+            writeln!(f, "public static class CacheManagerHelper {{").unwrap();
+            writeln!(f, "    public static void ClearAll() {{ }}").unwrap();
+            writeln!(f, "}}").unwrap();
+        }
+
+        // Build a real content index from these files
+        let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+            dir: tmp_dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false,
+            threads: 1,
+            min_token_len: 2,
+        });
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(content_index)),
+            def_index: None,
+            server_dir: tmp_dir.to_string_lossy().to_string(),
+            server_ext: "cs".to_string(),
+
+        };
+
+        (ctx, tmp_dir)
+    }
+
+    // â”€â”€â”€ E2E Test 1: Full pipeline â€” build index â†’ substring search â”€â”€
+
+    #[test]
+    fn e2e_substring_search_full_pipeline() {
+        let (ctx, tmp_dir) = make_e2e_substring_ctx();
+
+        // Search for "databaseconn" â€” should match "databaseconnectionfactory"
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "databaseconn",
+            "substring": true
+        }));
+        assert!(!result.is_error, "search should succeed");
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["summary"]["searchMode"], "substring-or");
+        assert!(output["summary"]["totalFiles"].as_u64().unwrap() >= 1,
+            "Should find at least 1 file containing 'databaseconnectionfactory'");
+
+        // Matched tokens should include "databaseconnectionfactory"
+        let matched_tokens = output["summary"]["matchedTokens"].as_array().unwrap();
+        assert!(matched_tokens.iter().any(|t| t.as_str().unwrap() == "databaseconnectionfactory"),
+            "matchedTokens should include 'databaseconnectionfactory', got: {:?}", matched_tokens);
+
+        // Verify the returned file path contains "Service.cs"
+        let files = output["files"].as_array().unwrap();
+        assert!(!files.is_empty());
+        assert!(files.iter().any(|f| f["path"].as_str().unwrap().contains("Service.cs")),
+            "Should find Service.cs");
+
+        // Search for "httpclient" â€” should find in both Service.cs and Controller.cs
+        let result2 = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "httpclient",
+            "substring": true
+        }));
+        assert!(!result2.is_error);
+        let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+        assert!(output2["summary"]["totalFiles"].as_u64().unwrap() >= 2,
+            "Should find at least 2 files containing 'httpclienthandler'");
+
+        // Search for something that doesn't exist
+        let result3 = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "nonexistentxyz",
+            "substring": true
+        }));
+        assert!(!result3.is_error);
+        let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
+        assert_eq!(output3["summary"]["totalFiles"], 0);
+
+        cleanup_tmp(&tmp_dir);
+    }
+
+    // â”€â”€â”€ E2E Test 2: Substring search with showLines â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    #[test]
+    fn e2e_substring_search_with_show_lines() {
+        let (ctx, tmp_dir) = make_e2e_substring_ctx();
+
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "grpcservice",
+            "substring": true,
+            "showLines": true,
+            "contextLines": 1
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(output["summary"]["totalFiles"].as_u64().unwrap() >= 1);
+
+        // Should have lineContent in the file result
+        let files = output["files"].as_array().unwrap();
+        assert!(!files.is_empty(), "Should find at least one file");
+        let first_file = &files[0];
+        let line_content = first_file["lineContent"].as_array();
+        assert!(line_content.is_some(), "Should have lineContent when showLines=true");
+        let groups = line_content.unwrap();
+        assert!(!groups.is_empty(), "lineContent should have at least one group");
+
+        // Each group should have startLine, lines, matchIndices
+        let group = &groups[0];
+        assert!(group["startLine"].is_number(), "group should have startLine");
+        assert!(group["lines"].is_array(), "group should have lines array");
+
+        // The lines array should contain the actual source line
+        let lines_arr = group["lines"].as_array().unwrap();
+        let all_text: String = lines_arr.iter().map(|l| l.as_str().unwrap_or("")).collect::<Vec<_>>().join(" ");
+        assert!(all_text.to_lowercase().contains("grpcserviceprovider"),
+            "Line content should contain 'GrpcServiceProvider', got: {}", all_text);
+
+        cleanup_tmp(&tmp_dir);
+    }
+
+    // â”€â”€â”€ E2E Test 3: Reindex rebuilds trigram â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    #[test]
+    fn e2e_reindex_rebuilds_trigram() {
+        use std::io::Write;
+        let (ctx, tmp_dir) = make_e2e_substring_ctx();
+
+        // First query â€” should find "cachemanagerhelper" via substring "cachemanager"
+        let result1 = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "cachemanager",
+            "substring": true
+        }));
+        assert!(!result1.is_error);
+        let output1: Value = serde_json::from_str(&result1.content[0].text).unwrap();
+        assert!(output1["summary"]["totalFiles"].as_u64().unwrap() >= 1,
+            "Should find 'cachemanagerhelper' before reindex");
+
+        // Modify files: remove Util.cs, add NewFile.cs with new identifier
+        std::fs::remove_file(tmp_dir.join("Util.cs")).unwrap();
+        {
+            let mut f = std::fs::File::create(tmp_dir.join("NewFile.cs")).unwrap();
+            writeln!(f, "public class DatabaseConnectionPoolManager {{}}").unwrap();
+        }
+
+        // Reindex
+        let reindex_result = dispatch_tool(&ctx, "search_reindex", &json!({}));
+        assert!(!reindex_result.is_error, "Reindex should succeed");
+
+        // After reindex, "cachemanager" should no longer be found
+        let result2 = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "cachemanager",
+            "substring": true
+        }));
+        assert!(!result2.is_error);
+        let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+        assert_eq!(output2["summary"]["totalFiles"], 0,
+            "Should NOT find 'cachemanagerhelper' after Util.cs was deleted and reindex");
+
+        // After reindex, "connectionpool" should now be found
+        let result3 = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "connectionpool",
+            "substring": true
+        }));
+        assert!(!result3.is_error);
+        let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
+        assert!(output3["summary"]["totalFiles"].as_u64().unwrap() >= 1,
+            "Should find 'databaseconnectionpoolmanager' after reindex");
+
+        cleanup_tmp(&tmp_dir);
+    }
+
+    // â”€â”€â”€ E2E Test 4: File change â†’ trigram dirty â†’ lazy rebuild â”€â”€â”€â”€â”€â”€
+
+    #[test]
+    fn e2e_watcher_trigram_dirty_lazy_rebuild() {
+        use std::io::Write;
+        let (ctx, tmp_dir) = make_e2e_substring_ctx();
+
+        // Verify initial search works
+        let result1 = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "databaseconn",
+            "substring": true
+        }));
+        assert!(!result1.is_error);
+        let output1: Value = serde_json::from_str(&result1.content[0].text).unwrap();
+        assert!(output1["summary"]["totalFiles"].as_u64().unwrap() >= 1);
+
+        // Simulate what the watcher does: update inverted index + set trigram_dirty
+        {
+            let mut idx = ctx.index.write().unwrap();
+
+            // Add a new file with a new token to the inverted index
+            let new_file_id = idx.files.len() as u32;
+            let new_path = tmp_dir.join("Dynamic.cs");
+            {
+                let mut f = std::fs::File::create(&new_path).unwrap();
+                writeln!(f, "public class AsyncBlobStorageProcessor {{}}").unwrap();
+            }
+            idx.files.push(clean_path(&new_path.to_string_lossy()));
+            idx.file_token_counts.push(1);
+
+            // Add token to inverted index
+            idx.index.entry("asyncblobstorageprocessor".to_string())
+                .or_default()
+                .push(Posting { file_id: new_file_id, lines: vec![1] });
+            idx.total_tokens += 1;
+
+            // Mark trigram as dirty (what the watcher does)
+            idx.trigram_dirty = true;
+        }
+
+        // Now search for the new token via substring â€” should trigger lazy trigram rebuild
+        let result2 = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "blobstorage",
+            "substring": true
+        }));
+        assert!(!result2.is_error);
+        let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+        assert!(output2["summary"]["totalFiles"].as_u64().unwrap() >= 1,
+            "Should find 'asyncblobstorageprocessor' after lazy trigram rebuild");
+
+        // Verify trigram is no longer dirty
+        let idx = ctx.index.read().unwrap();
+        assert!(!idx.trigram_dirty, "trigram_dirty should be false after lazy rebuild");
+
+        cleanup_tmp(&tmp_dir);
+    }
+
+    // â”€â”€â”€ E2E Test 5: Index serialization roundtrip with trigram â”€â”€â”€â”€â”€â”€
+
+    #[test]
+    fn e2e_index_serialization_roundtrip_with_trigram() {
+        let (ctx, tmp_dir) = make_e2e_substring_ctx();
+
+        // Get the original index
+        let original_index = ctx.index.read().unwrap();
+        let original_file_count = original_index.files.len();
+        let original_token_count = original_index.index.len();
+        let original_trigram_count = original_index.trigram.trigram_map.len();
+        let original_trigram_token_count = original_index.trigram.tokens.len();
+        assert!(original_trigram_count > 0, "Trigram index should be populated");
+        assert!(original_trigram_token_count > 0, "Trigram tokens should be populated");
+
+        // Save to disk
+        crate::save_content_index(&original_index).unwrap();
+        let root = original_index.root.clone();
+        let exts = original_index.extensions.join(",");
+        drop(original_index);
+
+        // Load from disk
+        let loaded_index = crate::load_content_index(&root, &exts)
+            .expect("Should load saved content index");
+
+        // Verify structural equality
+        assert_eq!(loaded_index.files.len(), original_file_count);
+        assert_eq!(loaded_index.index.len(), original_token_count);
+        assert_eq!(loaded_index.trigram.trigram_map.len(), original_trigram_count);
+        assert_eq!(loaded_index.trigram.tokens.len(), original_trigram_token_count);
+        assert!(!loaded_index.trigram_dirty);
+
+        // Build a new context with the loaded index and query it
+        let loaded_ctx = HandlerContext {
+            index: Arc::new(RwLock::new(loaded_index)),
+            def_index: None,
+            server_dir: root,
+            server_ext: "cs".to_string(),
+
+        };
+
+        // Same substring search should produce same results
+        let result = dispatch_tool(&loaded_ctx, "search_grep", &json!({
+            "terms": "databaseconn",
+            "substring": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(output["summary"]["totalFiles"].as_u64().unwrap() >= 1,
+            "Loaded index should find same results as original");
+
+        let matched = output["summary"]["matchedTokens"].as_array().unwrap();
+        assert!(matched.iter().any(|t| t.as_str().unwrap() == "databaseconnectionfactory"),
+            "Loaded index should find 'databaseconnectionfactory'");
+
+        cleanup_tmp(&tmp_dir);
+    }
+
+    // â”€â”€â”€ E2E Test 6: Substring with multi-term AND mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    #[test]
+    fn e2e_substring_search_multi_term_and() {
+        let (ctx, tmp_dir) = make_e2e_substring_ctx();
+
+        // "httpclient" exists in Service.cs and Controller.cs
+        // "grpcservice" exists only in Service.cs
+        // AND mode should only return Service.cs
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "httpclient,grpcservice",
+            "substring": true,
+            "mode": "and"
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["summary"]["searchMode"], "substring-and");
+        assert!(output["summary"]["totalFiles"].as_u64().unwrap() >= 1,
+            "AND search should find at least 1 file");
+
+        let files = output["files"].as_array().unwrap();
+        // All returned files should contain BOTH terms
+        for file in files {
+            let path = file["path"].as_str().unwrap();
+            assert!(path.contains("Service.cs"),
+                "AND mode should only return Service.cs (has both), got: {}", path);
+        }
+
+        cleanup_tmp(&tmp_dir);
+    }
+
+    // â”€â”€â”€ E2E Test 7: Substring search count-only mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    #[test]
+    fn e2e_substring_search_count_only() {
+        let (ctx, tmp_dir) = make_e2e_substring_ctx();
+
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "httpclient",
+            "substring": true,
+            "countOnly": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+        // count_only should have summary but no files array
+        assert!(output.get("files").is_none(), "countOnly should not include files array");
+        assert!(output["summary"]["totalFiles"].as_u64().unwrap() >= 2);
+        assert!(output["summary"]["totalOccurrences"].as_u64().unwrap() >= 2);
+
+        cleanup_tmp(&tmp_dir);
+    }
+
+    // â”€â”€â”€ E2E Test 8: Substring search with exclude filters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    #[test]
+    fn e2e_substring_search_with_excludes() {
+        let (ctx, tmp_dir) = make_e2e_substring_ctx();
+
+        // Search for "httpclient" but exclude Controller
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "httpclient",
+            "substring": true,
+            "exclude": ["Controller"]
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+        let files = output["files"].as_array().unwrap();
+        for file in files {
+            let path = file["path"].as_str().unwrap();
+            assert!(!path.contains("Controller"),
+                "Excluded files should not appear, got: {}", path);
+        }
+
+        cleanup_tmp(&tmp_dir);
+    }
+
+    // â”€â”€â”€ E2E Test 9: Substring search with maxResults â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    #[test]
+    fn e2e_substring_search_max_results() {
+        let (ctx, tmp_dir) = make_e2e_substring_ctx();
+
+        // Search for a broad term that matches multiple files, limit results
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "public",
+            "substring": true,
+            "maxResults": 1
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+        let files = output["files"].as_array().unwrap();
+        assert!(files.len() <= 1, "maxResults=1 should return at most 1 file, got: {}", files.len());
+
+        // But totalFiles in summary should still report the true count
+        assert!(output["summary"]["totalFiles"].as_u64().unwrap() >= 1);
+
+        cleanup_tmp(&tmp_dir);
+    }
+
+    // â”€â”€â”€ E2E Test 10: Short substring (<4 chars) produces warning â”€â”€â”€
+
+    #[test]
+    fn e2e_substring_search_short_query_warning() {
+        let (ctx, tmp_dir) = make_e2e_substring_ctx();
+
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "ok",
+            "substring": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+        // Short query should produce a warning
+        assert!(output["summary"]["warning"].is_string(),
+            "Short query should produce a warning, got summary: {}", output["summary"]);
+        let warning = output["summary"]["warning"].as_str().unwrap();
+        assert!(warning.contains("Short substring"), "Warning should mention short query");
+
+        cleanup_tmp(&tmp_dir);
+    }
+
+    // â”€â”€â”€ E2E Test 11: Substring mutually exclusive with regex â”€â”€â”€â”€â”€â”€â”€
+
+    #[test]
+    fn e2e_substring_mutually_exclusive_with_regex() {
+        let (ctx, tmp_dir) = make_e2e_substring_ctx();
+
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "test",
+            "substring": true,
+            "regex": true
+        }));
+        assert!(result.is_error, "substring + regex should be an error");
+        assert!(result.content[0].text.contains("mutually exclusive"));
+
+        cleanup_tmp(&tmp_dir);
+    }
+
+    // â”€â”€â”€ E2E Test 12: Substring mutually exclusive with phrase â”€â”€â”€â”€â”€â”€
+
+    #[test]
+    fn e2e_substring_mutually_exclusive_with_phrase() {
+        let (ctx, tmp_dir) = make_e2e_substring_ctx();
+
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "test",
+            "substring": true,
+            "phrase": true
+        }));
+        assert!(result.is_error, "substring + phrase should be an error");
+        assert!(result.content[0].text.contains("mutually exclusive"));
+
+        cleanup_tmp(&tmp_dir);
+    }
+
+    // â”€â”€â”€ E2E Test 13: Verify TF-IDF scoring in substring results â”€â”€â”€â”€
+
+    #[test]
+    fn e2e_substring_search_has_scores() {
+        let (ctx, tmp_dir) = make_e2e_substring_ctx();
+
+        let result = dispatch_tool(&ctx, "search_grep", &json!({
+            "terms": "httpclient",
+            "substring": true
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+        let files = output["files"].as_array().unwrap();
+        assert!(!files.is_empty());
+
+        for file in files {
+            assert!(file["score"].is_number(), "Each file should have a TF-IDF score");
+            assert!(file["occurrences"].is_number(), "Each file should have occurrences");
+            assert!(file["lines"].is_array(), "Each file should have lines array");
+        }
+
+        // Results should be sorted by score descending
+        if files.len() >= 2 {
+            let score0 = files[0]["score"].as_f64().unwrap();
+            let score1 = files[1]["score"].as_f64().unwrap();
+            assert!(score0 >= score1, "Results should be sorted by score descending");
+        }
+
+        cleanup_tmp(&tmp_dir);
+    }
 }
