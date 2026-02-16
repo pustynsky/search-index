@@ -15,12 +15,14 @@ pub fn run_server(
     def_index: Option<Arc<RwLock<DefinitionIndex>>>,
     server_dir: String,
     server_ext: String,
+    metrics: bool,
 ) {
     let ctx = HandlerContext {
         index,
         def_index,
         server_dir,
         server_ext,
+        metrics,
     };
 
     let stdin = io::stdin();
@@ -188,6 +190,7 @@ mod tests {
             def_index: None,
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
+            metrics: false,
         }
     }
 

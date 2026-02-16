@@ -277,6 +277,12 @@ pub struct ServeArgs {
     /// Use 'search def-index' CLI or search_reindex tool to force rebuild.
     #[arg(long)]
     pub definitions: bool,
+
+    /// Include performance metrics (searchTimeMs, indexFiles, responseBytes,
+    /// estimatedTokens, etc.) in every tool response summary.
+    /// When OFF (default), summary contains only fields useful for LLM decisions.
+    #[arg(long)]
+    pub metrics: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -1477,7 +1483,7 @@ fn cmd_serve(args: ServeArgs) {
     }
 
     // Start MCP server event loop
-    mcp::server::run_server(index, def_index, dir_str, exts_for_load);
+    mcp::server::run_server(index, def_index, dir_str, exts_for_load, args.metrics);
 }
 
 fn cmd_def_index(args: definitions::DefIndexArgs) -> Result<(), SearchError> {

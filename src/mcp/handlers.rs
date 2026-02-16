@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -26,7 +26,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "terms": {
                         "type": "string",
-                        "description": "Search terms. Comma-separated for multi-term search. Single token: 'HttpClient'. Multi-term OR/AND: 'HttpClient,ILogger,Task' (finds files with ANY term when mode='or', or ALL terms when mode='and'). Always use comma-separated multi-term OR search when looking for all usages of a class â€” include the class name, its interface, and related types in one query. Phrase (use with phrase=true): 'new HttpClient'. Regex (use with regex=true): 'I.*Cache'"
+                        "description": "Search terms. Comma-separated for multi-term search. Single token: 'HttpClient'. Multi-term OR/AND: 'HttpClient,ILogger,Task' (finds files with ANY term when mode='or', or ALL terms when mode='and'). Always use comma-separated multi-term OR search when looking for all usages of a class -- include the class name, its interface, and related types in one query. Phrase (use with phrase=true): 'new HttpClient'. Regex (use with regex=true): 'I.*Cache'"
                     },
                     "dir": {
                         "type": "string",
@@ -85,7 +85,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_find".to_string(),
-            description: "Search for files by name using live filesystem walk. No index needed. âš ï¸ WARNING: This performs a live filesystem walk and may be slow for large directories (10-30s). For instant results, use search_fast with a pre-built file name index.".to_string(),
+            description: "Search for files by name using live filesystem walk. No index needed. [!] WARNING: This performs a live filesystem walk and may be slow for large directories (10-30s). For instant results, use search_fast with a pre-built file name index.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -169,7 +169,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_definitions".to_string(),
-            description: "Search C# and SQL code definitions â€” classes, interfaces, methods, properties, enums, stored procedures, tables. Uses pre-built tree-sitter AST index for instant results (~0.001s). Requires server started with --definitions flag. Supports 'containsLine' to find which method/class contains a given line number (no more manual read_file!). Supports 'includeBody' to return actual source code inline, eliminating read_file calls.".to_string(),
+            description: "Search C# and SQL code definitions -- classes, interfaces, methods, properties, enums, stored procedures, tables. Uses pre-built tree-sitter AST index for instant results (~0.001s). Requires server started with --definitions flag. Supports 'containsLine' to find which method/class contains a given line number (no more manual read_file!). Supports 'includeBody' to return actual source code inline, eliminating read_file calls.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -200,7 +200,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "containsLine": {
                         "type": "integer",
-                        "description": "Find the definition(s) that contain this line number. Returns the innermost method/property and its parent class. Must be used with 'file' parameter. Example: file='UserService.cs', containsLine=42 â†’ returns GetUserAsync (lines 35-50), parent: UserService"
+                        "description": "Find the definition(s) that contain this line number. Returns the innermost method/property and its parent class. Must be used with 'file' parameter. Example: file='UserService.cs', containsLine=42 -> returns GetUserAsync (lines 35-50), parent: UserService"
                     },
                     "regex": {
                         "type": "boolean",
@@ -233,7 +233,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_callers".to_string(),
-            description: "Find all callers of a method and build a call tree (up or down). Combines grep index (to find where a method name appears) with AST definition index (to determine which method/class contains each call site). Returns a hierarchical call tree. This is the most powerful tool for tracing call chains â€” replaces 7+ sequential search_grep + read_file calls with a single request. Requires server started with --definitions flag.".to_string(),
+            description: "Find all callers of a method and build a call tree (up or down). Combines grep index (to find where a method name appears) with AST definition index (to determine which method/class contains each call site). Returns a hierarchical call tree. This is the most powerful tool for tracing call chains -- replaces 7+ sequential search_grep + read_file calls with a single request. Requires server started with --definitions flag.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -287,21 +287,25 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     ]
 }
 
-/// Context for tool handlers â€” shared state
+/// Context for tool handlers -- shared state
 pub struct HandlerContext {
     pub index: Arc<RwLock<ContentIndex>>,
     pub def_index: Option<Arc<RwLock<DefinitionIndex>>>,
     pub server_dir: String,
     pub server_ext: String,
+    pub metrics: bool,
 }
 
-/// Dispatch a tool call to the right handler
+/// Dispatch a tool call to the right handler.
+/// When `ctx.metrics` is true, injects performance metrics into the response summary.
 pub fn dispatch_tool(
     ctx: &HandlerContext,
     tool_name: &str,
     arguments: &Value,
 ) -> ToolCallResult {
-    match tool_name {
+    let dispatch_start = Instant::now();
+
+    let result = match tool_name {
         "search_grep" => handle_search_grep(ctx, arguments),
         "search_find" => handle_search_find(ctx, arguments),
         "search_fast" => handle_search_fast(ctx, arguments),
@@ -310,11 +314,55 @@ pub fn dispatch_tool(
         "search_reindex_definitions" => handle_search_reindex_definitions(ctx, arguments),
         "search_definitions" => handle_search_definitions(ctx, arguments),
         "search_callers" => handle_search_callers(ctx, arguments),
-        _ => ToolCallResult::error(format!("Unknown tool: {}", tool_name)),
+        _ => return ToolCallResult::error(format!("Unknown tool: {}", tool_name)),
+    };
+
+    if ctx.metrics && !result.is_error {
+        inject_metrics(result, ctx, dispatch_start)
+    } else {
+        result
     }
 }
 
-// â”€â”€â”€ search_reindex_definitions handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+/// Inject performance metrics into a successful tool response.
+/// Parses the JSON text, adds searchTimeMs/responseBytes/estimatedTokens/indexFiles/indexTokens
+/// to the "summary" object (if present), then re-serializes.
+fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start: Instant) -> ToolCallResult {
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    // Get the text from the first content item
+    let text = match result.content.first() {
+        Some(c) => &c.text,
+        None => return result,
+    };
+
+    // Try to parse as JSON and inject metrics into "summary"
+    if let Ok(mut output) = serde_json::from_str::<Value>(text) {
+        if let Some(summary) = output.get_mut("summary") {
+            summary["searchTimeMs"] = json!((elapsed_ms * 100.0).round() / 100.0);
+
+            if let Ok(idx) = ctx.index.read() {
+                summary["indexFiles"] = json!(idx.files.len());
+                summary["indexTokens"] = json!(idx.index.len());
+            }
+        }
+
+        // Measure response size after adding timing metrics
+        let json_str = serde_json::to_string(&output).unwrap();
+        let bytes = json_str.len();
+        if let Some(summary) = output.get_mut("summary") {
+            summary["responseBytes"] = json!(bytes);
+            summary["estimatedTokens"] = json!(bytes / 4);
+        }
+
+        ToolCallResult::success(serde_json::to_string(&output).unwrap())
+    } else {
+        // Not valid JSON or no summary -- return as-is
+        result
+    }
+}
+
+// --- search_reindex_definitions handler ------------------------------
 
 fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index_arc = match &ctx.def_index {
@@ -388,7 +436,7 @@ fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> Tool
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
-// â”€â”€â”€ search_grep handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- search_grep handler ---------------------------------------------
 
 fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let terms_str = match args.get("terms").and_then(|v| v.as_str()) {
@@ -396,7 +444,7 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         None => return ToolCallResult::error("Missing required parameter: terms".to_string()),
     };
 
-    // Check dir parameter â€” must match server dir or be absent
+    // Check dir parameter -- must match server dir or be absent
     if let Some(dir) = args.get("dir").and_then(|v| v.as_str()) {
         let requested = std::fs::canonicalize(dir)
             .map(|p| clean_path(&p.to_string_lossy()))
@@ -432,14 +480,14 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
     let search_start = Instant::now();
 
-    // â”€â”€â”€ Mutual exclusivity check â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- Mutual exclusivity check ----------------------------
     if use_substring && (use_regex || use_phrase) {
         return ToolCallResult::error(
             "substring is mutually exclusive with regex and phrase".to_string(),
         );
     }
 
-    // â”€â”€â”€ Substring: check if trigram index needs rebuild â”€â”€â”€â”€â”€
+    // --- Substring: check if trigram index needs rebuild -----
     if use_substring {
         let needs_rebuild = ctx.index.read().map(|idx| idx.trigram_dirty).unwrap_or(false);
         if needs_rebuild {
@@ -459,13 +507,13 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         Err(e) => return ToolCallResult::error(format!("Failed to acquire index lock: {}", e)),
     };
 
-    // â”€â”€â”€ Substring search mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- Substring search mode ------------------------------
     if use_substring {
         return handle_substring_search(ctx, &index, &terms_str, &ext_filter, &exclude_dir, &exclude,
             show_lines, context_lines, max_results, mode_and, count_only, search_start);
     }
 
-    // â”€â”€â”€ Phrase search mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- Phrase search mode ---------------------------------
     if use_phrase {
         return handle_phrase_search(
             &index, &terms_str, &ext_filter, &exclude_dir, &exclude,
@@ -473,7 +521,7 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         );
     }
 
-    // â”€â”€â”€ Normal token search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- Normal token search --------------------------------
     let raw_terms: Vec<String> = terms_str
         .split(',')
         .map(|s| s.trim().to_lowercase())
@@ -721,7 +769,7 @@ fn handle_substring_search(
                             Some(prev) => sorted_intersect(&prev, posting_list),
                         });
                     } else {
-                        // Trigram not found â†’ no candidates
+                        // Trigram not found -> no candidates
                         candidates = Some(Vec::new());
                         break;
                     }
@@ -1036,7 +1084,7 @@ fn handle_phrase_search(
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
-// â”€â”€â”€ search_find handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- search_find handler ---------------------------------------------
 
 fn handle_search_find(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
@@ -1187,7 +1235,7 @@ fn handle_search_find(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
-// â”€â”€â”€ search_fast handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- search_fast handler ---------------------------------------------
 
 fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
@@ -1290,14 +1338,14 @@ fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
-// â”€â”€â”€ search_info handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- search_info handler ---------------------------------------------
 
 fn handle_search_info() -> ToolCallResult {
     let info = cmd_info_json();
     ToolCallResult::success(serde_json::to_string(&info).unwrap())
 }
 
-// â”€â”€â”€ search_reindex handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- search_reindex handler ------------------------------------------
 
 fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or(&ctx.server_dir);
@@ -1360,7 +1408,7 @@ fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
-// â”€â”€â”€ helper: inject body source code into definition JSON object â”€â”€â”€â”€â”€
+// --- helper: inject body source code into definition JSON object -----
 
 /// Build compact grouped lineContent for search_grep from raw file content.
 /// Computes context windows around match lines, then groups consecutive lines
@@ -1524,7 +1572,7 @@ fn inject_body_into_obj(
     }
 }
 
-// â”€â”€â”€ search_definitions handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- search_definitions handler --------------------------------------
 
 fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index = match &ctx.def_index {
@@ -1558,7 +1606,7 @@ fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     let max_body_lines = args.get("maxBodyLines").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
     let max_total_body_lines = args.get("maxTotalBodyLines").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
 
-    // â”€â”€â”€ containsLine: find containing method/class by line number â”€â”€â”€
+    // --- containsLine: find containing method/class by line number ---
     if let Some(line_num) = contains_line {
         if file_filter.is_none() {
             return ToolCallResult::error(
@@ -1836,7 +1884,7 @@ fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
-// â”€â”€â”€ search_callers handler â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- search_callers handler ------------------------------------------
 
 fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index = match &ctx.def_index {
@@ -2048,7 +2096,7 @@ fn find_containing_method(
 }
 
 /// Build a caller tree recursively (direction = "up").
-/// `parent_class` is used to disambiguate common method names â€” when recursing,
+/// `parent_class` is used to disambiguate common method names -- when recursing,
 /// we pass the parent class of the method being searched so that we only find
 /// callers that actually reference that specific class (not any unrelated class
 /// with a method of the same name).
@@ -2462,7 +2510,7 @@ fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex) -> Vec<u32> {
         }
 
         if let Some(ref recv_type) = call.receiver_type {
-            // We have receiver type info â€” use it to disambiguate
+            // We have receiver type info -- use it to disambiguate
             let recv_lower = recv_type.to_lowercase();
 
             if let Some(ref parent) = def.parent {
@@ -2501,7 +2549,7 @@ fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex) -> Vec<u32> {
                 // This is already handled by the direct match above.
             }
         } else {
-            // No receiver type â€” accept any matching method/constructor
+            // No receiver type -- accept any matching method/constructor
             // (this handles simple calls like Foo() within the same class)
             resolved.push(di);
         }
@@ -2582,6 +2630,7 @@ mod tests {
             def_index: None,
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
+        metrics: false,
         };
         let result = dispatch_tool(&ctx, "nonexistent_tool", &json!({}));
         assert!(result.is_error);
@@ -2609,6 +2658,7 @@ mod tests {
             def_index: None,
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
+        metrics: false,
         };
         let result = dispatch_tool(&ctx, "search_grep", &json!({}));
         assert!(result.is_error);
@@ -2636,6 +2686,7 @@ mod tests {
             def_index: None,
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
+        metrics: false,
         };
         let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
         assert!(!result.is_error);
@@ -2669,6 +2720,7 @@ mod tests {
             def_index: None,
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
+        metrics: false,
         };
         let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
         assert!(!result.is_error);
@@ -2678,7 +2730,7 @@ mod tests {
         assert_eq!(output["files"][0]["occurrences"], 2);
     }
 
-    // â”€â”€â”€ Helper: create a context with both content + definition indexes â”€â”€â”€
+    // --- Helper: create a context with both content + definition indexes ---
 
     fn make_ctx_with_defs() -> HandlerContext {
         use crate::definitions::*;
@@ -2816,10 +2868,11 @@ mod tests {
             def_index: Some(Arc::new(RwLock::new(def_index))),
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
+        metrics: false,
         }
     }
 
-    // â”€â”€â”€ search_callers tests â”€â”€â”€
+    // --- search_callers tests ---
 
     #[test]
     fn test_search_callers_missing_method() {
@@ -2842,6 +2895,7 @@ mod tests {
             def_index: None,
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
+        metrics: false,
         };
         let result = dispatch_tool(&ctx, "search_callers", &json!({"method": "Foo"}));
         assert!(result.is_error);
@@ -2923,7 +2977,7 @@ mod tests {
         }
     }
 
-    // â”€â”€â”€ search_reindex_definitions tests â”€â”€â”€
+    // --- search_reindex_definitions tests ---
 
     #[test]
     fn test_reindex_definitions_no_def_index() {
@@ -2938,6 +2992,7 @@ mod tests {
             def_index: None,
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
+        metrics: false,
         };
         let result = dispatch_tool(&ctx, "search_reindex_definitions", &json!({}));
         assert!(result.is_error);
@@ -2953,7 +3008,7 @@ mod tests {
         assert!(props.contains_key("ext"), "Should have ext parameter");
     }
 
-    // â”€â”€â”€ containsLine tests â”€â”€â”€
+    // --- containsLine tests ---
 
     #[test]
     fn test_contains_line_requires_file() {
@@ -3012,7 +3067,7 @@ mod tests {
         assert!(defs.is_empty(), "Should find no definitions for line 999");
     }
 
-    // â”€â”€â”€ find_containing_method tests â”€â”€â”€
+    // --- find_containing_method tests ---
 
     #[test]
     fn test_find_containing_method_innermost() {
@@ -3035,7 +3090,7 @@ mod tests {
         assert!(result.is_none());
     }
 
-    // â”€â”€â”€ search_callers schema tests â”€â”€â”€
+    // --- search_callers schema tests ---
 
     #[test]
     fn test_search_callers_has_required_params() {
@@ -3062,7 +3117,7 @@ mod tests {
         let props = defs.input_schema["properties"].as_object().unwrap();
         assert!(props.contains_key("containsLine"), "Should have containsLine parameter");
     }
-    // â”€â”€â”€ resolve_call_site tests â”€â”€â”€
+    // --- resolve_call_site tests ---
 
     #[test]
     fn test_resolve_call_site_with_class_scope() {
@@ -3171,7 +3226,7 @@ mod tests {
         }), "Should resolve IService.Execute to ServiceA.Execute");
     }
 
-    // â”€â”€â”€ search_callers "down" direction + class filter tests â”€â”€â”€
+    // --- search_callers "down" direction + class filter tests ---
 
     #[test]
     fn test_search_callers_down_class_filter() {
@@ -3289,6 +3344,7 @@ mod tests {
             def_index: Some(Arc::new(RwLock::new(def_index))),
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
+        metrics: false,
         };
 
         // Test 1: direction=down with class=IndexSearchService
@@ -3335,7 +3391,7 @@ mod tests {
         assert!(!callee_names2.contains(&"ShouldIssueVectorSearch"),
             "Should NOT contain ShouldIssueVectorSearch, got: {:?}", callee_names2);
 
-        // Test 3: direction=down WITHOUT class filter â†’ should get callees from BOTH classes
+        // Test 3: direction=down WITHOUT class filter -> should get callees from BOTH classes
         let result3 = dispatch_tool(&ctx, "search_callers", &json!({
             "method": "SearchInternalAsync",
             "direction": "down",
@@ -3358,7 +3414,7 @@ mod tests {
             "Should have ambiguity warning when no class filter and multiple classes have same method");
     }
 
-    // â”€â”€â”€ includeBody tests â”€â”€â”€
+    // --- includeBody tests ---
 
     /// Helper: create temp files with known content + build HandlerContext with DefinitionIndex pointing to them
     fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
@@ -3371,7 +3427,7 @@ mod tests {
         let tmp_dir = std::env::temp_dir().join(format!("search_test_{}_{}", std::process::id(), id));
         let _ = std::fs::create_dir_all(&tmp_dir);
 
-        // File 0: MyService.cs â€” 15 lines
+        // File 0: MyService.cs -- 15 lines
         let file0_path = tmp_dir.join("MyService.cs");
         {
             let mut f = std::fs::File::create(&file0_path).unwrap();
@@ -3380,7 +3436,7 @@ mod tests {
             }
         }
 
-        // File 1: BigFile.cs â€” 25 lines
+        // File 1: BigFile.cs -- 25 lines
         let file1_path = tmp_dir.join("BigFile.cs");
         {
             let mut f = std::fs::File::create(&file1_path).unwrap();
@@ -3472,6 +3528,7 @@ mod tests {
             def_index: Some(Arc::new(RwLock::new(def_index))),
             server_dir: tmp_dir.to_string_lossy().to_string(),
             server_ext: "cs".to_string(),
+        metrics: false,
         };
 
         (ctx, tmp_dir)
@@ -3680,6 +3737,7 @@ mod tests {
             def_index: Some(Arc::new(RwLock::new(def_index))),
             server_dir: tmp_dir.to_string_lossy().to_string(),
             server_ext: "cs".to_string(),
+        metrics: false,
         };
 
         let result = dispatch_tool(&ctx, "search_definitions", &json!({
@@ -3753,6 +3811,7 @@ mod tests {
             def_index: Some(Arc::new(RwLock::new(def_index))),
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
+        metrics: false,
         };
 
         let result = dispatch_tool(&ctx, "search_definitions", &json!({
@@ -3767,7 +3826,7 @@ mod tests {
         assert_eq!(defs[0]["bodyError"], "failed to read file");
     }
 
-    // â”€â”€â”€ build_grouped_line_content tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- build_grouped_line_content tests --------------------------------
 
     #[test]
     fn test_grouped_line_content_single_group() {
@@ -3782,7 +3841,7 @@ mod tests {
         let result = build_grouped_line_content(&lines_to_show, &lines_vec, &match_lines_set);
         let groups = result.as_array().unwrap();
         assert_eq!(groups.len(), 1, "Should be one group for consecutive lines");
-        assert_eq!(groups[0]["startLine"], 2); // 0-based idx 1 â†’ 1-based line 2
+        assert_eq!(groups[0]["startLine"], 2); // 0-based idx 1 -> 1-based line 2
         let lines = groups[0]["lines"].as_array().unwrap();
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0], "line1");
@@ -3795,7 +3854,7 @@ mod tests {
 
     #[test]
     fn test_grouped_line_content_two_groups() {
-        // Lines 1,2 and 5,6 â€” gap between 2 and 5
+        // Lines 1,2 and 5,6 -- gap between 2 and 5
         let lines_vec = vec!["L0", "L1", "L2", "L3", "L4", "L5", "L6"];
         let mut lines_to_show = std::collections::BTreeSet::new();
         for i in [1, 2, 5, 6] { lines_to_show.insert(i); }
@@ -3868,10 +3927,10 @@ mod tests {
         assert_eq!(matches[1], 3);
     }
 
-    // Note: is_csharp_noise_token tests removed â€” function was replaced by
+    // Note: is_csharp_noise_token tests removed -- function was replaced by
     // AST-based call extraction which doesn't need noise filtering.
 
-    // â”€â”€â”€ sorted_intersect tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- sorted_intersect tests --------------------------------------
 
     #[test]
     fn test_sorted_intersect_basic() {
@@ -3912,7 +3971,7 @@ mod tests {
         assert_eq!(sorted_intersect(&[1, 5, 10], &[3, 5, 8]), vec![5]);
     }
 
-    // â”€â”€â”€ Substring search handler integration tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- Substring search handler integration tests ------------------
 
     /// Helper: build a HandlerContext with a ContentIndex containing given tokens
     /// mapped to given files. Builds trigram index automatically.
@@ -3962,6 +4021,8 @@ mod tests {
             def_index: None,
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
+
+        metrics: false,
 
         }
     }
@@ -4022,7 +4083,7 @@ mod tests {
             vec![("httpclient", 0, vec![5])],
             vec!["C:\\test\\Program.cs"],
         );
-        // Query with mixed case â€” should be lowercased before matching
+        // Query with mixed case -- should be lowercased before matching
         let result = dispatch_tool(&ctx, "search_grep", &json!({
             "terms": "HttpCli",
             "substring": true
@@ -4170,6 +4231,8 @@ mod tests {
             server_dir: ".".to_string(),
             server_ext: "cs".to_string(),
 
+        metrics: false,
+
         };
 
         // Should trigger rebuild and still find the token
@@ -4187,9 +4250,9 @@ mod tests {
         assert!(!idx.trigram.tokens.is_empty(), "trigram tokens should be populated after rebuild");
     }
 
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
-    // E2E tests: build real index from files on disk â†’ query via dispatch_tool
-    // â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+    // ===================================================================
+    // E2E tests: build real index from files on disk -> query via dispatch_tool
+    // ===================================================================
 
     /// Helper: create a temp dir with source files containing compound identifiers,
     /// build a real content index from it, and return a HandlerContext.
@@ -4256,18 +4319,20 @@ mod tests {
             server_dir: tmp_dir.to_string_lossy().to_string(),
             server_ext: "cs".to_string(),
 
+        metrics: false,
+
         };
 
         (ctx, tmp_dir)
     }
 
-    // â”€â”€â”€ E2E Test 1: Full pipeline â€” build index â†’ substring search â”€â”€
+    // --- E2E Test 1: Full pipeline -- build index -> substring search --
 
     #[test]
     fn e2e_substring_search_full_pipeline() {
         let (ctx, tmp_dir) = make_e2e_substring_ctx();
 
-        // Search for "databaseconn" â€” should match "databaseconnectionfactory"
+        // Search for "databaseconn" -- should match "databaseconnectionfactory"
         let result = dispatch_tool(&ctx, "search_grep", &json!({
             "terms": "databaseconn",
             "substring": true
@@ -4289,7 +4354,7 @@ mod tests {
         assert!(files.iter().any(|f| f["path"].as_str().unwrap().contains("Service.cs")),
             "Should find Service.cs");
 
-        // Search for "httpclient" â€” should find in both Service.cs and Controller.cs
+        // Search for "httpclient" -- should find in both Service.cs and Controller.cs
         let result2 = dispatch_tool(&ctx, "search_grep", &json!({
             "terms": "httpclient",
             "substring": true
@@ -4311,7 +4376,7 @@ mod tests {
         cleanup_tmp(&tmp_dir);
     }
 
-    // â”€â”€â”€ E2E Test 2: Substring search with showLines â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- E2E Test 2: Substring search with showLines -----------------
 
     #[test]
     fn e2e_substring_search_with_show_lines() {
@@ -4350,14 +4415,14 @@ mod tests {
         cleanup_tmp(&tmp_dir);
     }
 
-    // â”€â”€â”€ E2E Test 3: Reindex rebuilds trigram â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- E2E Test 3: Reindex rebuilds trigram ------------------------
 
     #[test]
     fn e2e_reindex_rebuilds_trigram() {
         use std::io::Write;
         let (ctx, tmp_dir) = make_e2e_substring_ctx();
 
-        // First query â€” should find "cachemanagerhelper" via substring "cachemanager"
+        // First query -- should find "cachemanagerhelper" via substring "cachemanager"
         let result1 = dispatch_tool(&ctx, "search_grep", &json!({
             "terms": "cachemanager",
             "substring": true
@@ -4401,7 +4466,7 @@ mod tests {
         cleanup_tmp(&tmp_dir);
     }
 
-    // â”€â”€â”€ E2E Test 4: File change â†’ trigram dirty â†’ lazy rebuild â”€â”€â”€â”€â”€â”€
+    // --- E2E Test 4: File change -> trigram dirty -> lazy rebuild ------
 
     #[test]
     fn e2e_watcher_trigram_dirty_lazy_rebuild() {
@@ -4441,7 +4506,7 @@ mod tests {
             idx.trigram_dirty = true;
         }
 
-        // Now search for the new token via substring â€” should trigger lazy trigram rebuild
+        // Now search for the new token via substring -- should trigger lazy trigram rebuild
         let result2 = dispatch_tool(&ctx, "search_grep", &json!({
             "terms": "blobstorage",
             "substring": true
@@ -4458,7 +4523,7 @@ mod tests {
         cleanup_tmp(&tmp_dir);
     }
 
-    // â”€â”€â”€ E2E Test 5: Index serialization roundtrip with trigram â”€â”€â”€â”€â”€â”€
+    // --- E2E Test 5: Index serialization roundtrip with trigram ------
 
     #[test]
     fn e2e_index_serialization_roundtrip_with_trigram() {
@@ -4497,6 +4562,8 @@ mod tests {
             server_dir: root,
             server_ext: "cs".to_string(),
 
+        metrics: false,
+
         };
 
         // Same substring search should produce same results
@@ -4516,7 +4583,7 @@ mod tests {
         cleanup_tmp(&tmp_dir);
     }
 
-    // â”€â”€â”€ E2E Test 6: Substring with multi-term AND mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- E2E Test 6: Substring with multi-term AND mode -------------
 
     #[test]
     fn e2e_substring_search_multi_term_and() {
@@ -4547,7 +4614,7 @@ mod tests {
         cleanup_tmp(&tmp_dir);
     }
 
-    // â”€â”€â”€ E2E Test 7: Substring search count-only mode â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- E2E Test 7: Substring search count-only mode ---------------
 
     #[test]
     fn e2e_substring_search_count_only() {
@@ -4569,7 +4636,7 @@ mod tests {
         cleanup_tmp(&tmp_dir);
     }
 
-    // â”€â”€â”€ E2E Test 8: Substring search with exclude filters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- E2E Test 8: Substring search with exclude filters ----------
 
     #[test]
     fn e2e_substring_search_with_excludes() {
@@ -4594,7 +4661,7 @@ mod tests {
         cleanup_tmp(&tmp_dir);
     }
 
-    // â”€â”€â”€ E2E Test 9: Substring search with maxResults â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    // --- E2E Test 9: Substring search with maxResults ---------------
 
     #[test]
     fn e2e_substring_search_max_results() {
@@ -4618,7 +4685,7 @@ mod tests {
         cleanup_tmp(&tmp_dir);
     }
 
-    // â”€â”€â”€ E2E Test 10: Short substring (<4 chars) produces warning â”€â”€â”€
+    // --- E2E Test 10: Short substring (<4 chars) produces warning ---
 
     #[test]
     fn e2e_substring_search_short_query_warning() {
@@ -4640,7 +4707,7 @@ mod tests {
         cleanup_tmp(&tmp_dir);
     }
 
-    // â”€â”€â”€ E2E Test 11: Substring mutually exclusive with regex â”€â”€â”€â”€â”€â”€â”€
+    // --- E2E Test 11: Substring mutually exclusive with regex -------
 
     #[test]
     fn e2e_substring_mutually_exclusive_with_regex() {
@@ -4657,7 +4724,7 @@ mod tests {
         cleanup_tmp(&tmp_dir);
     }
 
-    // â”€â”€â”€ E2E Test 12: Substring mutually exclusive with phrase â”€â”€â”€â”€â”€â”€
+    // --- E2E Test 12: Substring mutually exclusive with phrase ------
 
     #[test]
     fn e2e_substring_mutually_exclusive_with_phrase() {
@@ -4674,7 +4741,7 @@ mod tests {
         cleanup_tmp(&tmp_dir);
     }
 
-    // â”€â”€â”€ E2E Test 13: Verify TF-IDF scoring in substring results â”€â”€â”€â”€
+    // --- E2E Test 13: Verify TF-IDF scoring in substring results ----
 
     #[test]
     fn e2e_substring_search_has_scores() {
@@ -4704,5 +4771,146 @@ mod tests {
         }
 
         cleanup_tmp(&tmp_dir);
+    }
+
+    // --- Metrics injection tests ---
+
+    #[test]
+    fn test_metrics_off_no_extra_fields() {
+        let mut idx = HashMap::new();
+        idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
+        let index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec!["C:\\test\\Program.cs".to_string()],
+            index: idx,
+            total_tokens: 100,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![50],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(index)),
+            def_index: None,
+            server_dir: ".".to_string(),
+            server_ext: "cs".to_string(),
+            metrics: false,
+        };
+        let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        // With metrics=false, summary should NOT have responseBytes/estimatedTokens
+        // (searchTimeMs, indexFiles, indexTokens are always present from the handler itself)
+        assert!(output["summary"].get("responseBytes").is_none(),
+            "metrics=false should not include responseBytes");
+        assert!(output["summary"].get("estimatedTokens").is_none(),
+            "metrics=false should not include estimatedTokens");
+    }
+
+    #[test]
+    fn test_metrics_on_injects_fields() {
+        let mut idx = HashMap::new();
+        idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
+        let index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec!["C:\\test\\Program.cs".to_string()],
+            index: idx,
+            total_tokens: 100,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![50],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(index)),
+            def_index: None,
+            server_dir: ".".to_string(),
+            server_ext: "cs".to_string(),
+            metrics: true,
+        };
+        let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        // With metrics=true, summary should have all metrics fields
+        assert!(output["summary"]["searchTimeMs"].as_f64().is_some(),
+            "metrics=true should include searchTimeMs");
+        assert!(output["summary"]["responseBytes"].as_u64().is_some(),
+            "metrics=true should include responseBytes");
+        assert!(output["summary"]["estimatedTokens"].as_u64().is_some(),
+            "metrics=true should include estimatedTokens");
+        assert_eq!(output["summary"]["indexFiles"], 1);
+        assert_eq!(output["summary"]["indexTokens"], 1);
+    }
+
+    #[test]
+    fn test_metrics_not_injected_on_error() {
+        let index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec![],
+            file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(index)),
+            def_index: None,
+            server_dir: ".".to_string(),
+            server_ext: "cs".to_string(),
+            metrics: true,
+        };
+        // Missing required "terms" param -> error
+        let result = dispatch_tool(&ctx, "search_grep", &json!({}));
+        assert!(result.is_error);
+        // Error results should NOT have metrics injected
+        assert!(!result.content[0].text.contains("searchTimeMs"));
+    }
+
+    #[test]
+    fn test_metrics_search_time_is_positive() {
+        let mut idx = HashMap::new();
+        idx.insert("foo".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+        let index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec!["test.cs".to_string()],
+            index: idx,
+            total_tokens: 10,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![10],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(index)),
+            def_index: None,
+            server_dir: ".".to_string(),
+            server_ext: "cs".to_string(),
+            metrics: true,
+        };
+        let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "foo"}));
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let time_ms = output["summary"]["searchTimeMs"].as_f64().unwrap();
+        assert!(time_ms >= 0.0, "searchTimeMs should be non-negative");
+        let bytes = output["summary"]["responseBytes"].as_u64().unwrap();
+        let tokens = output["summary"]["estimatedTokens"].as_u64().unwrap();
+        assert_eq!(tokens, bytes / 4, "estimatedTokens should be responseBytes / 4");
     }
 }
