@@ -596,7 +596,7 @@ When a definition's body exceeds `maxBodyLines`, the `body` array is truncated a
   "params": {
     "name": "search_definitions",
     "arguments": {
-      "name": "GetCatalogEntriesAsync",
+      "name": "GetProductEntriesAsync",
       "includeBody": true,
       "maxBodyLines": 10
     }
@@ -607,20 +607,20 @@ When a definition's body exceeds `maxBodyLines`, the `body` array is truncated a
 {
   "definitions": [
     {
-      "name": "GetCatalogEntriesAsync",
+      "name": "GetProductEntriesAsync",
       "kind": "method",
-      "file": "CatalogService.cs",
+      "file": "ProductService.cs",
       "lines": "142-189",
-      "parent": "CatalogService",
+      "parent": "ProductService",
       "bodyStartLine": 142,
       "body": [
-        "public async Task<List<CatalogEntry>> GetCatalogEntriesAsync(int tenantId)",
+        "public async Task<List<ProductEntry>> GetProductEntriesAsync(int tenantId)",
         "{",
         "    var entries = await _repository.GetEntriesAsync(tenantId);",
         "    if (entries == null)",
         "    {",
         "        _logger.LogWarning(\"No entries found for tenant {TenantId}\", tenantId);",
-        "        return new List<CatalogEntry>();",
+        "        return new List<ProductEntry>();",
         "    }",
         "    return entries.Where(e => e.IsActive).ToList();",
         "}"
@@ -648,7 +648,7 @@ search serve --dir . --ext rs --definitions
 {"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokenize"}}}
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"ExecuteQueryAsync","depth":3}}}
 {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_definitions","arguments":{"file":"QueryService.cs","containsLine":812}}}
-{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"GetCatalogEntriesAsync","includeBody":true,"maxBodyLines":10}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"GetProductEntriesAsync","includeBody":true,"maxBodyLines":10}}}
 ```
 
 ---
