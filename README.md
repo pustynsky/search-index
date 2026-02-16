@@ -463,6 +463,8 @@ search serve --dir C:\Projects --ext cs --watch --definitions --metrics
 | `search_reindex_definitions` | Force rebuild + reload definition index (requires `--definitions`) |
 | `search_help`         | Returns best practices guide for tool selection, performance tiers, and common pitfalls |
 
+> **CLI users**: Run `search tips` to see the same best practices in your terminal.
+
 **Setup in VS Code (step-by-step):**
 
 1. **Install search** (if not already):

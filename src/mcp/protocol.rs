@@ -155,59 +155,12 @@ impl InitializeResult {
                 name: "search-index".to_string(),
                 version: "0.3.0".to_string(),
             },
-            instructions: Some(Self::instructions_text().to_string()),
+            instructions: Some(crate::tips::render_instructions()),
         }
     }
 
-    /// Server-level best practices for LLM tool selection.
-    /// These address gaps that are NOT discoverable from individual tool descriptions alone.
-    fn instructions_text() -> &'static str {
-        concat!(
-            "search-index MCP server — Best Practices for Tool Selection\n",
-            "\n",
-            "1. FILE LOOKUP: Always use search_fast (indexed, ~35ms) instead of search_find (live filesystem walk, ~3s). ",
-            "search_fast is 90x+ faster. Only use search_find when no index exists.\n",
-            "\n",
-            "2. MULTI-TERM OR: Find all variants of a class in ONE query with comma-separated terms. ",
-            "Example: terms='UserService,IUserService,UserServiceFactory', mode='or'. ",
-            "Much faster than making 3 separate queries.\n",
-            "\n",
-            "3. EXCLUDE TEST DIRS: Use excludeDir=['test','Mock','UnitTests'] to get production-only results. ",
-            "Works in search_grep, search_definitions, and search_callers. Half the results are often test files.\n",
-            "\n",
-            "4. SUBSTRING SEARCH: In C#/Java codebases with compound identifiers, use search_grep with substring=true. ",
-            "Default exact-token mode will NOT find 'UserService' inside 'DeleteUserServiceCacheEntry'. Fast (~1ms).\n",
-            "\n",
-            "5. CALL CHAIN TRACING: Use search_callers instead of chaining search_grep + read_file. ",
-            "Single sub-millisecond request replaces 7+ sequential calls. Supports direction='up' (who calls this) ",
-            "and direction='down' (what does this call). Always specify the class parameter to avoid mixing callers ",
-            "from unrelated classes with the same method name.\n",
-            "\n",
-            "6. STACK TRACE ANALYSIS: Use search_definitions with file='MyFile.cs', containsLine=42 to find which ",
-            "method/class contains a given line number. Returns the innermost method and its parent class.\n",
-            "\n",
-            "7. READING METHOD SOURCE: Use search_definitions with includeBody=true instead of read_file. ",
-            "Returns method body inline. Body budgets: maxBodyLines (per def, default 100), maxTotalBodyLines ",
-            "(all defs, default 500). Set to 0 for unlimited.\n",
-            "\n",
-            "8. AND MODE: Use search_grep with mode='and' to find files containing ALL comma-separated terms. ",
-            "Example: terms='ServiceProvider,IUserService', mode='and' finds only files with both.\n",
-            "\n",
-            "9. PHRASE/REGEX: Use phrase=true for exact multi-word match ('new HttpClient'), or regex=true ",
-            "for patterns ('I[A-Z]\\w+Cache'). Both are slower (~60-80ms) but precise.\n",
-            "\n",
-            "10. RECONNAISSANCE: Use search_grep with countOnly=true for quick 'how many files use X?' — ~46 tokens vs 265+.\n",
-            "\n",
-            "11. TOOL PRIORITY:\n",
-            "   - search_callers (call trees up/down, <1ms)\n",
-            "   - search_definitions (structural: classes, methods, containsLine, <1ms for baseType/attribute)\n",
-            "   - search_grep (content: exact/OR/AND <1ms, substring ~1ms, phrase/regex ~60-80ms)\n",
-            "   - search_fast (file name lookup, ~35ms)\n",
-            "   - search_find (live walk, ~3s — last resort)\n",
-            "\n",
-            "Call search_help for a detailed JSON guide with examples.\n",
-        )
-    }
+    // Instructions text is now generated from crate::tips::render_instructions()
+    // which is the single source of truth shared with CLI `search tips` and MCP `search_help`.
 }
 
 #[cfg(test)]

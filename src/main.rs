@@ -17,6 +17,7 @@ mod definitions;
 mod error;
 mod index;
 mod mcp;
+mod tips;
 
 pub use error::SearchError;
 pub use index::{
@@ -79,6 +80,10 @@ enum Commands {
     /// Scans the index directory and removes .idx, .cidx, .didx files
     /// that point to directories that have been deleted or moved.
     Cleanup,
+
+    /// Show best practices and tips for using search tools effectively.
+    /// Covers tool selection, performance tiers, and common pitfalls.
+    Tips,
 }
 
 #[derive(Parser, Debug)]
@@ -1355,6 +1360,12 @@ pub fn cmd_info_json() -> serde_json::Value {
     })
 }
 
+// ─── Tips command ────────────────────────────────────────────────────
+
+fn cmd_tips() {
+    print!("{}", tips::render_cli());
+}
+
 // ─── Serve command ───────────────────────────────────────────────────
 
 fn cmd_serve(args: ServeArgs) {
@@ -1534,6 +1545,7 @@ fn main() {
             }
             Ok(())
         },
+        Commands::Tips => { cmd_tips(); Ok(()) },
     };
 
     if let Err(e) = result {
