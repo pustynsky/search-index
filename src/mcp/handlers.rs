@@ -136,7 +136,8 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             description: "Show all existing indexes with their status, sizes, and age.".to_string(),
             input_schema: json!({
                 "type": "object",
-                "properties": {}
+                "properties": {},
+                "required": []
             }),
         },
         ToolDefinition {
@@ -150,7 +151,8 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "File extensions (comma-separated)"
                     }
-                }
+                },
+                "required": []
             }),
         },
         ToolDefinition {
@@ -164,7 +166,8 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "string",
                         "description": "File extensions to parse, comma-separated (default: server's --ext)"
                     }
-                }
+                },
+                "required": []
             }),
         },
         ToolDefinition {
@@ -2590,6 +2593,27 @@ mod tests {
         for tool in &tools {
             assert!(tool.input_schema.is_object(), "Tool {} should have an object schema", tool.name);
             assert_eq!(tool.input_schema["type"], "object");
+        }
+    }
+
+    #[test]
+    fn test_all_tools_have_required_field() {
+        let tools = tool_definitions();
+        for tool in &tools {
+            assert!(
+                tool.input_schema.get("required").is_some(),
+                "Tool '{}' inputSchema is missing 'required' field. \
+                 MCP clients (e.g. MS-Roo-Code) expect 'required' to always be present, \
+                 even as an empty array. Without it, JSON.parse() fails with \
+                 'Unexpected end of JSON input' during auto-approve toggle.",
+                tool.name
+            );
+            assert!(
+                tool.input_schema["required"].is_array(),
+                "Tool '{}' 'required' field must be an array, got: {}",
+                tool.name,
+                tool.input_schema["required"]
+            );
         }
     }
 
