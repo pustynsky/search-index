@@ -1,7 +1,7 @@
 //! info and info_json commands.
 
 use std::fs;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{index_dir, ContentIndex, FileIndex};
 
@@ -34,9 +34,9 @@ pub fn cmd_info() {
                     found = true;
                     let age_secs = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
-                        .unwrap()
+                        .unwrap_or(Duration::ZERO)
                         .as_secs()
-                        - index.created_at;
+                        .saturating_sub(index.created_at);
                     let age_hours = age_secs as f64 / 3600.0;
                     let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                     let stale = if index.is_stale() { " [STALE]" } else { "" };
@@ -52,9 +52,9 @@ pub fn cmd_info() {
                     found = true;
                     let age_secs = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
-                        .unwrap()
+                        .unwrap_or(Duration::ZERO)
                         .as_secs()
-                        - index.created_at;
+                        .saturating_sub(index.created_at);
                     let age_hours = age_secs as f64 / 3600.0;
                     let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                     let stale = if index.is_stale() { " [STALE]" } else { "" };
@@ -90,7 +90,7 @@ pub fn cmd_info_json() -> serde_json::Value {
                     && let Ok(index) = bincode::deserialize::<FileIndex>(&data) {
                         let age_secs = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
-                            .unwrap()
+                            .unwrap_or(Duration::ZERO)
                             .as_secs()
                             .saturating_sub(index.created_at);
                         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
@@ -108,7 +108,7 @@ pub fn cmd_info_json() -> serde_json::Value {
                     && let Ok(index) = bincode::deserialize::<ContentIndex>(&data) {
                         let age_secs = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
-                            .unwrap()
+                            .unwrap_or(Duration::ZERO)
                             .as_secs()
                             .saturating_sub(index.created_at);
                         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
@@ -128,7 +128,7 @@ pub fn cmd_info_json() -> serde_json::Value {
                     && let Ok(index) = bincode::deserialize::<crate::definitions::DefinitionIndex>(&data) {
                         let age_secs = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
-                            .unwrap()
+                            .unwrap_or(Duration::ZERO)
                             .as_secs()
                             .saturating_sub(index.created_at);
                         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);

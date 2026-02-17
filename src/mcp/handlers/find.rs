@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 
 use crate::mcp::protocol::ToolCallResult;
 
+use super::utils::validate_search_dir;
 use super::HandlerContext;
 
 pub(crate) fn handle_search_find(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
@@ -16,6 +17,12 @@ pub(crate) fn handle_search_find(ctx: &HandlerContext, args: &Value) -> ToolCall
     };
 
     let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or(&ctx.server_dir).to_string();
+
+    // Validate dir parameter -- must match server dir or be a subdirectory
+    if let Err(msg) = validate_search_dir(&dir, &ctx.server_dir) {
+        return ToolCallResult::error(msg);
+    }
+
     let ext = args.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string());
     let contents = args.get("contents").and_then(|v| v.as_bool()).unwrap_or(false);
     let use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);

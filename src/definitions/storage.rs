@@ -7,15 +7,12 @@ use crate::clean_path;
 use super::types::DefinitionIndex;
 
 fn def_index_path_for(dir: &str, exts: &str, index_base: &std::path::Path) -> PathBuf {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
-    let mut hasher = DefaultHasher::new();
-    canonical.to_string_lossy().hash(&mut hasher);
-    exts.hash(&mut hasher);
-    "definitions".hash(&mut hasher); // distinguish from content index
-    let hash = hasher.finish();
+    let hash = search::stable_hash(&[
+        canonical.to_string_lossy().as_bytes(),
+        exts.as_bytes(),
+        b"definitions", // distinguish from content index
+    ]);
     index_base.join(format!("{:016x}.didx", hash))
 }
 

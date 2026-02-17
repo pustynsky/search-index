@@ -148,7 +148,10 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
             let idf = (total_docs / doc_freq).ln();
 
             for posting in postings {
-                let file_path = &index.files[posting.file_id as usize];
+                let file_path = match index.files.get(posting.file_id as usize) {
+                    Some(p) => p,
+                    None => continue,
+                };
 
                 // Dir prefix filter (subdirectory search)
                 if let Some(ref prefix) = dir_filter {
@@ -376,7 +379,10 @@ fn handle_substring_search(
                 let idf = if doc_freq > 0.0 { (total_docs / doc_freq).ln() } else { 0.0 };
 
                 for posting in postings {
-                    let file_path = &index.files[posting.file_id as usize];
+                    let file_path = match index.files.get(posting.file_id as usize) {
+                        Some(p) => p,
+                        None => continue,
+                    };
 
                     // Dir prefix filter (subdirectory search)
                     if let Some(prefix) = dir_filter {
@@ -545,7 +551,10 @@ fn handle_phrase_search(
         if let Some(postings) = index.index.get(token.as_str()) {
             let file_ids: std::collections::HashSet<u32> = postings.iter()
                 .filter(|p| {
-                    let path = &index.files[p.file_id as usize];
+                    let path = match index.files.get(p.file_id as usize) {
+                        Some(p) => p,
+                        None => return false,
+                    };
                     if let Some(prefix) = dir_filter {
                         if !is_under_dir(path, prefix) { return false; }
                     }

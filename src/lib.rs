@@ -14,6 +14,30 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+/// Default minimum token length used for indexing and search.
+/// Tokens shorter than this are discarded during tokenization.
+pub const DEFAULT_MIN_TOKEN_LEN: usize = 2;
+
+// ─── Stable hashing ─────────────────────────────────────────────────
+
+/// Stable FNV-1a hash (deterministic across Rust versions, unlike `DefaultHasher`).
+///
+/// Accepts multiple byte slices that are fed into the hash sequentially,
+/// allowing callers to combine directory path + extension list, etc.
+#[must_use]
+pub fn stable_hash(parts: &[&[u8]]) -> u64 {
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01B3;
+    let mut hash = FNV_OFFSET;
+    for part in parts {
+        for &byte in *part {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(FNV_PRIME);
+        }
+    }
+    hash
+}
+
 // ─── Core public types ───────────────────────────────────────────────
 
 /// Strip the `\\?\` extended-length path prefix that Windows canonicalize adds.
@@ -188,6 +212,50 @@ mod lib_tests {
     #[test]
     fn test_clean_path_no_prefix() {
         assert_eq!(clean_path(r"C:\Users\test"), r"C:\Users\test");
+    }
+
+    // ─── stable_hash tests ──────────────────────────────────────
+
+    #[test]
+    fn test_stable_hash_deterministic() {
+        let a = stable_hash(&[b"hello world"]);
+        let b = stable_hash(&[b"hello world"]);
+        assert_eq!(a, b, "same input must produce same hash");
+    }
+
+    #[test]
+    fn test_stable_hash_different_inputs() {
+        let a = stable_hash(&[b"hello"]);
+        let b = stable_hash(&[b"world"]);
+        assert_ne!(a, b, "different inputs should produce different hashes");
+    }
+
+    #[test]
+    fn test_stable_hash_multi_part_equivalent_to_concat() {
+        let split = stable_hash(&[b"hello", b"world"]);
+        let concat = stable_hash(&[b"helloworld"]);
+        assert_eq!(split, concat, "multi-part hash should equal concatenated hash");
+    }
+
+    #[test]
+    fn test_stable_hash_part_order_matters() {
+        let ab = stable_hash(&[b"alpha", b"beta"]);
+        let ba = stable_hash(&[b"beta", b"alpha"]);
+        assert_ne!(ab, ba, "part order should affect hash output");
+    }
+
+    #[test]
+    fn test_stable_hash_known_fnv1a_vector() {
+        // FNV-1a 64-bit hash of empty string is the offset basis itself
+        let empty = stable_hash(&[]);
+        assert_eq!(empty, 0xcbf2_9ce4_8422_2325, "empty input should return FNV offset basis");
+    }
+
+    #[test]
+    fn test_stable_hash_empty_vs_nonempty() {
+        let empty = stable_hash(&[]);
+        let nonempty = stable_hash(&[b"x"]);
+        assert_ne!(empty, nonempty);
     }
 
     #[test]

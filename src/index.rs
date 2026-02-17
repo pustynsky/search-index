@@ -1,17 +1,15 @@
 //! Index storage: save/load/build for FileIndex and ContentIndex.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Mutex;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ignore::WalkBuilder;
 
 use crate::error::SearchError;
-use search::{clean_path, generate_trigrams, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex};
+use search::{clean_path, generate_trigrams, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex};
 
 use crate::{ContentIndexArgs, IndexArgs};
 
@@ -26,9 +24,7 @@ pub fn index_dir() -> PathBuf {
 
 pub fn index_path_for(dir: &str, index_base: &std::path::Path) -> PathBuf {
     let canonical = fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
-    let mut hasher = DefaultHasher::new();
-    canonical.to_string_lossy().hash(&mut hasher);
-    let hash = hasher.finish();
+    let hash = stable_hash(&[canonical.to_string_lossy().as_bytes()]);
     index_base.join(format!("{:016x}.idx", hash))
 }
 
@@ -48,10 +44,7 @@ pub fn load_index(dir: &str, index_base: &std::path::Path) -> Option<FileIndex> 
 
 pub fn content_index_path_for(dir: &str, exts: &str, index_base: &std::path::Path) -> PathBuf {
     let canonical = fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
-    let mut hasher = DefaultHasher::new();
-    canonical.to_string_lossy().hash(&mut hasher);
-    exts.hash(&mut hasher);
-    let hash = hasher.finish();
+    let hash = stable_hash(&[canonical.to_string_lossy().as_bytes(), exts.as_bytes()]);
     index_base.join(format!("{:016x}.cidx", hash))
 }
 
@@ -202,7 +195,7 @@ pub fn build_index(args: &IndexArgs) -> FileIndex {
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or(Duration::ZERO)
         .as_secs();
 
     let index = FileIndex {
@@ -327,7 +320,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or(Duration::ZERO)
         .as_secs();
 
     ContentIndex {

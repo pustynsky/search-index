@@ -8,7 +8,7 @@ use tracing::{info, warn};
 
 use crate::{
     build_content_index, save_content_index, load_content_index, find_content_index_for_dir,
-    index_dir,
+    index_dir, DEFAULT_MIN_TOKEN_LEN,
 };
 use crate::definitions;
 use crate::mcp;
@@ -60,7 +60,7 @@ pub fn cmd_serve(args: ServeArgs) {
                         hidden: false,
                         no_ignore: false,
                         threads: 0,
-                        min_token_len: 2,
+                        min_token_len: DEFAULT_MIN_TOKEN_LEN,
                     });
                     if let Err(e) = save_content_index(&new_idx, &idx_base) {
                         warn!(error = %e, "Failed to save content index to disk");
