@@ -1459,3 +1459,67 @@ $msgs | cargo run -- serve -d . -e rs --metrics 2>$null
 - `summary.responseBytes` < 32768
 
 **Validates:** Progressive response truncation, LLM context budget protection, summary metadata accuracy.
+
+
+---
+
+### T43: `serve` — search_find directory validation (security)
+
+**Scenario:** The `search_find` tool now validates the `dir` parameter against `server_dir`,
+matching the same security behavior as `search_grep`. Previously, `search_find` accepted any
+directory path, allowing filesystem enumeration outside the server's configured scope.
+
+**Test — directory outside `server_dir` is rejected:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_find","arguments":{"pattern":"*","dir":"C:\\Windows"}}}'
+) -join "`n"
+$msgs | cargo run -- serve -d . -e rs 2>$null
+```
+
+**Expected:**
+
+- Response contains error indicating directory is outside allowed scope
+- Tool result `isError: true`
+- Error message references `--dir` / `server_dir`
+
+**Test — subdirectory of `server_dir` is accepted:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_find","arguments":{"pattern":"*.rs","dir":"src/mcp"}}}'
+) -join "`n"
+$msgs | cargo run -- serve -d . -e rs 2>$null
+```
+
+**Expected:**
+
+- No error
+- Results contain file paths within `src/mcp`
+- Normal `search_find` output with match count
+
+**Test — no `dir` parameter uses `server_dir` as default:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_find","arguments":{"pattern":"*.rs"}}}'
+) -join "`n"
+$msgs | cargo run -- serve -d . -e rs 2>$null
+```
+
+**Expected:**
+
+- No error
+- Results returned from the server's root directory
+- Normal `search_find` output
+
+**Validates:** `search_find` directory validation parity with `search_grep`, preventing filesystem enumeration outside allowed scope.
+
+**Status:** ✅ Implemented (covered by `test_validate_search_dir_subdirectory` and `test_validate_search_dir_outside_rejects` unit tests)

@@ -22,7 +22,7 @@ use crate::{
     content_index_path_for, find_content_index_for_dir,
     index_dir, index_path_for, load_content_index, load_index,
     save_content_index, save_index, tokenize,
-    SearchError,
+    SearchError, DEFAULT_MIN_TOKEN_LEN,
 };
 use crate::definitions;
 
@@ -408,7 +408,7 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
                 let ext_str = idx.extensions.join(",");
                 let new_idx = build_content_index(&ContentIndexArgs {
                     dir: args.dir.clone(), ext: ext_str, max_age_hours: idx.max_age_secs / 3600,
-                    hidden: false, no_ignore: false, threads: 0, min_token_len: 2,
+                    hidden: false, no_ignore: false, threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                 });
                 let _ = save_content_index(&new_idx, &idx_base);
                 new_idx
@@ -432,7 +432,7 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     if args.phrase {
         let phrase = &args.pattern;
         let phrase_lower = phrase.to_lowercase();
-        let phrase_tokens = tokenize(&phrase_lower, 2);
+        let phrase_tokens = tokenize(&phrase_lower, DEFAULT_MIN_TOKEN_LEN);
         if phrase_tokens.is_empty() {
             return Err(SearchError::EmptyPhrase { phrase: phrase.to_string() });
         }
@@ -452,7 +452,10 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
             if let Some(postings) = index.index.get(token.as_str()) {
                 let file_ids: std::collections::HashSet<u32> = postings.iter()
                     .filter(|p| {
-                        let path = &index.files[p.file_id as usize];
+                        let path = match index.files.get(p.file_id as usize) {
+                            Some(p) => p,
+                            None => return false,
+                        };
                         if let Some(ref ext) = args.ext {
                             let m = Path::new(path).extension().and_then(|e| e.to_str())
                                 .is_some_and(|e| e.eq_ignore_ascii_case(ext));
@@ -480,7 +483,10 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
         let mut results: Vec<PhraseMatch> = Vec::new();
 
         for &file_id in &candidates {
-            let file_path = &index.files[file_id as usize];
+            let file_path = match index.files.get(file_id as usize) {
+                Some(p) => p,
+                None => continue,
+            };
             if let Ok(content) = fs::read_to_string(file_path) && phrase_re.is_match(&content) {
                 let mut matching_lines = Vec::new();
                 for (line_num, line) in content.lines().enumerate() {
@@ -575,7 +581,10 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
             let doc_freq = postings.len() as f64;
             let idf = (total_docs / doc_freq).ln();
             for posting in postings {
-                let file_path = &index.files[posting.file_id as usize];
+                let file_path = match index.files.get(posting.file_id as usize) {
+                    Some(p) => p,
+                    None => continue,
+                };
                 if let Some(ref ext) = args.ext {
                     let matches = Path::new(file_path).extension().and_then(|e| e.to_str())
                         .is_some_and(|e| e.eq_ignore_ascii_case(ext));

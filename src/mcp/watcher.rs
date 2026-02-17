@@ -6,7 +6,7 @@ use std::time::Duration;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::{error, info, warn};
 
-use crate::{build_content_index, clean_path, save_content_index, tokenize, ContentIndex, ContentIndexArgs, Posting};
+use crate::{build_content_index, clean_path, save_content_index, tokenize, ContentIndex, ContentIndexArgs, Posting, DEFAULT_MIN_TOKEN_LEN};
 use crate::definitions::{self, DefinitionIndex};
 
 /// Start a file watcher thread that incrementally updates the in-memory index
@@ -76,7 +76,7 @@ pub fn start_watcher(
                             hidden: false,
                             no_ignore: false,
                             threads: 0,
-                            min_token_len: 2,
+                            min_token_len: DEFAULT_MIN_TOKEN_LEN,
                         });
                         if let Err(e) = save_content_index(&new_index, &index_base) {
                             warn!(error = %e, "Failed to save reindexed content to disk");
@@ -223,7 +223,7 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
             let mut file_tokens: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
             let mut file_total: u32 = 0;
             for (line_num, line) in content.lines().enumerate() {
-                for token in tokenize(line, 2) {
+                for token in tokenize(line, DEFAULT_MIN_TOKEN_LEN) {
                     index.total_tokens += 1;
                     file_total += 1;
                     file_tokens.entry(token).or_default().push((line_num + 1) as u32);
@@ -245,6 +245,8 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
             // Update file token count
             if (file_id as usize) < index.file_token_counts.len() {
                 index.file_token_counts[file_id as usize] = file_total;
+            } else {
+                warn!(file_id, len = index.file_token_counts.len(), "file_token_counts out of bounds, TF-IDF scores may be stale");
             }
         } else {
             // NEW FILE — assign new file_id
@@ -255,7 +257,7 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
             let mut file_tokens: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
             let mut file_total: u32 = 0;
             for (line_num, line) in content.lines().enumerate() {
-                for token in tokenize(line, 2) {
+                for token in tokenize(line, DEFAULT_MIN_TOKEN_LEN) {
                     index.total_tokens += 1;
                     file_total += 1;
                     file_tokens.entry(token).or_default().push((line_num + 1) as u32);

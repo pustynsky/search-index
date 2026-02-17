@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use tracing::warn;
+
 use super::types::*;
 use super::parser_csharp::parse_csharp_definitions;
 
@@ -122,6 +124,18 @@ pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
         v.retain(|idx| !indices_set.contains(idx));
         !v.is_empty()
     });
+
+    // Check for excessive tombstone growth
+    let active_count: usize = index.file_index.values().map(|v| v.len()).sum();
+    let total_count = index.definitions.len();
+    if total_count > 0 && total_count > active_count * 2 {
+        warn!(
+            total = total_count,
+            active = active_count,
+            waste_pct = ((total_count - active_count) * 100) / total_count,
+            "Definition index has significant tombstone growth, consider restart to compact"
+        );
+    }
 }
 
 /// Remove a file entirely from the definition index
