@@ -16,14 +16,14 @@ graph TB
         W1[Walker Thread 1]
         W2[Walker Thread 2]
         WN[Walker Thread N]
-        W1 --> M1[Mutex&lt;Vec&lt;FileEntry&gt;&gt;]
+        W1 --> M1["Mutex<Vec<FileEntry>>"]
         W2 --> M1
         WN --> M1
     end
 
     subgraph "Server Phase"
-        STDIN[stdin reader<br/>single thread] -->|read lock| IDX["Arc&lt;RwLock&lt;ContentIndex&gt;&gt;"]
-        STDIN -->|read lock| DIDX["Arc&lt;RwLock&lt;DefinitionIndex&gt;&gt;"]
+        STDIN[stdin reader<br/>single thread] -->|read lock| IDX["Arc<RwLock<ContentIndex>>"]
+        STDIN -->|read lock| DIDX["Arc<RwLock<DefinitionIndex>>"]
 
         WT[Watcher Thread] -->|write lock| IDX
         WT -->|write lock| DIDX
@@ -119,7 +119,7 @@ sequenceDiagram
     participant OS as OS (ReadDirectoryChangesW)
     participant Watcher as Watcher Thread
     participant Channel as mpsc::channel
-    participant Index as Arc&lt;RwLock&lt;ContentIndex&gt;&gt;
+    participant Index as "Arc<RwLock<ContentIndex>>"
 
     OS->>Channel: FileCreate event
     OS->>Channel: FileModify event
