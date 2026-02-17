@@ -31,11 +31,11 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "dir": {
                         "type": "string",
-                        "description": "Directory to search (default: server's --dir)"
+                        "description": "Directory to search. Can be the server's --dir or any subdirectory of it to narrow results. (default: server's --dir)"
                     },
                     "ext": {
                         "type": "string",
-                        "description": "File extension filter, e.g. 'cs' (default: server's --ext)"
+                        "description": "File extension filter, e.g. 'cs', 'csproj', 'xml', 'config' (default: server's --ext)"
                     },
                     "mode": {
                         "type": "string",
@@ -461,6 +461,61 @@ fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> Tool
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
 }
 
+// --- Dir validation helpers ------------------------------------------
+
+/// Normalize path separators to forward slashes for cross-platform comparison.
+fn normalize_path_sep(p: &str) -> String {
+    p.replace('\\', "/")
+}
+
+/// Validate that `requested_dir` is the server dir or a subdirectory of it.
+/// Returns `Ok(None)` if exact match (no filtering needed),
+/// `Ok(Some(canonical_subdir))` if it's a proper subdirectory (use as filter),
+/// or `Err(message)` if outside the server dir.
+fn validate_search_dir(requested_dir: &str, server_dir: &str) -> Result<Option<String>, String> {
+    let requested = std::fs::canonicalize(requested_dir)
+        .map(|p| clean_path(&p.to_string_lossy()))
+        .unwrap_or_else(|_| requested_dir.to_string());
+    let server = std::fs::canonicalize(server_dir)
+        .map(|p| clean_path(&p.to_string_lossy()))
+        .unwrap_or_else(|_| server_dir.to_string());
+
+    let req_norm = normalize_path_sep(&requested).to_lowercase();
+    let srv_norm = normalize_path_sep(&server).to_lowercase();
+
+    if req_norm == srv_norm {
+        Ok(None)
+    } else if req_norm.starts_with(&srv_norm) {
+        // Verify it's a true subdirectory (next char must be '/')
+        let next_char = req_norm.as_bytes().get(srv_norm.len());
+        if next_char == Some(&b'/') {
+            Ok(Some(requested))
+        } else {
+            Err(format!(
+                "Server started with --dir {}. For other directories, start another server instance or use CLI.",
+                server_dir
+            ))
+        }
+    } else {
+        Err(format!(
+            "Server started with --dir {}. For other directories, start another server instance or use CLI.",
+            server_dir
+        ))
+    }
+}
+
+/// Check if a file path is under the given directory prefix (case-insensitive, separator-normalized).
+/// Ensures proper boundary check: `C:\Repos\Shared` won't match `C:\Repos\SharedExtra\file.cs`.
+fn is_under_dir(file_path: &str, dir_prefix: &str) -> bool {
+    let file_norm = normalize_path_sep(file_path).to_lowercase();
+    let mut dir_norm = normalize_path_sep(dir_prefix).to_lowercase();
+    // Ensure dir prefix ends with '/' for proper boundary matching
+    if !dir_norm.ends_with('/') {
+        dir_norm.push('/');
+    }
+    file_norm.starts_with(&dir_norm)
+}
+
 // --- search_grep handler ---------------------------------------------
 
 fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
@@ -469,21 +524,15 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         None => return ToolCallResult::error("Missing required parameter: terms".to_string()),
     };
 
-    // Check dir parameter -- must match server dir or be absent
-    if let Some(dir) = args.get("dir").and_then(|v| v.as_str()) {
-        let requested = std::fs::canonicalize(dir)
-            .map(|p| clean_path(&p.to_string_lossy()))
-            .unwrap_or_else(|_| dir.to_string());
-        let server = std::fs::canonicalize(&ctx.server_dir)
-            .map(|p| clean_path(&p.to_string_lossy()))
-            .unwrap_or_else(|_| ctx.server_dir.clone());
-        if !requested.eq_ignore_ascii_case(&server) {
-            return ToolCallResult::error(format!(
-                "Server started with --dir {}. For other directories, start another server instance or use CLI.",
-                ctx.server_dir
-            ));
+    // Check dir parameter -- must match server dir or be a subdirectory
+    let dir_filter: Option<String> = if let Some(dir) = args.get("dir").and_then(|v| v.as_str()) {
+        match validate_search_dir(dir, &ctx.server_dir) {
+            Ok(filter) => filter,
+            Err(msg) => return ToolCallResult::error(msg),
         }
-    }
+    } else {
+        None
+    };
 
     let ext_filter = args.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string());
     let mode_and = args.get("mode").and_then(|v| v.as_str()) == Some("and");
@@ -535,14 +584,14 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     // --- Substring search mode ------------------------------
     if use_substring {
         return handle_substring_search(ctx, &index, &terms_str, &ext_filter, &exclude_dir, &exclude,
-            show_lines, context_lines, max_results, mode_and, count_only, search_start);
+            show_lines, context_lines, max_results, mode_and, count_only, search_start, &dir_filter);
     }
 
     // --- Phrase search mode ---------------------------------
     if use_phrase {
         return handle_phrase_search(
             &index, &terms_str, &ext_filter, &exclude_dir, &exclude,
-            show_lines, context_lines, max_results, count_only, search_start,
+            show_lines, context_lines, max_results, count_only, search_start, &dir_filter,
         );
     }
 
@@ -587,6 +636,11 @@ fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
             for posting in postings {
                 let file_path = &index.files[posting.file_id as usize];
+
+                // Dir prefix filter (subdirectory search)
+                if let Some(ref prefix) = dir_filter {
+                    if !is_under_dir(file_path, prefix) { continue; }
+                }
 
                 // Extension filter
                 if let Some(ref ext) = ext_filter {
@@ -742,6 +796,7 @@ fn handle_substring_search(
     mode_and: bool,
     count_only: bool,
     _search_start: Instant,
+    dir_filter: &Option<String>,
 ) -> ToolCallResult {
     let max_results = if max_results_param == 0 { 0 } else { max_results_param };
 
@@ -830,6 +885,11 @@ fn handle_substring_search(
 
                 for posting in postings {
                     let file_path = &index.files[posting.file_id as usize];
+
+                    // Dir prefix filter (subdirectory search)
+                    if let Some(prefix) = dir_filter {
+                        if !is_under_dir(file_path, prefix) { continue; }
+                    }
 
                     // Extension filter
                     if let Some(ext) = ext_filter {
@@ -967,6 +1027,7 @@ fn handle_phrase_search(
     max_results: usize,
     count_only: bool,
     search_start: Instant,
+    dir_filter: &Option<String>,
 ) -> ToolCallResult {
     let phrase_lower = phrase.to_lowercase();
     let phrase_tokens = tokenize(&phrase_lower, 2);
@@ -993,6 +1054,9 @@ fn handle_phrase_search(
             let file_ids: std::collections::HashSet<u32> = postings.iter()
                 .filter(|p| {
                     let path = &index.files[p.file_id as usize];
+                    if let Some(prefix) = dir_filter {
+                        if !is_under_dir(path, prefix) { return false; }
+                    }
                     if let Some(ext) = ext_filter {
                         let m = Path::new(path).extension()
                             .and_then(|e| e.to_str())
@@ -5162,5 +5226,164 @@ mod tests {
         let total = output["summary"]["totalMatches"].as_u64().unwrap();
         assert_eq!(total, 2, "Case-insensitive multi-term should match");
         cleanup_tmp(&tmp);
+    }
+
+    // --- Tests for subdirectory dir validation and filtering ---
+
+    #[test]
+    fn test_normalize_path_sep() {
+        assert_eq!(normalize_path_sep(r"C:\Repos\Shared"), "C:/Repos/Shared");
+        assert_eq!(normalize_path_sep("C:/Repos/Shared"), "C:/Repos/Shared");
+        assert_eq!(normalize_path_sep(r"C:\Repos\Shared\Sub\Dir"), "C:/Repos/Shared/Sub/Dir");
+    }
+
+    #[test]
+    fn test_is_under_dir_basic() {
+        assert!(is_under_dir(r"C:\Repos\Shared\Sql\file.cs", r"C:\Repos\Shared"));
+        assert!(is_under_dir(r"C:\Repos\Shared\Sql\file.cs", r"C:\Repos\Shared\Sql"));
+        assert!(is_under_dir("C:/Repos/Shared/Sql/file.cs", "C:/Repos/Shared"));
+    }
+
+    #[test]
+    fn test_is_under_dir_case_insensitive() {
+        assert!(is_under_dir(r"C:\REPOS\shared\Sql\file.cs", r"C:\Repos\Shared"));
+        assert!(is_under_dir(r"c:\repos\shared\sql\file.cs", r"C:\REPOS\SHARED"));
+    }
+
+    #[test]
+    fn test_is_under_dir_not_prefix_of_different_dir() {
+        // C:\Repos\SharedExtra should NOT match C:\Repos\Shared
+        assert!(!is_under_dir(r"C:\Repos\SharedExtra\file.cs", r"C:\Repos\Shared"));
+    }
+
+    #[test]
+    fn test_is_under_dir_exact_match() {
+        // Exact directory match — file directly in the dir
+        assert!(is_under_dir(r"C:\Repos\Shared\file.cs", r"C:\Repos\Shared"));
+    }
+
+    #[test]
+    fn test_validate_search_dir_exact_match() {
+        // Use temp dirs that actually exist for canonicalize to work
+        let tmp = std::env::temp_dir();
+        let tmp_str = tmp.to_string_lossy().to_string();
+        let result = validate_search_dir(&tmp_str, &tmp_str);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none(), "Exact match should return None (no filter)");
+    }
+
+    #[test]
+    fn test_validate_search_dir_subdirectory() {
+        // Create a temp subdirectory
+        let tmp = std::env::temp_dir().join("search_test_subdir_val");
+        std::fs::create_dir_all(&tmp).unwrap();
+        let parent = std::env::temp_dir();
+        let result = validate_search_dir(
+            &tmp.to_string_lossy(),
+            &parent.to_string_lossy(),
+        );
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_some(), "Subdirectory should return Some(filter)");
+        let _ = std::fs::remove_dir(&tmp);
+    }
+
+    #[test]
+    fn test_validate_search_dir_outside_rejects() {
+        // Two unrelated directories
+        let tmp1 = std::env::temp_dir();
+        let result = validate_search_dir(r"Z:\nonexistent\other", &tmp1.to_string_lossy());
+        assert!(result.is_err(), "Unrelated directory should be rejected");
+        assert!(result.unwrap_err().contains("Server started with --dir"));
+    }
+
+    #[test]
+    fn test_grep_with_subdir_filter() {
+        // Build a context with files in different subdirectories
+        let tmp = std::env::temp_dir().join("search_test_grep_subdir");
+        let sub_a = tmp.join("subA");
+        let sub_b = tmp.join("subB");
+        std::fs::create_dir_all(&sub_a).unwrap();
+        std::fs::create_dir_all(&sub_b).unwrap();
+        std::fs::write(sub_a.join("hello.txt"), "OneLakeCatalog usage here").unwrap();
+        std::fs::write(sub_b.join("other.txt"), "OneLakeCatalog other usage").unwrap();
+
+        let index = build_content_index(&ContentIndexArgs {
+            dir: tmp.to_string_lossy().to_string(),
+            ext: "txt".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false,
+            threads: 1,
+            min_token_len: 2,
+        });
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(index)),
+            def_index: None,
+            server_dir: tmp.to_string_lossy().to_string(),
+            server_ext: "txt".to_string(),
+            metrics: false,
+            index_base: tmp.clone(),
+        };
+
+        // Search without dir filter — should find both files
+        let result_all = handle_search_grep(&ctx, &json!({
+            "terms": "onelakecatalog"
+        }));
+        assert!(!result_all.is_error);
+        let output_all: Value = serde_json::from_str(&result_all.content[0].text).unwrap();
+        assert_eq!(output_all["summary"]["totalFiles"].as_u64().unwrap(), 2);
+
+        // Search with dir filter to subA — should find only 1 file
+        let result_sub = handle_search_grep(&ctx, &json!({
+            "terms": "onelakecatalog",
+            "dir": sub_a.to_string_lossy().to_string()
+        }));
+        assert!(!result_sub.is_error, "Subdirectory search should succeed");
+        let output_sub: Value = serde_json::from_str(&result_sub.content[0].text).unwrap();
+        assert_eq!(output_sub["summary"]["totalFiles"].as_u64().unwrap(), 1);
+        let path = output_sub["files"][0]["path"].as_str().unwrap();
+        assert!(path.contains("subA"), "Result should be from subA, got: {}", path);
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_grep_rejects_outside_dir() {
+        let tmp = std::env::temp_dir().join("search_test_grep_reject");
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let index = ContentIndex {
+            root: tmp.to_string_lossy().to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![],
+            index: HashMap::new(),
+            file_token_counts: vec![],
+            total_tokens: 0,
+            extensions: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(index)),
+            def_index: None,
+            server_dir: tmp.to_string_lossy().to_string(),
+            server_ext: "cs".to_string(),
+            metrics: false,
+            index_base: tmp.clone(),
+        };
+
+        let result = handle_search_grep(&ctx, &json!({
+            "terms": "test",
+            "dir": r"Z:\some\other\path"
+        }));
+        assert!(result.is_error, "Should reject directory outside server dir");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

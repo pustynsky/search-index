@@ -492,13 +492,15 @@ search serve --dir C:\Projects --ext cs --watch --definitions --metrics
            "--dir",
            "C:\\Projects\\MyApp",
            "--ext",
-           "cs",
+           "cs,csproj,xml,config",
            "--watch"
          ]
        }
      }
    }
    ```
+
+   > **Tip:** Include non-code file extensions like `csproj`, `xml`, `config`, `manifestxml` in `--ext` to search NuGet dependencies, project settings, connection strings, and other configuration files alongside your code.
 
 4. **Restart VS Code** — the MCP server starts automatically. Your AI agent (Copilot, Roo, Claude) now has access to all 9 MCP tools: `search_grep`, `search_definitions`, `search_callers`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_reindex_definitions`, and `search_help`. The server also sends an `instructions` field during MCP initialization with best practices for tool selection.
 

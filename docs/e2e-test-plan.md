@@ -1073,6 +1073,86 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
+### T41: `grep` — Non-code file search (csproj, xml, config)
+
+**Setup:**
+
+Create a temporary directory with a `.csproj` file:
+
+```powershell
+$tmp = New-Item -ItemType Directory -Path "$env:TEMP\search_noncode_test_$(Get-Random)"
+@'
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
+    <PackageReference Include="Serilog" Version="3.1.1" />
+  </ItemGroup>
+</Project>
+'@ | Set-Content "$tmp\TestProject.csproj"
+cargo run -- content-index -d $tmp -e csproj
+```
+
+**Command:**
+
+```powershell
+cargo run -- grep "Newtonsoft.Json" -d $tmp -e csproj
+```
+
+**Expected:**
+
+- Exit code: 0
+- stdout: `TestProject.csproj` listed as a match
+- File contains the NuGet package reference
+
+**Cleanup:**
+
+```powershell
+Remove-Item -Recurse -Force $tmp
+```
+
+**Validates:** `search_grep` works with non-code file extensions like `.csproj`. Users can search NuGet dependencies, XML configurations, and other non-code files by including the appropriate extension in `--ext`.
+
+---
+
+### T41a: `serve` — MCP search_grep with ext='csproj' override
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"Newtonsoft.Json","ext":"csproj"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $tmp --ext csproj
+```
+
+**Expected:**
+
+- JSON-RPC response with matching file(s) containing `Newtonsoft.Json`
+- `ext` parameter override filters to `.csproj` files only
+
+**Validates:** MCP `search_grep` `ext` parameter works with non-code extensions.
+
+---
+
+### T41b: `tips` / `search_help` — Non-code file tip present
+
+**Command (CLI):**
+
+```powershell
+cargo run -- tips
+```
+
+**Expected:**
+
+- Output contains tip about searching non-code file types (XML, csproj, config)
+- Mentions `ext='csproj'` or similar example
+
+**Validates:** The new tip for non-code file search is visible in CLI output and MCP `search_help`.
+
+---
+
 
 ## Automation Script
 
@@ -1190,3 +1270,43 @@ if ($failed -gt 0) { exit 1 }
 - ✅ Before creating a PR
 - ✅ After merging a large PR
 - ✅ When switching Rust toolchain versions
+
+
+### T30: `serve` — MCP search_grep with subdirectory `dir` parameter
+
+**Scenario:** When the MCP server is started with `--dir C:\Repos\Shared`, a `search_grep` call
+with `dir` set to a subdirectory (e.g., `C:\Repos\Shared\Sql\CloudBI`) should succeed and
+return only files within that subdirectory. Previously this returned an error.
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"main","dir":"src/mcp"}}}'
+) -join "`n"
+$msgs | cargo run -- serve -d . -e rs 2>$null
+```
+
+**Expected:**
+
+- No error about "For other directories, start another server instance"
+- Results contain only files whose path includes `src/mcp`
+- `summary.totalFiles` ≥ 1
+
+**Negative test — directory outside server dir:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"main","dir":"Z:\\other\\path"}}}'
+) -join "`n"
+$msgs | cargo run -- serve -d . -e rs 2>$null
+```
+
+**Expected:**
+
+- Response contains error: "Server started with --dir"
+- Tool result `isError: true`

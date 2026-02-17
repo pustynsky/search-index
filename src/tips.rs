@@ -93,6 +93,11 @@ pub fn tips() -> Vec<Tip> {
             why: "search_grep with countOnly=true returns ~46 tokens (counts only) vs 265+ for full results. Perfect for 'how many files use X?'.",
             example: "search grep \"HttpClient\" -e cs --count-only  |  MCP: terms='HttpClient', countOnly=true",
         },
+        Tip {
+            rule: "Search ANY indexed file type: XML, csproj, config, etc.",
+            why: "search_grep works with all file extensions passed to --ext. Use ext='csproj' to find NuGet dependencies, ext='xml,config,manifestxml' for configuration values.",
+            example: "search grep \"Newtonsoft.Json\" -e csproj  |  MCP: terms='Newtonsoft.Json', ext='csproj'",
+        },
     ]
 }
 
