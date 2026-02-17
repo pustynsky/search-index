@@ -158,6 +158,56 @@ catch {
     Write-Host "FAILED ($($_.Exception.Message))" -ForegroundColor Red
     $script:failed++
 }
+# T28: serve — search_grep defaults to substring mode
+$script:total++
+Write-Host -NoNewline "  T28 serve-grep-substring-default ... "
+try {
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokenize"}}}'
+    ) -join "`n"
+    $output = echo $msgs | cmd /c "$Binary serve --dir $TestDir --ext $TestExt 2>NUL"
+    $outputStr = $output -join "`n"
+    if ($outputStr -match 'substring') {
+        Write-Host "OK (substring mode default)" -ForegroundColor Green
+        $script:passed++
+    }
+    else {
+        Write-Host "FAILED (searchMode should contain 'substring' by default)" -ForegroundColor Red
+        $script:failed++
+    }
+}
+catch {
+    Write-Host "FAILED ($($_.Exception.Message))" -ForegroundColor Red
+    $script:failed++
+}
+
+# T29: serve — regex auto-disables substring (no error)
+$script:total++
+Write-Host -NoNewline "  T29 serve-grep-regex-no-conflict ... "
+try {
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":".*stale.*","regex":true}}}'
+    ) -join "`n"
+    $output = echo $msgs | cmd /c "$Binary serve --dir $TestDir --ext $TestExt 2>NUL"
+    $outputStr = $output -join "`n"
+    if ($outputStr -match 'totalFiles' -and -not ($outputStr -match 'isError.*true')) {
+        Write-Host "OK (regex auto-disabled substring)" -ForegroundColor Green
+        $script:passed++
+    }
+    else {
+        Write-Host "FAILED (regex+default-substring should not error)" -ForegroundColor Red
+        $script:failed++
+    }
+}
+catch {
+    Write-Host "FAILED ($($_.Exception.Message))" -ForegroundColor Red
+    $script:failed++
+}
+
 
 # T30: serve — search_help
 $script:total++

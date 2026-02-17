@@ -44,7 +44,19 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
     let mode_and = args.get("mode").and_then(|v| v.as_str()) == Some("and");
     let use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
     let use_phrase = args.get("phrase").and_then(|v| v.as_bool()).unwrap_or(false);
-    let use_substring = args.get("substring").and_then(|v| v.as_bool()).unwrap_or(false);
+    // Default to substring=true so compound C# identifiers (ICatalogQueryManager,
+    // m_catalogQueryManager) are always found.  Auto-disable when regex/phrase is used.
+    let use_substring = if use_regex || use_phrase {
+        // If user explicitly asked for substring AND regex/phrase, that's a conflict
+        if args.get("substring").and_then(|v| v.as_bool()) == Some(true) {
+            return ToolCallResult::error(
+                "substring is mutually exclusive with regex and phrase".to_string(),
+            );
+        }
+        false
+    } else {
+        args.get("substring").and_then(|v| v.as_bool()).unwrap_or(true)
+    };
     let show_lines = args.get("showLines").and_then(|v| v.as_bool()).unwrap_or(false);
     let context_lines = args.get("contextLines").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
     let max_results = args.get("maxResults").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
@@ -60,12 +72,7 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
 
     let search_start = Instant::now();
 
-    // --- Mutual exclusivity check ----------------------------
-    if use_substring && (use_regex || use_phrase) {
-        return ToolCallResult::error(
-            "substring is mutually exclusive with regex and phrase".to_string(),
-        );
-    }
+    // (Mutual exclusivity check is now handled above during use_substring init)
 
     // --- Substring: check if trigram index needs rebuild -----
     if use_substring {

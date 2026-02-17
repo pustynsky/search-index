@@ -44,9 +44,9 @@ pub fn tips() -> Vec<Tip> {
             example: "search grep \"ServiceProvider,IUserService\" -e cs --all  |  MCP: terms='...', mode='and'",
         },
         Tip {
-            rule: "C#/Java substring search: use substring=true",
-            why: "Default exact-token mode won't find 'UserService' inside 'DeleteUserServiceCacheEntry'. Trigram index, ~1ms.",
-            example: "search grep \"UserService\" -e cs --substring  |  MCP: terms='UserService', substring=true",
+            rule: "Substring search is ON by default",
+            why: "search_grep defaults to substring=true so compound identifiers (IUserService, m_userService) are always found. Use substring=false for exact-token-only matching. Auto-disabled when regex or phrase is used.",
+            example: "Default: terms='UserService' finds IUserService, m_userService. Exact only: terms='UserService', substring=false",
         },
         Tip {
             rule: "Phrase search: exact multi-word match",
@@ -116,12 +116,12 @@ pub fn performance_tiers() -> Vec<PerfTier> {
         PerfTier {
             name: "Instant",
             range: "<1ms",
-            operations: &["search_grep exact/OR/AND", "search_callers", "search_definitions baseType/attribute"],
+            operations: &["search_grep (substring default)", "search_callers", "search_definitions baseType/attribute"],
         },
         PerfTier {
             name: "Fast",
             range: "1-10ms",
-            operations: &["search_grep substring/showLines", "search_definitions containsLine"],
+            operations: &["search_grep showLines", "search_definitions containsLine"],
         },
         PerfTier {
             name: "Quick",

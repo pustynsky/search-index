@@ -8,6 +8,8 @@ output format, and all feature flags (including substring search via trigram ind
 
 **Run these tests after every major refactoring, before merging PRs, and after dependency upgrades.**
 
+> **Note:** MCP `search_grep` defaults to `substring: true` since v0.2. Tests that expect exact-token behavior must pass `substring: false` explicitly.
+
 ## Configuration
 
 | Variable   | Default              | Description                                                    |
@@ -1045,6 +1047,54 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 **Validates:** Mutual exclusivity between substring and phrase modes.
 
 **Status:** ✅ Implemented (covered by `e2e_substring_mutually_exclusive_with_phrase` unit test)
+
+---
+
+### T37a: `serve` — search_grep defaults to substring mode (no explicit param)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokenize"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `searchMode` containing `"substring"` (not `"or"` or `"and"`)
+- Results should include compound token matches (e.g., `"tokenize_basic"` if present)
+
+**Validates:** `substring` defaults to `true` when no explicit `substring` parameter is passed. This ensures compound C# identifiers (e.g., `ICatalogQueryManager`, `m_catalogQueryManager`) are always found without the LLM needing to remember to pass `substring: true`.
+
+**Status:** ✅ Implemented (covered by `test_substring_default_finds_compound_identifiers` unit test + T28 in e2e-test.ps1)
+
+---
+
+### T37b: `serve` — regex auto-disables substring (no error)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":".*stale.*","regex":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with search results (NOT an error)
+- `searchMode` should NOT contain `"substring"` (regex is used instead)
+
+**Validates:** When `regex: true` is passed without explicit `substring: false`, substring is auto-disabled (not an error). Only explicit `substring: true` + `regex: true` should error.
+
+**Status:** ✅ Implemented (covered by `test_regex_auto_disables_substring` unit test + T29 in e2e-test.ps1)
 
 ---
 

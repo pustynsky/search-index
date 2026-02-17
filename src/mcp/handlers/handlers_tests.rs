@@ -159,7 +159,7 @@ fn test_dispatch_grep_with_results() {
         metrics: false,
         index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
     };
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
+    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient", "substring": false}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1);
@@ -1278,6 +1278,81 @@ fn cleanup_tmp(tmp_dir: &std::path::Path) { let _ = std::fs::remove_dir_all(tmp_
     for file in files { assert!(file["score"].is_number()); }
     cleanup_tmp(&tmp);
 }
+// --- Substring-by-default tests (E2E baseline comparison fix) ---
+
+#[test] fn test_substring_default_finds_compound_identifiers() {
+    // Simulate C# codebase: "catalogquerymanager" and "icatalogquerymanager" are separate tokens
+    let ctx = make_substring_ctx(
+        vec![
+            ("catalogquerymanager", 0, vec![39]),
+            ("icatalogquerymanager", 1, vec![5]),
+            ("m_catalogquerymanager", 2, vec![12]),
+        ],
+        vec!["C:\\test\\CatalogQueryManager.cs", "C:\\test\\ICatalogQueryManager.cs", "C:\\test\\Controller.cs"],
+    );
+    // Search WITHOUT passing substring param — should default to substring=true
+    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "CatalogQueryManager"}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    // Must find ALL 3 files (exact + I-prefix + m_-prefix)
+    assert_eq!(output["summary"]["totalFiles"], 3,
+        "Default substring=true should find compound identifiers. Got: {}", output);
+    // searchMode should indicate substring
+    let mode = output["summary"]["searchMode"].as_str().unwrap();
+    assert!(mode.starts_with("substring"), "Expected substring search mode, got: {}", mode);
+}
+
+#[test] fn test_substring_false_misses_compound_identifiers() {
+    // Same setup, but explicitly substring=false — should only find exact token
+    let ctx = make_substring_ctx(
+        vec![
+            ("catalogquerymanager", 0, vec![39]),
+            ("icatalogquerymanager", 1, vec![5]),
+            ("m_catalogquerymanager", 2, vec![12]),
+        ],
+        vec!["C:\\test\\CatalogQueryManager.cs", "C:\\test\\ICatalogQueryManager.cs", "C:\\test\\Controller.cs"],
+    );
+    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "catalogquerymanager", "substring": false}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    // Exact mode: only finds the exact token, not I* or m_*
+    assert_eq!(output["summary"]["totalFiles"], 1,
+        "substring=false should only find exact token match. Got: {}", output);
+}
+
+#[test] fn test_regex_auto_disables_substring() {
+    // regex=true should auto-disable substring (no error)
+    let ctx = make_substring_ctx(
+        vec![("httpclient", 0, vec![5])],
+        vec!["C:\\test\\Program.cs"],
+    );
+    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "http.*", "regex": true}));
+    assert!(!result.is_error, "regex=true should auto-disable substring, not error");
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    // Should use regex mode, not substring
+    assert_eq!(output["summary"]["totalFiles"], 1);
+}
+
+#[test] fn test_phrase_auto_disables_substring() {
+    // phrase=true should auto-disable substring (no error)
+    let ctx = make_substring_ctx(
+        vec![("new", 0, vec![5]), ("httpclient", 0, vec![5])],
+        vec!["C:\\test\\Program.cs"],
+    );
+    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "new httpclient", "phrase": true}));
+    assert!(!result.is_error, "phrase=true should auto-disable substring, not error");
+}
+
+#[test] fn test_explicit_substring_true_with_regex_errors() {
+    // Explicit substring=true + regex=true should still error (user conflict)
+    let ctx = make_substring_ctx(
+        vec![("httpclient", 0, vec![5])],
+        vec!["C:\\test\\Program.cs"],
+    );
+    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "http", "substring": true, "regex": true}));
+    assert!(result.is_error, "Explicit substring=true + regex=true should error");
+}
+
 
 // --- Metrics injection tests ---
 
@@ -1627,7 +1702,8 @@ fn test_response_truncation_triggers_on_large_result() {
     // Request with maxResults=0 (unlimited) to get all 500 files
     let result = dispatch_tool(&ctx, "search_grep", &json!({
         "terms": "common",
-        "maxResults": 0
+        "maxResults": 0,
+        "substring": false
     }));
 
     assert!(!result.is_error);
@@ -1685,7 +1761,7 @@ fn test_response_truncation_does_not_trigger_on_small_result() {
         index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
     };
 
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "mytoken"}));
+    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "mytoken", "substring": false}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
 

@@ -289,15 +289,17 @@ search grep "HttpClient" -d C:\Projects -e cs
 - TF-IDF scores are summed across matching terms — files matching more terms rank higher
 - Output shows `X/N terms` indicating how many of the search terms were found in each file
 
-**Substring search (`--substring`):**
+**Substring search (default in MCP, `--substring` in CLI):**
 
-- Finds tokens that **contain** the search term as a substring
-- Uses a trigram index for fast matching (~0.07ms) — much faster than regex scanning (~12–44ms)
+- **Default in MCP mode** — compound C# identifiers like `IUserService`, `m_userService`, `UserServiceFactory` are automatically found when searching for `UserService`. Auto-disabled when `regex` or `phrase` is used.
+- In CLI mode, use the `--substring` flag explicitly
+- Uses a trigram index for fast matching (~1ms) — much faster than regex scanning (~12–44ms)
 - Solves the compound-identifier problem: searching `DatabaseConnection` finds the token `databaseconnectionfactory` even though it's stored as a single token in the inverted index
+- Results sorted by TF-IDF: exact matches rank highest, compound matches lower
 - For queries shorter than 4 characters, a warning is included in the response (trigram matching is less selective for very short queries)
 - Mutually exclusive with `--regex` and `--phrase`
-- Example: `search grep "DatabaseConn" -d C:\Projects -e cs --substring`
-- In MCP mode: `{ "terms": "DatabaseConn", "substring": true }`
+- CLI example: `search grep "DatabaseConn" -d C:\Projects -e cs --substring`
+- MCP example: `{ "terms": "DatabaseConn" }` (substring is on by default; use `"substring": false` for exact-token-only)
 - Response includes `matchedTokens` field listing which index tokens matched the substring
 
 **Regex search (`-r, --regex`):**
