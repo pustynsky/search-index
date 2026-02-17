@@ -1356,3 +1356,56 @@ $msgs | cargo run -- serve -d . -e rs 2>$null
 
 - Response contains error: "Server started with --dir"
 - Tool result `isError: true`
+
+
+---
+
+### T42: `serve` — Response size truncation for broad queries
+
+**Scenario:** When a search query returns massive results (e.g., short substring query matching
+thousands of files), the MCP server automatically truncates the JSON response to stay within
+~32KB to prevent filling the LLM context window. Truncation is progressive:
+1. Cap `lines` arrays per file to 10 entries
+2. Remove `lineContent` blocks
+3. Cap `matchedTokens` to 20 entries
+4. Remove `lines` arrays entirely
+5. Reduce file count
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"fn","substring":true}}}'
+) -join "`n"
+$msgs | cargo run -- serve -d . -e rs --metrics 2>$null
+```
+
+**Expected:**
+
+- `summary.responseTruncated` = `true`
+- `summary.truncationReason` contains truncation phases applied
+- `summary.originalResponseBytes` > 32768
+- `summary.responseBytes` ≤ ~33000 (under budget with small metadata overhead)
+- `summary.hint` contains advice to use `countOnly` or narrow filters
+- `summary.totalFiles` and `summary.totalOccurrences` reflect the FULL result set (not truncated)
+- The `files` array is reduced from 50 to a smaller number
+
+**Negative test — small query is NOT truncated:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"truncate_large_response"}}}'
+) -join "`n"
+$msgs | cargo run -- serve -d . -e rs --metrics 2>$null
+```
+
+**Expected:**
+
+- `summary.responseTruncated` is absent (response under budget)
+- `summary.responseBytes` < 32768
+
+**Validates:** Progressive response truncation, LLM context budget protection, summary metadata accuracy.

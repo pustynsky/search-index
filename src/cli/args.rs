@@ -225,6 +225,11 @@ pub struct ServeArgs {
     /// Include performance metrics in every tool response summary.
     #[arg(long)]
     pub metrics: bool,
+
+    /// Maximum response size in KB before truncation (0 = no limit, default: 16).
+    /// Prevents large search results from filling the LLM context window.
+    #[arg(long, default_value = "16")]
+    pub max_response_kb: usize,
 }
 
 #[derive(Parser, Debug)]

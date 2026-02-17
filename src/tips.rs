@@ -103,6 +103,11 @@ pub fn tips() -> Vec<Tip> {
             why: "search_grep / content-index use a language-agnostic tokenizer -- works with any text file (C#, Rust, Python, JS, XML, etc.). search_definitions / search_callers / def-index use tree-sitter AST parsing -- currently C# only.",
             example: "search grep works on -e rs,py,js,xml,json | search_definitions/search_callers require C# (.cs) files",
         },
+        Tip {
+            rule: "Response truncation: large results are auto-capped at ~16KB",
+            why: "Broad queries (short substring, common tokens) can return thousands of files. The server auto-truncates responses to ~16KB (~4K tokens) to avoid filling LLM context. summary.totalFiles always shows the FULL count. Use countOnly=true or narrow with dir/ext/exclude to get focused results.",
+            example: "If responseTruncated=true appears, narrow your query: add ext, dir, excludeDir, or use countOnly=true. Server flag --max-response-kb adjusts the limit (0=unlimited).",
+        },
     ]
 }
 

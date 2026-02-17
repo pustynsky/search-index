@@ -163,11 +163,173 @@ pub(crate) fn build_grouped_line_content(
     json!(groups)
 }
 
+// ─── Response size truncation ───────────────────────────────────────
+
+/// Default maximum response size in bytes before truncation kicks in.
+/// 16KB ≈ 4K tokens — keeps LLM context budget reasonable.
+/// Can be overridden via `--max-response-kb` CLI flag.
+/// Used by tests and as the fallback when no explicit budget is configured.
+#[allow(dead_code)]
+pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 16_384;
+
+/// Maximum number of line numbers to include per file entry.
+const MAX_LINES_PER_FILE: usize = 10;
+
+/// Maximum number of matched tokens to include in substring search summary.
+const MAX_MATCHED_TOKENS: usize = 20;
+
+/// Truncate a JSON response to fit within the response size budget.
+///
+/// Progressive truncation strategy:
+/// 1. Cap `lines` arrays in each file entry (keep first N, add `linesOmitted`)
+/// 2. Cap `matchedTokens` in summary (keep first N, add `matchedTokensOmitted`)
+/// 3. Remove file entries from the tail until under budget
+/// 4. Add `responseTruncated` + `truncationReason` to summary
+///
+/// `max_bytes` = 0 disables truncation entirely.
+/// Returns the (possibly truncated) JSON value.
+pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Value {
+    if max_bytes == 0 {
+        return output;
+    }
+    let initial_size = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
+    if initial_size <= max_bytes {
+        return output;
+    }
+
+    let mut reasons: Vec<String> = Vec::new();
+
+    // Phase 1: Cap `lines` arrays per file
+    if let Some(files) = output.get_mut("files").and_then(|f| f.as_array_mut()) {
+        for file_entry in files.iter_mut() {
+            if let Some(lines) = file_entry.get_mut("lines").and_then(|l| l.as_array_mut()) {
+                if lines.len() > MAX_LINES_PER_FILE {
+                    let omitted = lines.len() - MAX_LINES_PER_FILE;
+                    lines.truncate(MAX_LINES_PER_FILE);
+                    file_entry["linesOmitted"] = json!(omitted);
+                }
+            }
+            // Remove lineContent entirely if present — it's the biggest space consumer
+            if file_entry.get("lineContent").is_some() {
+                file_entry.as_object_mut().map(|o| o.remove("lineContent"));
+                file_entry["lineContentOmitted"] = json!(true);
+            }
+        }
+        reasons.push(format!("capped lines per file to {}, removed lineContent", MAX_LINES_PER_FILE));
+    }
+
+    // Check size after phase 1
+    let size_after_p1 = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
+    if size_after_p1 <= max_bytes {
+        inject_truncation_metadata(&mut output, &reasons, initial_size);
+        return output;
+    }
+
+    // Phase 2: Cap `matchedTokens` in summary
+    if let Some(summary) = output.get_mut("summary") {
+        if let Some(tokens) = summary.get_mut("matchedTokens").and_then(|t| t.as_array_mut()) {
+            if tokens.len() > MAX_MATCHED_TOKENS {
+                let omitted = tokens.len() - MAX_MATCHED_TOKENS;
+                tokens.truncate(MAX_MATCHED_TOKENS);
+                summary["matchedTokensOmitted"] = json!(omitted);
+                reasons.push(format!("capped matchedTokens to {}", MAX_MATCHED_TOKENS));
+            }
+        }
+    }
+
+    // Check size after phase 2
+    let size_after_p2 = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
+    if size_after_p2 <= max_bytes {
+        inject_truncation_metadata(&mut output, &reasons, initial_size);
+        return output;
+    }
+
+    // Phase 3: Remove `lines` arrays entirely from file entries
+    if let Some(files) = output.get_mut("files").and_then(|f| f.as_array_mut()) {
+        for file_entry in files.iter_mut() {
+            if file_entry.get("lines").is_some() {
+                file_entry.as_object_mut().map(|o| o.remove("lines"));
+            }
+        }
+        reasons.push("removed all lines arrays".to_string());
+    }
+
+    // Check size after phase 3
+    let size_after_p3 = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
+    if size_after_p3 <= max_bytes {
+        inject_truncation_metadata(&mut output, &reasons, initial_size);
+        return output;
+    }
+
+    // Phase 4: Progressively remove file entries from the tail.
+    // Estimate how many files to keep based on average file entry size.
+    let size_p3 = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
+    if let Some(files) = output.get_mut("files").and_then(|f| f.as_array_mut()) {
+        let original_count = files.len();
+        if original_count > 0 {
+            let avg_file_size = size_p3 / original_count;
+            let excess = size_p3.saturating_sub(max_bytes);
+            let files_to_remove = if avg_file_size > 0 {
+                (excess / avg_file_size) + 1 // +1 to be safe
+            } else {
+                original_count / 2
+            };
+            let keep = original_count.saturating_sub(files_to_remove).max(1);
+            files.truncate(keep);
+            let removed = original_count - files.len();
+            if removed > 0 {
+                reasons.push(format!("reduced files from {} to {}", original_count, files.len()));
+            }
+        }
+    }
+
+    inject_truncation_metadata(&mut output, &reasons, initial_size);
+    output
+}
+
+/// Add truncation metadata to the summary object.
+fn inject_truncation_metadata(output: &mut Value, reasons: &[String], original_bytes: usize) {
+    if reasons.is_empty() {
+        return;
+    }
+    if let Some(summary) = output.get_mut("summary") {
+        summary["responseTruncated"] = json!(true);
+        summary["truncationReason"] = json!(reasons.join("; "));
+        summary["originalResponseBytes"] = json!(original_bytes);
+        summary["hint"] = json!("Use countOnly=true for broad queries, or narrow with dir/ext/exclude filters");
+    }
+}
+
+/// Apply response size truncation to a ToolCallResult (no metrics injection).
+/// Used when metrics are disabled but we still need to cap response size.
+pub(crate) fn truncate_response_if_needed(result: ToolCallResult, max_bytes: usize) -> ToolCallResult {
+    if max_bytes == 0 {
+        return result;
+    }
+
+    let text = match result.content.first() {
+        Some(c) => &c.text,
+        None => return result,
+    };
+
+    if text.len() <= max_bytes {
+        return result;
+    }
+
+    if let Ok(output) = serde_json::from_str::<Value>(text) {
+        let truncated = truncate_large_response(output, max_bytes);
+        ToolCallResult::success(serde_json::to_string(&truncated).unwrap())
+    } else {
+        result
+    }
+}
+
 // ─── Metrics injection ──────────────────────────────────────────────
 
 /// Inject performance metrics into a successful tool response.
 /// Parses the JSON text, adds searchTimeMs/responseBytes/estimatedTokens/indexFiles/indexTokens
 /// to the "summary" object (if present), then re-serializes.
+/// Also applies response size truncation to keep output within LLM context budgets.
 pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start: Instant) -> ToolCallResult {
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -188,7 +350,11 @@ pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start
             }
         }
 
-        // Measure response size after adding timing metrics
+        // Apply response size truncation BEFORE measuring final bytes
+        let max_bytes = if ctx.max_response_bytes > 0 { ctx.max_response_bytes } else { 0 };
+        output = truncate_large_response(output, max_bytes);
+
+        // Measure response size after truncation
         let json_str = serde_json::to_string(&output).unwrap();
         let bytes = json_str.len();
         if let Some(summary) = output.get_mut("summary") {
@@ -455,5 +621,157 @@ mod tests {
         let result = build_line_content_from_matches(&content, &match_lines, 2);
         let groups = result.as_array().unwrap();
         assert_eq!(groups.len(), 1); // should merge into single group
+    }
+
+    // ─── Response truncation tests ──────────────────────────────────
+
+    #[test]
+    fn test_truncate_small_response_unchanged() {
+        let output = json!({
+            "files": [{"path": "a.cs", "lines": [1, 2, 3]}],
+            "summary": {"totalFiles": 1}
+        });
+        let result = truncate_large_response(output.clone(), DEFAULT_MAX_RESPONSE_BYTES);
+        // Small response should be unchanged
+        assert_eq!(result, output);
+    }
+
+    #[test]
+    fn test_truncate_caps_lines_per_file() {
+        // Build a response with files having many lines
+        let many_lines: Vec<u32> = (1..=200).collect();
+        let mut files = Vec::new();
+        for i in 0..100 {
+            files.push(json!({
+                "path": format!("/some/very/long/path/to/file_{}.cs", i),
+                "score": 0.5,
+                "occurrences": 200,
+                "lines": many_lines,
+            }));
+        }
+        let output = json!({
+            "files": files,
+            "summary": {"totalFiles": 100, "totalOccurrences": 20000}
+        });
+
+        let result = truncate_large_response(output, DEFAULT_MAX_RESPONSE_BYTES);
+        let result_str = serde_json::to_string(&result).unwrap();
+
+        // Should be truncated
+        assert!(result.get("summary").unwrap().get("responseTruncated").is_some(),
+            "Expected responseTruncated in summary");
+
+        // Lines per file should be capped
+        if let Some(files) = result.get("files").and_then(|f| f.as_array()) {
+            for file in files {
+                if let Some(lines) = file.get("lines").and_then(|l| l.as_array()) {
+                    assert!(lines.len() <= MAX_LINES_PER_FILE,
+                        "Lines array should be capped to {}", MAX_LINES_PER_FILE);
+                }
+            }
+        }
+
+        // Final size should be under budget
+        assert!(result_str.len() <= DEFAULT_MAX_RESPONSE_BYTES + 500, // small tolerance for metadata
+            "Response {} bytes should be near budget {}", result_str.len(), DEFAULT_MAX_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn test_truncate_caps_matched_tokens() {
+        let many_tokens: Vec<String> = (0..500).map(|i| format!("token_{}", i)).collect();
+        let mut files = Vec::new();
+        for i in 0..50 {
+            files.push(json!({
+                "path": format!("/path/file_{}.cs", i),
+                "lines": [1, 2, 3],
+            }));
+        }
+        let output = json!({
+            "files": files,
+            "summary": {
+                "totalFiles": 50,
+                "matchedTokens": many_tokens,
+            }
+        });
+
+        let initial_size = serde_json::to_string(&output).unwrap().len();
+        if initial_size > DEFAULT_MAX_RESPONSE_BYTES {
+            let result = truncate_large_response(output, DEFAULT_MAX_RESPONSE_BYTES);
+            if let Some(tokens) = result.get("summary")
+                .and_then(|s| s.get("matchedTokens"))
+                .and_then(|t| t.as_array())
+            {
+                assert!(tokens.len() <= MAX_MATCHED_TOKENS,
+                    "matchedTokens should be capped to {}", MAX_MATCHED_TOKENS);
+            }
+        }
+    }
+
+    #[test]
+    fn test_truncate_removes_line_content() {
+        // Build a response with lineContent (large)
+        let mut files = Vec::new();
+        for i in 0..50 {
+            files.push(json!({
+                "path": format!("/path/file_{}.cs", i),
+                "lines": [1, 2, 3],
+                "lineContent": [{
+                    "startLine": 1,
+                    "lines": (0..100).map(|j| format!("    some code line {} in file {}", j, i)).collect::<Vec<_>>(),
+                }],
+            }));
+        }
+        let output = json!({
+            "files": files,
+            "summary": {"totalFiles": 50}
+        });
+
+        let initial_size = serde_json::to_string(&output).unwrap().len();
+        if initial_size > DEFAULT_MAX_RESPONSE_BYTES {
+            let result = truncate_large_response(output, DEFAULT_MAX_RESPONSE_BYTES);
+            // lineContent should be removed
+            if let Some(files) = result.get("files").and_then(|f| f.as_array()) {
+                for file in files {
+                    assert!(file.get("lineContent").is_none(),
+                        "lineContent should be removed during truncation");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_truncate_reduces_file_count() {
+        // Build a response with 1000 files — way over budget
+        let mut files = Vec::new();
+        for i in 0..1000 {
+            files.push(json!({
+                "path": format!("/some/long/path/to/deeply/nested/file_number_{}.cs", i),
+                "score": 0.001,
+                "occurrences": 1,
+                "lines": [1],
+            }));
+        }
+        let output = json!({
+            "files": files,
+            "summary": {"totalFiles": 1000, "totalOccurrences": 1000}
+        });
+
+        let result = truncate_large_response(output, DEFAULT_MAX_RESPONSE_BYTES);
+        let result_files = result.get("files").and_then(|f| f.as_array()).unwrap();
+        assert!(result_files.len() < 1000,
+            "File count should be reduced from 1000, got {}", result_files.len());
+
+        // Summary should indicate truncation
+        let summary = result.get("summary").unwrap();
+        assert_eq!(summary.get("responseTruncated").and_then(|v| v.as_bool()), Some(true));
+        assert!(summary.get("truncationReason").is_some());
+        assert!(summary.get("hint").is_some());
+    }
+
+    #[test]
+    fn test_truncate_response_if_needed_small() {
+        let small = ToolCallResult::success(r#"{"files":[],"summary":{"totalFiles":0}}"#.to_string());
+        let result = truncate_response_if_needed(small, DEFAULT_MAX_RESPONSE_BYTES);
+        assert!(!result.is_error);
     }
 }

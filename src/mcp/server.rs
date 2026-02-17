@@ -18,6 +18,7 @@ pub fn run_server(
     server_ext: String,
     metrics: bool,
     index_base: PathBuf,
+    max_response_bytes: usize,
 ) {
     let ctx = HandlerContext {
         index,
@@ -26,6 +27,7 @@ pub fn run_server(
         server_ext,
         metrics,
         index_base,
+        max_response_bytes,
     };
 
     let stdin = io::stdin();
@@ -195,6 +197,7 @@ mod tests {
             server_ext: "cs".to_string(),
             metrics: false,
             index_base: std::path::PathBuf::from("."),
+            max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         }
     }
 

@@ -149,5 +149,6 @@ pub fn cmd_serve(args: ServeArgs) {
         }
     }
 
-    mcp::server::run_server(index, def_index, dir_str, exts_for_load, args.metrics, idx_base);
+    let max_response_bytes = if args.max_response_kb == 0 { 0 } else { args.max_response_kb * 1024 };
+    mcp::server::run_server(index, def_index, dir_str, exts_for_load, args.metrics, idx_base, max_response_bytes);
 }

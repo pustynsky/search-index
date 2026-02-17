@@ -184,6 +184,41 @@ catch {
     $script:failed++
 }
 
+# T42: serve — response size truncation for broad queries
+# Uses maxResults:0 + showLines + contextLines:5 to guarantee response > 32KB before truncation
+$script:total++
+Write-Host -NoNewline "  T42 serve-response-truncation ... "
+try {
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"fn","substring":true,"maxResults":0,"showLines":true,"contextLines":5}}}'
+    ) -join "`n"
+    $output = echo $msgs | cmd /c "$Binary serve --dir $TestDir --ext $TestExt --metrics 2>NUL"
+    $outputStr = $output -join "`n"
+
+    # Parse the tools/call response (skip initialize response)
+    $responses = $outputStr -split "`n" | Where-Object { $_ -match '"id"' }
+    $grepResponse = $responses | Where-Object { $_ -match '"id"\s*:\s*2' } | Select-Object -First 1
+
+    if ($grepResponse -and $grepResponse -match 'responseTruncated') {
+        Write-Host "OK (truncation active, size=$($grepResponse.Length) bytes)" -ForegroundColor Green
+        $script:passed++
+    }
+    else {
+        Write-Host "FAILED (responseTruncated not found in response)" -ForegroundColor Red
+        if ($grepResponse) {
+            $preview = $grepResponse.Substring(0, [Math]::Min(300, $grepResponse.Length))
+            Write-Host "    Response: $preview" -ForegroundColor DarkGray
+        }
+        $script:failed++
+    }
+}
+catch {
+    Write-Host "FAILED ($($_.Exception.Message))" -ForegroundColor Red
+    $script:failed++
+}
+
 # ASCII-safety test: verify all CLI output is pure ASCII (no Unicode box-drawing, emoji, etc.)
 # Windows cmd.exe cannot display non-ASCII characters correctly.
 function Test-AsciiSafe {

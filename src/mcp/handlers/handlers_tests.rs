@@ -101,7 +101,7 @@ fn make_empty_ctx() -> HandlerContext {
         server_dir: ".".to_string(),
         server_ext: "cs".to_string(),
         metrics: false,
-        index_base: PathBuf::from("."),
+        index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
     }
 }
 
@@ -157,7 +157,7 @@ fn test_dispatch_grep_with_results() {
         server_dir: ".".to_string(),
         server_ext: "cs".to_string(),
         metrics: false,
-        index_base: PathBuf::from("."),
+        index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
     };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
     assert!(!result.is_error);
@@ -301,7 +301,7 @@ fn make_ctx_with_defs() -> HandlerContext {
         server_dir: ".".to_string(),
         server_ext: "cs".to_string(),
         metrics: false,
-        index_base: PathBuf::from("."),
+        index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
     }
 }
 
@@ -482,7 +482,7 @@ fn test_search_callers_field_prefix_m_underscore() {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
         server_dir: ".".to_string(), server_ext: "cs".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
+        metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
     };
 
     let result = dispatch_tool(&ctx, "search_callers", &json!({
@@ -578,7 +578,7 @@ fn test_search_callers_field_prefix_underscore() {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
         server_dir: ".".to_string(), server_ext: "cs".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
+        metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
     };
 
     let result = dispatch_tool(&ctx, "search_callers", &json!({
@@ -616,7 +616,7 @@ fn test_search_callers_multi_ext_filter() {
         server_dir: ctx.server_dir.clone(),
         server_ext: "cs,xml,sql".to_string(),
         metrics: false,
-        index_base: PathBuf::from("."),
+        index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
     };
 
     let result = dispatch_tool(&multi_ext_ctx, "search_callers", &json!({
@@ -917,7 +917,7 @@ fn test_search_callers_down_class_filter() {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
         server_dir: ".".to_string(), server_ext: "cs".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
+        metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
     };
 
     let result = dispatch_tool(&ctx, "search_callers", &json!({ "method": "SearchInternalAsync", "class": "IndexSearchService", "direction": "down", "depth": 1 }));
@@ -971,7 +971,7 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
     HandlerContext {
         index: Arc::new(RwLock::new(content_index)), def_index: None,
         server_dir: ".".to_string(), server_ext: "cs".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
+        metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
     }
 }
 
@@ -1068,7 +1068,7 @@ fn test_substring_search_trigram_dirty_triggers_rebuild() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)), def_index: None,
         server_dir: ".".to_string(), server_ext: "cs".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
+        metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
     };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "httpcli", "substring": true}));
     assert!(!result.is_error);
@@ -1117,6 +1117,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
         index: Arc::new(RwLock::new(content_index)), def_index: None,
         server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "cs".to_string(),
         metrics: false, index_base: tmp_dir.join(".index"),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
     };
     (ctx, tmp_dir)
 }
@@ -1199,7 +1200,7 @@ fn cleanup_tmp(tmp_dir: &std::path::Path) { let _ = std::fs::remove_dir_all(tmp_
     assert_eq!(loaded.files.len(), orig_files);
     assert_eq!(loaded.index.len(), orig_tokens);
     assert_eq!(loaded.trigram.trigram_map.len(), orig_trigrams);
-    let loaded_ctx = HandlerContext { index: Arc::new(RwLock::new(loaded)), def_index: None, server_dir: root, server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from(".") };
+    let loaded_ctx = HandlerContext { index: Arc::new(RwLock::new(loaded)), def_index: None, server_dir: root, server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES };
     let result = dispatch_tool(&loaded_ctx, "search_grep", &json!({"terms": "databaseconn", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1284,7 +1285,7 @@ fn cleanup_tmp(tmp_dir: &std::path::Path) { let _ = std::fs::remove_dir_all(tmp_
     let mut idx = HashMap::new();
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let index = ContentIndex { root: ".".to_string(), created_at: 0, max_age_secs: 3600, files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from(".") };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"].get("responseBytes").is_none());
@@ -1295,7 +1296,7 @@ fn cleanup_tmp(tmp_dir: &std::path::Path) { let _ = std::fs::remove_dir_all(tmp_
     let mut idx = HashMap::new();
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let index = ContentIndex { root: ".".to_string(), created_at: 0, max_age_secs: 3600, files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: true, index_base: PathBuf::from(".") };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: true, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["searchTimeMs"].as_f64().is_some());
@@ -1315,7 +1316,7 @@ fn cleanup_tmp(tmp_dir: &std::path::Path) { let _ = std::fs::remove_dir_all(tmp_
     let mut idx = HashMap::new();
     idx.insert("foo".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
     let index = ContentIndex { root: ".".to_string(), created_at: 0, max_age_secs: 3600, files: vec!["test.cs".to_string()], index: idx, total_tokens: 10, extensions: vec!["cs".to_string()], file_token_counts: vec![10], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: true, index_base: PathBuf::from(".") };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: true, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "foo"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["searchTimeMs"].as_f64().unwrap() >= 0.0);
@@ -1339,7 +1340,7 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES };
     (ctx, tmp_dir)
 }
 
@@ -1429,7 +1430,7 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     std::fs::write(sub_a.join("hello.txt"), "OneLakeCatalog usage here").unwrap();
     std::fs::write(sub_b.join("other.txt"), "OneLakeCatalog other usage").unwrap();
     let index = crate::build_content_index(&crate::ContentIndexArgs { dir: tmp.to_string_lossy().to_string(), ext: "txt".to_string(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2 });
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "txt".to_string(), metrics: false, index_base: tmp.clone() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "txt".to_string(), metrics: false, index_base: tmp.clone(), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES };
     let r_all = handle_search_grep(&ctx, &json!({"terms": "onelakecatalog"}));
     let o_all: Value = serde_json::from_str(&r_all.content[0].text).unwrap();
     assert_eq!(o_all["summary"]["totalFiles"], 2);
@@ -1444,7 +1445,7 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     let tmp = std::env::temp_dir().join("search_test_grep_reject");
     std::fs::create_dir_all(&tmp).unwrap();
     let index = ContentIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), file_token_counts: vec![], total_tokens: 0, extensions: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: tmp.clone() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: tmp.clone(), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES };
     let result = handle_search_grep(&ctx, &json!({"terms": "test", "dir": r"Z:\some\other\path"}));
     assert!(result.is_error);
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1479,7 +1480,7 @@ fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     path_to_id.insert(file0_path, 0); path_to_id.insert(file1_path, 1);
     let def_index = DefinitionIndex { root: tmp_dir.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![file0_str.clone(), file1_str.clone()], definitions, name_index, kind_index, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index, path_to_id, method_calls: HashMap::new() };
     let content_index = ContentIndex { root: tmp_dir.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600, files: vec![file0_str, file1_str], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0, 0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: Some(Arc::new(RwLock::new(def_index))), server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from(".") };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: Some(Arc::new(RwLock::new(def_index))), server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES };
     (ctx, tmp_dir)
 }
 
@@ -1554,7 +1555,7 @@ fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     for (i, def) in definitions.iter().enumerate() { ni.entry(def.name.to_lowercase()).or_default().push(i as u32); ki.entry(def.kind.clone()).or_default().push(i as u32); fi.entry(def.file_id).or_default().push(i as u32); }
     let di = crate::definitions::DefinitionIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![fs.clone()], definitions, name_index: ni, kind_index: ki, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index: fi, path_to_id: HashMap::new(), method_calls: HashMap::new() };
     let ci = ContentIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600, files: vec![fs], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from(".") };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES };
     let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "StaleClass", "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["definitions"].as_array().unwrap()[0].get("bodyWarning").is_some());
@@ -1568,8 +1569,129 @@ fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     let ne = "C:\\nonexistent\\path\\Ghost.cs".to_string();
     let di = crate::definitions::DefinitionIndex { root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![ne.clone()], definitions, name_index: ni, kind_index: ki, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index: fi, path_to_id: HashMap::new(), method_calls: HashMap::new() };
     let ci = ContentIndex { root: ".".to_string(), created_at: 0, max_age_secs: 3600, files: vec![ne], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from(".") };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES };
     let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "GhostClass", "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["definitions"].as_array().unwrap()[0]["bodyError"], "failed to read file");
+}
+
+// --- Response truncation integration tests ---
+
+#[test]
+fn test_response_truncation_triggers_on_large_result() {
+    // Build an index with many files, long paths, and many lines per token
+    // to generate a response well over 32KB.
+    let mut idx = HashMap::new();
+    let mut files = Vec::new();
+    let mut file_token_counts = Vec::new();
+
+    // Create 500 files with long paths and 100 lines each → ~250KB+ response
+    for i in 0..500 {
+        let path = format!(
+            "C:\\Projects\\Enterprise\\Solution\\src\\Features\\Module_{:03}\\SubModule\\Implementations\\Component_{:03}Service.cs",
+            i / 10, i
+        );
+        files.push(path);
+        file_token_counts.push(1000u32);
+
+        let lines: Vec<u32> = (1..=100).collect(); // 100 lines per file
+        idx.entry("common".to_string())
+            .or_insert_with(Vec::new)
+            .push(Posting { file_id: i as u32, lines });
+    }
+
+    let index = ContentIndex {
+        root: ".".to_string(),
+        created_at: 0,
+        max_age_secs: 3600,
+        files,
+        index: idx,
+        total_tokens: 500_000,
+        extensions: vec!["cs".to_string()],
+        file_token_counts,
+        trigram: TrigramIndex::default(),
+        trigram_dirty: false,
+        forward: None,
+        path_to_id: None,
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(index)),
+        def_index: None,
+        server_dir: ".".to_string(),
+        server_ext: "cs".to_string(),
+        metrics: true, // metrics enabled triggers truncation in inject_metrics
+        index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+    };
+
+    // Request with maxResults=0 (unlimited) to get all 500 files
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "common",
+        "maxResults": 0
+    }));
+
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Summary should reflect the FULL result count (not truncated)
+    assert_eq!(output["summary"]["totalFiles"], 500);
+
+    // Response should have been truncated
+    assert_eq!(output["summary"]["responseTruncated"], true,
+        "Expected responseTruncated=true for 500-file response");
+    assert!(output["summary"]["truncationReason"].as_str().is_some(),
+        "Expected truncationReason in summary");
+    assert!(output["summary"]["hint"].as_str().is_some(),
+        "Expected hint in summary");
+
+    // The files array should be reduced from 500
+    let files_arr = output["files"].as_array().unwrap();
+    assert!(files_arr.len() < 500,
+        "Expected files array to be truncated from 500, got {}", files_arr.len());
+
+    // Response bytes should be under the budget (16KB default + some metadata overhead)
+    let response_bytes = output["summary"]["responseBytes"].as_u64().unwrap();
+    assert!(response_bytes < 20_000,
+        "Expected responseBytes < 20000, got {}", response_bytes);
+}
+
+#[test]
+fn test_response_truncation_does_not_trigger_on_small_result() {
+    // Small index — response should NOT be truncated
+    let mut idx = HashMap::new();
+    idx.insert("mytoken".to_string(), vec![Posting { file_id: 0, lines: vec![10, 20] }]);
+
+    let index = ContentIndex {
+        root: ".".to_string(),
+        created_at: 0,
+        max_age_secs: 3600,
+        files: vec!["C:\\test\\Small.cs".to_string()],
+        index: idx,
+        total_tokens: 50,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50],
+        trigram: TrigramIndex::default(),
+        trigram_dirty: false,
+        forward: None,
+        path_to_id: None,
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(index)),
+        def_index: None,
+        server_dir: ".".to_string(),
+        server_ext: "cs".to_string(),
+        metrics: true,
+        index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+    };
+
+    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "mytoken"}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Should NOT be truncated
+    assert!(output["summary"].get("responseTruncated").is_none(),
+        "Small response should not have responseTruncated");
+    assert_eq!(output["summary"]["totalFiles"], 1);
+    assert_eq!(output["files"].as_array().unwrap().len(), 1);
 }

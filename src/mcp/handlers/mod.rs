@@ -32,7 +32,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "search_grep".to_string(),
-            description: "Search file contents using an inverted index with TF-IDF ranking. LANGUAGE-AGNOSTIC: works with any text file (C#, Rust, Python, JS/TS, XML, JSON, config, etc.) — just specify the extension via ext parameter or server --ext flag. Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). IMPORTANT: When searching for all usages of a class/interface, use multi-term OR search to find ALL naming variants in ONE query. Example: to find all usages of MyClass, search for 'MyClass,IMyClass,MyClassFactory' with mode='or'. This is much faster than making separate queries for each variant. Comma-separated terms with mode='or' finds files containing ANY of the terms; mode='and' finds files containing ALL terms. IMPORTANT FOR C#/JAVA: Use substring=true when searching for identifiers that may appear as part of compound names. Default exact-token mode will NOT find 'UserService' inside 'DeleteUserServiceCacheEntry'. Substring search uses a trigram index and is fast (~1ms). Example: terms='DatabaseConn', substring=true finds 'databaseconnectionfactory', 'idatabaseconnection', etc.".to_string(),
+            description: "Search file contents using an inverted index with TF-IDF ranking. LANGUAGE-AGNOSTIC: works with any text file (C#, Rust, Python, JS/TS, XML, JSON, config, etc.) — just specify the extension via ext parameter or server --ext flag. Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). IMPORTANT: When searching for all usages of a class/interface, use multi-term OR search to find ALL naming variants in ONE query. Example: to find all usages of MyClass, search for 'MyClass,IMyClass,MyClassFactory' with mode='or'. This is much faster than making separate queries for each variant. Comma-separated terms with mode='or' finds files containing ANY of the terms; mode='and' finds files containing ALL terms. IMPORTANT FOR C#/JAVA: Use substring=true when searching for identifiers that may appear as part of compound names. Default exact-token mode will NOT find 'UserService' inside 'DeleteUserServiceCacheEntry'. Substring search uses a trigram index and is fast (~1ms). Example: terms='DatabaseConn', substring=true finds 'databaseconnectionfactory', 'idatabaseconnection', etc. RESPONSE TRUNCATION: Large results are auto-truncated to ~16KB (~4K tokens) to protect LLM context. If summary.responseTruncated=true, narrow your query with dir/ext/excludeDir or use countOnly=true. Server flag --max-response-kb adjusts the limit (0=unlimited).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -322,6 +322,8 @@ pub struct HandlerContext {
     /// Production: `index_dir()` (`%LOCALAPPDATA%/search-index`).
     /// Tests: test-local temp directory (prevents orphan files).
     pub index_base: PathBuf,
+    /// Maximum response size in bytes before truncation kicks in. 0 = no limit.
+    pub max_response_bytes: usize,
 }
 
 /// Dispatch a tool call to the right handler.
@@ -346,10 +348,16 @@ pub fn dispatch_tool(
         _ => return ToolCallResult::error(format!("Unknown tool: {}", tool_name)),
     };
 
-    if ctx.metrics && !result.is_error {
+    if result.is_error {
+        return result;
+    }
+
+    if ctx.metrics {
+        // inject_metrics also calls truncate_large_response internally
         utils::inject_metrics(result, ctx, dispatch_start)
     } else {
-        result
+        // Even without metrics, apply response size truncation
+        utils::truncate_response_if_needed(result, ctx.max_response_bytes)
     }
 }
 
