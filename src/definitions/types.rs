@@ -1,0 +1,195 @@
+//! Core data types for the definition index.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+// ─── Definition Kind ─────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DefinitionKind {
+    // C# kinds
+    Class,
+    Interface,
+    Enum,
+    Struct,
+    Record,
+    Method,
+    Property,
+    Field,
+    Constructor,
+    Delegate,
+    Event,
+    EnumMember,
+    // SQL kinds
+    StoredProcedure,
+    Table,
+    View,
+    SqlFunction,
+    UserDefinedType,
+    Column,
+    SqlIndex,
+}
+
+impl DefinitionKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Class => "class",
+            Self::Interface => "interface",
+            Self::Enum => "enum",
+            Self::Struct => "struct",
+            Self::Record => "record",
+            Self::Method => "method",
+            Self::Property => "property",
+            Self::Field => "field",
+            Self::Constructor => "constructor",
+            Self::Delegate => "delegate",
+            Self::Event => "event",
+            Self::EnumMember => "enumMember",
+            Self::StoredProcedure => "storedProcedure",
+            Self::Table => "table",
+            Self::View => "view",
+            Self::SqlFunction => "sqlFunction",
+            Self::UserDefinedType => "userDefinedType",
+            Self::Column => "column",
+            Self::SqlIndex => "sqlIndex",
+        }
+    }
+}
+
+impl std::fmt::Display for DefinitionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
+impl std::str::FromStr for DefinitionKind {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "class" => Ok(Self::Class),
+            "interface" => Ok(Self::Interface),
+            "enum" => Ok(Self::Enum),
+            "struct" => Ok(Self::Struct),
+            "record" => Ok(Self::Record),
+            "method" => Ok(Self::Method),
+            "property" => Ok(Self::Property),
+            "field" => Ok(Self::Field),
+            "constructor" => Ok(Self::Constructor),
+            "delegate" => Ok(Self::Delegate),
+            "event" => Ok(Self::Event),
+            "enummember" => Ok(Self::EnumMember),
+            "storedprocedure" => Ok(Self::StoredProcedure),
+            "table" => Ok(Self::Table),
+            "view" => Ok(Self::View),
+            "sqlfunction" => Ok(Self::SqlFunction),
+            "userdefinedtype" => Ok(Self::UserDefinedType),
+            "column" => Ok(Self::Column),
+            "sqlindex" => Ok(Self::SqlIndex),
+            other => Err(format!("Unknown definition kind: '{}'", other)),
+        }
+    }
+}
+
+// ─── Definition Entry ────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct DefinitionEntry {
+    pub file_id: u32,
+    pub name: String,
+    pub kind: DefinitionKind,
+    pub line_start: u32,
+    pub line_end: u32,
+    pub parent: Option<String>,
+    pub signature: Option<String>,
+    pub modifiers: Vec<String>,
+    pub attributes: Vec<String>,
+    pub base_types: Vec<String>,
+}
+
+/// A call site found in a method/constructor body via AST analysis.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct CallSite {
+    /// Name of the method being called, e.g., "GetUser"
+    pub method_name: String,
+    /// Resolved type of the receiver, e.g., "IUserService".
+    /// None for simple calls like Foo() where receiver type is unknown.
+    pub receiver_type: Option<String>,
+    /// Line number where the call occurs (1-based)
+    pub line: u32,
+}
+
+// ─── Definition Index ────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DefinitionIndex {
+    pub root: String,
+    pub created_at: u64,
+    pub extensions: Vec<String>,
+    /// file_id -> file path
+    pub files: Vec<String>,
+    /// All definitions
+    pub definitions: Vec<DefinitionEntry>,
+    /// name (lowercased) -> Vec<index into definitions>
+    pub name_index: HashMap<String, Vec<u32>>,
+    /// kind -> Vec<index into definitions>
+    pub kind_index: HashMap<DefinitionKind, Vec<u32>>,
+    /// attribute name (lowercased) -> Vec<index into definitions>
+    pub attribute_index: HashMap<String, Vec<u32>>,
+    /// base type name (lowercased) -> Vec<index into definitions>
+    pub base_type_index: HashMap<String, Vec<u32>>,
+    /// file_id -> Vec<index into definitions>
+    pub file_index: HashMap<u32, Vec<u32>>,
+    /// Path -> file_id lookup (for watcher)
+    pub path_to_id: HashMap<PathBuf, u32>,
+    /// def_idx -> list of call sites found in that method/constructor body.
+    /// Only populated for Method and Constructor kinds.
+    #[serde(default)]
+    pub method_calls: HashMap<u32, Vec<CallSite>>,
+}
+
+// ─── CLI Args ────────────────────────────────────────────────────────
+
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(after_long_help = r#"WHAT IT DOES:
+  Parses C# and SQL files using tree-sitter to extract code structure:
+    - C#: classes, interfaces, structs, enums, records, methods, constructors,
+      properties, fields, delegates, events, enum members
+    - SQL: stored procedures, tables, views, functions, user-defined types
+      (requires compatible tree-sitter-sql grammar)
+
+  Each definition includes: name, kind, file path, line range, signature,
+  modifiers, attributes (e.g. [ServiceProvider]), and base types.
+
+  The index is saved to disk as a .didx file and can be loaded instantly
+  by 'search serve --definitions'.
+
+EXAMPLES:
+  Index C# files:     search def-index --dir C:\Projects --ext cs
+  Index C# + SQL:     search def-index --dir C:\Projects --ext cs,sql
+  Custom threads:     search def-index --dir C:\Projects --ext cs --threads 8
+
+PERFORMANCE:
+  48,643 files -> 846,167 definitions in ~14s (24 threads)
+  Index size: ~230 MB on disk
+"#)]
+pub struct DefIndexArgs {
+    /// Directory to recursively scan for source files to parse
+    #[arg(short, long, default_value = ".")]
+    pub dir: String,
+
+    /// File extensions to parse, comma-separated.
+    /// C# (.cs) uses tree-sitter-c-sharp grammar.
+    /// SQL (.sql) parsing is currently disabled (no compatible T-SQL grammar for tree-sitter 0.24).
+    #[arg(short, long, default_value = "cs")]
+    pub ext: String,
+
+    /// Number of parallel parsing threads. Each thread gets its own
+    /// tree-sitter parser instance. 0 = auto-detect CPU cores.
+    #[arg(short, long, default_value = "0")]
+    pub threads: usize,
+}

@@ -32,13 +32,13 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 
 - **Parallel filesystem walk** — uses all available CPU cores for maximum throughput
 - **File name index** — pre-built index for instant file lookups (like [Everything](https://www.voidtools.com/))
-- **Inverted content index** — maps tokens to files for instant full-text search (like Elasticsearch)
+- **Inverted content index** — language-agnostic tokenizer maps tokens to files for instant full-text search across any text file (like Elasticsearch)
 - **TF-IDF ranking** — results sorted by relevance, most relevant files first
 - **Regex support** — full Rust regex syntax for pattern matching
 - **Respects `.gitignore`** — automatically skips ignored files
 - **Extension filtering** — limit search to specific file types
 - **MCP Server** — native Model Context Protocol server for AI agents (VS Code Roo, Copilot, Claude)
-- **Code definition index** — tree-sitter AST parsing of C# (classes, methods, interfaces, properties, enums) and SQL (stored procedures, tables) for structural code search
+- **Code definition index** — tree-sitter AST parsing for structural code search *(currently C#-specific; SQL parser retained but disabled — see [Supported Languages](docs/architecture.md#supported-languages))*
 - **Parallel parsing** — multi-threaded tree-sitter parsing across all CPU cores (~16-32s for 48K files, varies by CPU)
 - **File watcher** — incremental index updates on file changes (<1s per file for content + definition indexes)
 - **Substring search** — trigram-indexed substring matching within tokens (e.g., `DatabaseConnection` finds `databaseconnectionfactory`) — ~0.07ms vs ~44ms for regex
@@ -208,13 +208,13 @@ If no index exists for the directory, it will be built automatically on first us
 
 ### `search content-index` — Build Inverted Content Index
 
-Reads file contents, tokenizes them, and builds an inverted index mapping tokens to file locations.
+Reads file contents, tokenizes them, and builds an inverted index mapping tokens to file locations. **The tokenizer is language-agnostic** — it works with any text file (C#, Rust, Python, JavaScript, TypeScript, XML, JSON, Markdown, config files, etc.). Specify the extensions you want to index with `-e`.
 
 ```bash
 # Index C# files
 search content-index -d C:\Projects -e cs
 
-# Index multiple file types
+# Index multiple file types (any text files work)
 search content-index -d C:\Projects -e cs,rs,py,js,ts
 
 # Custom token minimum length
@@ -371,7 +371,7 @@ Removed 2 orphaned index file(s).
 
 ### `search def-index` — Build Code Definition Index
 
-Parses C# and SQL files using tree-sitter to extract structural code definitions (classes, methods, interfaces, enums, stored procedures, tables, etc.).
+Parses source files using tree-sitter to extract structural code definitions (classes, methods, interfaces, enums, etc.). **Unlike the content index, this is language-specific** — currently C# only (SQL parser is retained but disabled). See [Supported Languages](docs/architecture.md#supported-languages) for details.
 
 ```bash
 # Index C# files
@@ -697,6 +697,7 @@ search serve --dir . --ext rs --definitions
 | Stores           | File paths, sizes, timestamps | Token → (file, line numbers) map |
 | Use case         | Find files by name            | Find files by content            |
 | Extension filter | No (indexes all files)        | Yes (`-e cs,rs,py`)              |
+| Language support | Any                           | **Any text file** (language-agnostic tokenizer) |
 | Independent      | ✅                            | ✅                               |
 
 ### How the Inverted Index Works

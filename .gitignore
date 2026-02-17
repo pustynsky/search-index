@@ -1,6 +1,7 @@
 /target
 Cargo.lock
 *.ps1
+!e2e-test.ps1
 todo*.md
 proptest-regressions/
 

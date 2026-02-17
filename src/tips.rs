@@ -98,6 +98,16 @@ pub fn tips() -> Vec<Tip> {
             why: "search_grep works with all file extensions passed to --ext. Use ext='csproj' to find NuGet dependencies, ext='xml,config,manifestxml' for configuration values.",
             example: "search grep \"Newtonsoft.Json\" -e csproj  |  MCP: terms='Newtonsoft.Json', ext='csproj'",
         },
+        Tip {
+            rule: "Language scope: content search = any language, AST = C# only",
+            why: "search_grep / content-index use a language-agnostic tokenizer -- works with any text file (C#, Rust, Python, JS, XML, etc.). search_definitions / search_callers / def-index use tree-sitter AST parsing -- currently C# only.",
+            example: "search grep works on -e rs,py,js,xml,json | search_definitions/search_callers require C# (.cs) files",
+        },
+        Tip {
+            rule: "Response truncation: large results are auto-capped at ~16KB",
+            why: "Broad queries (short substring, common tokens) can return thousands of files. The server auto-truncates responses to ~16KB (~4K tokens) to avoid filling LLM context. summary.totalFiles always shows the FULL count. Use countOnly=true or narrow with dir/ext/exclude to get focused results.",
+            example: "If responseTruncated=true appears, narrow your query: add ext, dir, excludeDir, or use countOnly=true. Server flag --max-response-kb adjusts the limit (0=unlimited).",
+        },
     ]
 }
 
@@ -121,17 +131,17 @@ pub fn performance_tiers() -> Vec<PerfTier> {
         PerfTier {
             name: "Slow",
             range: ">1s",
-            operations: &["search_find (live filesystem walk — avoid!)"],
+            operations: &["search_find (live filesystem walk - avoid!)"],
         },
     ]
 }
 
 pub fn tool_priority() -> Vec<ToolPriority> {
     vec![
-        ToolPriority { rank: 1, tool: "search_callers", description: "call trees up/down (<1ms)" },
-        ToolPriority { rank: 2, tool: "search_definitions", description: "structural: classes, methods, containsLine" },
-        ToolPriority { rank: 3, tool: "search_grep", description: "content: exact/OR/AND, substring, phrase, regex" },
-        ToolPriority { rank: 4, tool: "search_fast", description: "file name lookup (~35ms)" },
+        ToolPriority { rank: 1, tool: "search_callers", description: "call trees up/down (<1ms, C# only)" },
+        ToolPriority { rank: 2, tool: "search_definitions", description: "structural: classes, methods, containsLine (C# only)" },
+        ToolPriority { rank: 3, tool: "search_grep", description: "content: exact/OR/AND, substring, phrase, regex (any language)" },
+        ToolPriority { rank: 4, tool: "search_fast", description: "file name lookup (~35ms, any file)" },
         ToolPriority { rank: 5, tool: "search_find", description: "live walk (~3s, last resort)" },
     ]
 }
@@ -141,11 +151,11 @@ pub fn tool_priority() -> Vec<ToolPriority> {
 /// Render tips as human-readable CLI output.
 pub fn render_cli() -> String {
     let mut out = String::new();
-    out.push_str("\nsearch — Best Practices & Tips\n");
-    out.push_str("═══════════════════════════════\n\n");
+    out.push_str("\nsearch -- Best Practices & Tips\n");
+    out.push_str("===============================\n\n");
 
     out.push_str("BEST PRACTICES\n");
-    out.push_str("──────────────\n");
+    out.push_str("--------------\n");
     for (i, tip) in tips().iter().enumerate() {
         out.push_str(&format!("{:2}. {}\n", i + 1, tip.rule));
         out.push_str(&format!("    Why: {}\n", tip.why));
@@ -153,16 +163,16 @@ pub fn render_cli() -> String {
     }
 
     out.push_str("PERFORMANCE TIERS\n");
-    out.push_str("─────────────────\n");
+    out.push_str("-----------------\n");
     for tier in performance_tiers() {
         out.push_str(&format!("  {:>6}  {}\n", tier.range, tier.operations.join(", ")));
     }
     out.push('\n');
 
     out.push_str("TOOL PRIORITY (MCP)\n");
-    out.push_str("───────────────────\n");
+    out.push_str("-------------------\n");
     for tp in tool_priority() {
-        out.push_str(&format!("  {}. {:20} — {}\n", tp.rank, tp.tool, tp.description));
+        out.push_str(&format!("  {}. {:20} - {}\n", tp.rank, tp.tool, tp.description));
     }
     out.push('\n');
 
@@ -259,6 +269,21 @@ mod tests {
         assert!(text.contains("includeBody"), "instructions should mention includeBody");
         assert!(text.contains("countOnly"), "instructions should mention countOnly");
         assert!(text.contains("search_help"), "instructions should mention search_help");
+    }
+
+    /// CLI output must be pure ASCII — no Unicode box-drawing, em-dashes, arrows, or emoji.
+    /// Windows cmd.exe (CP437/CP866) cannot display these characters correctly.
+    #[test]
+    fn test_render_cli_is_ascii_safe() {
+        let output = render_cli();
+        for (i, ch) in output.chars().enumerate() {
+            assert!(
+                ch.is_ascii() || ch == '\n' || ch == '\r',
+                "render_cli() contains non-ASCII char '{}' (U+{:04X}) at position {}. \
+                 CLI output must be ASCII-safe for Windows cmd.exe compatibility.",
+                ch, ch as u32, i
+            );
+        }
     }
 
     #[test]
