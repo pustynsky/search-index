@@ -352,24 +352,47 @@ Direction "down" uses the pre-computed call graph — zero runtime file I/O. Cal
 
 ```
 src/
-├── lib.rs               # Public types: FileEntry, FileIndex, ContentIndex, Posting
-│                          tokenize(), clean_path() — shared by binary and benchmarks
-├── main.rs              # CLI args, search commands (find, fast, grep, info, serve)
-│                          fn main() dispatches to cmd_* functions returning Result<SearchError>
-├── index.rs             # Index storage: save/load/build for FileIndex and ContentIndex
-│                          index_dir(), *_path_for(), build_index(), build_content_index()
-├── error.rs             # SearchError enum (thiserror) — unified error type
-├── definitions.rs       # DefinitionIndex, tree-sitter parsing (C# + SQL)
-│                          AST walking, definition extraction, incremental updates
-└── mcp/
-    ├── mod.rs            # Module exports
-    ├── protocol.rs       # JSON-RPC 2.0 types (request, response, error)
-    ├── server.rs         # Stdio event loop, method dispatch, graceful shutdown on write errors
-    ├── handlers.rs       # Tool implementations (grep, find, fast, callers, defs)
-    └── watcher.rs        # File watcher, incremental index updates
+├── lib.rs                    # Public types: FileEntry, FileIndex, ContentIndex, Posting
+│                               tokenize(), clean_path() — shared by binary and benchmarks
+├── main.rs                   # Entry point (~30 lines): mod declarations, re-exports, fn main()
+├── main_tests.rs             # Integration tests for CLI commands
+├── index.rs                  # Index storage: save/load/build for FileIndex and ContentIndex
+│                               index_dir(), *_path_for(), build_index(), build_content_index()
+├── error.rs                  # SearchError enum (thiserror) — unified error type
+├── tips.rs                   # Best-practices guide text for search_help / CLI tips
+│
+├── cli/                      # CLI layer: argument parsing + command implementations
+│   ├── mod.rs                # Cli struct, Commands enum, cmd_find/fast/grep dispatch
+│   ├── args.rs               # All Args structs (FindArgs, IndexArgs, ContentIndexArgs, etc.)
+│   ├── info.rs               # cmd_info, cmd_info_json
+│   └── serve.rs              # cmd_serve — MCP server setup and launch
+│
+├── definitions/              # AST-based code definition index (tree-sitter)
+│   ├── mod.rs                # build_definition_index() + re-exports
+│   ├── types.rs              # DefinitionKind, DefinitionEntry, DefinitionIndex, CallSite
+│   ├── parser_csharp.rs      # C# AST parsing: walk/extract functions (~30 helpers)
+│   ├── parser_sql.rs         # SQL AST parsing (retained, currently disabled)
+│   ├── storage.rs            # save/load/find definition index + def_index_path_for()
+│   ├── incremental.rs        # update_file_definitions, remove_file_definitions
+│   └── definitions_tests.rs  # Unit tests for definition parsing
+│
+└── mcp/                      # MCP server layer
+    ├── mod.rs                # Module exports
+    ├── protocol.rs           # JSON-RPC 2.0 types (request, response, error)
+    ├── server.rs             # Stdio event loop, method dispatch, graceful shutdown
+    ├── watcher.rs            # File watcher, incremental index updates
+    └── handlers/             # Tool implementations (one file per tool)
+        ├── mod.rs            # tool_definitions() + dispatch_tool() + reindex handlers
+        ├── grep.rs           # handle_search_grep + phrase/substring helpers
+        ├── find.rs           # handle_search_find
+        ├── fast.rs           # handle_search_fast
+        ├── definitions.rs    # handle_search_definitions + body injection
+        ├── callers.rs        # handle_search_callers + caller/callee tree builders
+        ├── utils.rs          # validate_search_dir, sorted_intersect, metrics helpers
+        └── handlers_tests.rs # Handler integration tests
 ```
 
-**Dependency direction:** `main.rs` → `index.rs` → `lib.rs` (types). `mcp/*` → `index.rs` + `definitions.rs`. No circular dependencies. MCP layer depends on core index types but core has no knowledge of MCP.
+**Dependency direction:** `cli/*` → `index.rs` → `lib.rs` (types). `mcp/*` → `index.rs` + `definitions/*`. No circular dependencies. MCP layer depends on core index types but core has no knowledge of MCP. `main.rs` delegates to `cli::run()`.
 
 ## Language Support
 
