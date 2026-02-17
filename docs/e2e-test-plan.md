@@ -881,6 +881,52 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
+### T31: `serve` — search_callers finds callers through prefixed fields (C# only)
+
+**Command (C# codebase with field naming like `m_orderProcessor` or `_userService`):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs --definitions
+```
+
+**Expected:**
+
+- `callTree` includes callers from files that reference the class only through a prefixed field (e.g., `m_className`, `_className`, `s_className`)
+- Uses trigram index for substring matching in the `parent_file_ids` filter
+- If trigram index is not built (e.g., fresh startup, never used `substring` search), callers through prefixed fields may be missed — this is expected (no crash, no regression)
+
+**Validates:** Fix for field-prefix bug where `m_orderProcessor.SubmitAsync()` was missed because `m_orderprocessor` token ≠ `orderprocessor` token. Trigram substring matching in `collect_substring_file_ids()`.
+
+---
+
+### T32: `serve` — search_callers works with multi-extension `--ext` flag
+
+**Command (server started with `--ext cs,csproj,xml,config`):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,csproj,xml,config --definitions
+```
+
+**Expected:**
+
+- `callTree` is NOT empty (if the method exists and has callers)
+- Files with `.cs` extension are NOT filtered out despite `--ext` containing multiple comma-separated extensions
+- Previously this was broken: ext_filter compared `"cs"` against the entire string `"cs,csproj,xml,config"` → no match → all files filtered out
+
+**Validates:** Fix for ext_filter comma-split bug. `build_caller_tree` and `build_callee_tree` now split ext_filter on commas before comparing.
+
+---
+
 ### T33: `serve` — search_grep with `substring: true` (basic)
 
 **Command:**

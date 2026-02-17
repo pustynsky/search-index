@@ -2202,6 +2202,60 @@ fn find_containing_method(
     best.map(|d| (d.name.clone(), d.parent.clone(), d.line_start))
 }
 
+/// Collect file_ids from the content index where `term` appears as a SUBSTRING of
+/// another token. Uses the trigram index for fast O(k) lookup.
+/// Handles field naming patterns like m_catalogQueryManager, _catalogQueryManager, etc.
+/// No-op if the trigram index is empty or the term is shorter than 3 chars.
+fn collect_substring_file_ids(
+    term: &str,
+    content_index: &ContentIndex,
+    file_ids: &mut std::collections::HashSet<u32>,
+) {
+    if term.len() < 3 {
+        return; // trigrams require at least 3 chars
+    }
+    let trigram_idx = &content_index.trigram;
+    if trigram_idx.tokens.is_empty() {
+        return; // trigram index not built yet
+    }
+
+    let trigrams = generate_trigrams(term);
+    if trigrams.is_empty() {
+        return;
+    }
+
+    // Intersect trigram posting lists to find candidate token indices
+    let mut candidates: Option<Vec<u32>> = None;
+    for tri in &trigrams {
+        if let Some(posting_list) = trigram_idx.trigram_map.get(tri) {
+            candidates = Some(match candidates {
+                None => posting_list.clone(),
+                Some(prev) => {
+                    let set: std::collections::HashSet<u32> = prev.into_iter().collect();
+                    posting_list.iter().filter(|&&x| set.contains(&x)).copied().collect()
+                }
+            });
+        } else {
+            // Trigram not found → no tokens can contain this term
+            return;
+        }
+    }
+
+    // Verify candidates actually contain the term, then collect their file_ids
+    if let Some(candidate_indices) = candidates {
+        for &ti in &candidate_indices {
+            if let Some(tok) = trigram_idx.tokens.get(ti as usize) {
+                // Only match tokens strictly LONGER than the term (substring, not exact)
+                if tok.len() > term.len() && tok.contains(term) {
+                    if let Some(postings) = content_index.index.get(tok) {
+                        file_ids.extend(postings.iter().map(|p| p.file_id));
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Build a caller tree recursively (direction = "up").
 /// `parent_class` is used to disambiguate common method names -- when recursing,
 /// we pass the parent class of the method being searched so that we only find
@@ -2279,6 +2333,12 @@ fn build_caller_tree(
             }
         }
 
+        // Trigram substring matching: find files where class name appears as a
+        // SUBSTRING of another token (e.g. m_catalogQueryManager, _catalogQueryManager).
+        // Uses the trigram index for O(k) lookup instead of O(n) linear scan.
+        collect_substring_file_ids(&cls_lower, content_index, &mut file_ids);
+        collect_substring_file_ids(&interface_name, content_index, &mut file_ids);
+
         if file_ids.is_empty() { None } else { Some(file_ids) }
     });
 
@@ -2317,7 +2377,10 @@ fn build_caller_tree(
         let matches_ext = Path::new(file_path)
             .extension()
             .and_then(|e| e.to_str())
-            .is_some_and(|e| e.eq_ignore_ascii_case(ext_filter));
+            .is_some_and(|e| {
+                ext_filter.split(',')
+                    .any(|allowed| e.eq_ignore_ascii_case(allowed.trim()))
+            });
         if !matches_ext { continue; }
 
         let path_lower = file_path.to_lowercase();
@@ -2536,7 +2599,10 @@ fn build_callee_tree(
                 let matches_ext = Path::new(callee_file)
                     .extension()
                     .and_then(|e| e.to_str())
-                    .is_some_and(|e| e.eq_ignore_ascii_case(ext_filter));
+                    .is_some_and(|e| {
+                        ext_filter.split(',')
+                            .any(|allowed| e.eq_ignore_ascii_case(allowed.trim()))
+                    });
                 if !matches_ext { continue; }
 
                 // Apply directory/file exclusions
@@ -3105,6 +3171,254 @@ mod tests {
             assert!(node["file"].is_string(), "Node should have file name");
             assert!(node["line"].is_number(), "Node should have line number");
         }
+    }
+
+    #[test]
+    fn test_search_callers_field_prefix_m_underscore() {
+        // Regression test: callers through prefixed fields like m_orderProcessor.SubmitAsync()
+        // Caller file contains only token "m_orderprocessor" (not "orderprocessor").
+        // Without trigram substring matching, parent_file_ids filter rejects this file.
+        use crate::definitions::*;
+        use std::path::PathBuf;
+
+        let mut content_idx = HashMap::new();
+        content_idx.insert("submitasync".to_string(), vec![
+            Posting { file_id: 0, lines: vec![45] },   // definition in OrderProcessor.cs (line_start=45)
+            Posting { file_id: 1, lines: vec![30] },   // call in CheckoutHandler.cs via m_orderProcessor
+        ]);
+        content_idx.insert("orderprocessor".to_string(), vec![
+            Posting { file_id: 0, lines: vec![1, 45] },
+        ]);
+        content_idx.insert("m_orderprocessor".to_string(), vec![
+            Posting { file_id: 1, lines: vec![5, 30] },
+        ]);
+        content_idx.insert("checkouthandler".to_string(), vec![
+            Posting { file_id: 1, lines: vec![1] },
+        ]);
+
+        let trigram = build_trigram_index(&content_idx);
+
+        let content_index = ContentIndex {
+            root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+            files: vec![
+                "C:\\src\\OrderProcessor.cs".to_string(),
+                "C:\\src\\CheckoutHandler.cs".to_string(),
+            ],
+            index: content_idx, total_tokens: 200,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![100, 100],
+            trigram, trigram_dirty: false, forward: None, path_to_id: None,
+        };
+
+        let definitions = vec![
+            DefinitionEntry {
+                file_id: 0, name: "OrderProcessor".to_string(),
+                kind: DefinitionKind::Class, line_start: 1, line_end: 100,
+                parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            DefinitionEntry {
+                file_id: 0, name: "SubmitAsync".to_string(),
+                kind: DefinitionKind::Method, line_start: 45, line_end: 60,
+                parent: Some("OrderProcessor".to_string()), signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            DefinitionEntry {
+                file_id: 1, name: "CheckoutHandler".to_string(),
+                kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+                parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            DefinitionEntry {
+                file_id: 1, name: "HandleRequest".to_string(),
+                kind: DefinitionKind::Method, line_start: 25, line_end: 40,
+                parent: Some("CheckoutHandler".to_string()), signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+        ];
+
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind.clone()).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+        }
+        path_to_id.insert(PathBuf::from("C:\\src\\OrderProcessor.cs"), 0);
+        path_to_id.insert(PathBuf::from("C:\\src\\CheckoutHandler.cs"), 1);
+
+        let def_index = DefinitionIndex {
+            root: ".".to_string(), created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: vec![
+                "C:\\src\\OrderProcessor.cs".to_string(),
+                "C:\\src\\CheckoutHandler.cs".to_string(),
+            ],
+            definitions, name_index, kind_index,
+            attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+            file_index, path_to_id, method_calls: HashMap::new(),
+        };
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(content_index)),
+            def_index: Some(Arc::new(RwLock::new(def_index))),
+            server_dir: ".".to_string(), server_ext: "cs".to_string(),
+            metrics: false, index_base: PathBuf::from("."),
+        };
+
+        let result = dispatch_tool(&ctx, "search_callers", &json!({
+            "method": "SubmitAsync",
+            "class": "OrderProcessor",
+            "depth": 1
+        }));
+        assert!(!result.is_error, "search_callers should not error: {}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let tree = output["callTree"].as_array().unwrap();
+        assert!(!tree.is_empty(),
+            "Call tree should find caller through m_orderProcessor field prefix. Got: {}",
+            serde_json::to_string_pretty(&output).unwrap());
+        assert_eq!(tree[0]["method"], "HandleRequest");
+        assert_eq!(tree[0]["class"], "CheckoutHandler");
+    }
+
+    #[test]
+    fn test_search_callers_field_prefix_underscore() {
+        // Same pattern but with _ prefix: _userService.GetUserAsync()
+        use crate::definitions::*;
+        use std::path::PathBuf;
+
+        let mut content_idx = HashMap::new();
+        content_idx.insert("getuserasync".to_string(), vec![
+            Posting { file_id: 0, lines: vec![15] },   // definition (line_start=15)
+            Posting { file_id: 1, lines: vec![15] },    // call in AccountController via _userService
+        ]);
+        content_idx.insert("userservice".to_string(), vec![
+            Posting { file_id: 0, lines: vec![1] },
+        ]);
+        content_idx.insert("_userservice".to_string(), vec![
+            Posting { file_id: 1, lines: vec![3, 15] },
+        ]);
+
+        let trigram = build_trigram_index(&content_idx);
+
+        let content_index = ContentIndex {
+            root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+            files: vec!["C:\\src\\UserService.cs".to_string(), "C:\\src\\AccountController.cs".to_string()],
+            index: content_idx, total_tokens: 100,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![50, 50],
+            trigram, trigram_dirty: false, forward: None, path_to_id: None,
+        };
+
+        let definitions = vec![
+            DefinitionEntry {
+                file_id: 0, name: "UserService".to_string(),
+                kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+                parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            DefinitionEntry {
+                file_id: 0, name: "GetUserAsync".to_string(),
+                kind: DefinitionKind::Method, line_start: 15, line_end: 30,
+                parent: Some("UserService".to_string()), signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            DefinitionEntry {
+                file_id: 1, name: "AccountController".to_string(),
+                kind: DefinitionKind::Class, line_start: 1, line_end: 30,
+                parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            DefinitionEntry {
+                file_id: 1, name: "GetAccount".to_string(),
+                kind: DefinitionKind::Method, line_start: 10, line_end: 25,
+                parent: Some("AccountController".to_string()), signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+        ];
+
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind.clone()).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+        }
+        path_to_id.insert(PathBuf::from("C:\\src\\UserService.cs"), 0);
+        path_to_id.insert(PathBuf::from("C:\\src\\AccountController.cs"), 1);
+
+        let def_index = DefinitionIndex {
+            root: ".".to_string(), created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: vec!["C:\\src\\UserService.cs".to_string(), "C:\\src\\AccountController.cs".to_string()],
+            definitions, name_index, kind_index,
+            attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+            file_index, path_to_id, method_calls: HashMap::new(),
+        };
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(content_index)),
+            def_index: Some(Arc::new(RwLock::new(def_index))),
+            server_dir: ".".to_string(), server_ext: "cs".to_string(),
+            metrics: false, index_base: PathBuf::from("."),
+        };
+
+        let result = dispatch_tool(&ctx, "search_callers", &json!({
+            "method": "GetUserAsync",
+            "class": "UserService",
+            "depth": 1
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let tree = output["callTree"].as_array().unwrap();
+        assert!(!tree.is_empty(), "Should find caller through _userService field prefix");
+        assert_eq!(tree[0]["method"], "GetAccount");
+        assert_eq!(tree[0]["class"], "AccountController");
+    }
+
+    #[test]
+    fn test_search_callers_no_trigram_no_regression() {
+        // When trigram index is empty, behavior should be unchanged (no crash)
+        let ctx = make_ctx_with_defs(); // uses TrigramIndex::default() (empty)
+        let result = dispatch_tool(&ctx, "search_callers", &json!({
+            "method": "ExecuteQueryAsync",
+            "class": "ResilientClient",
+            "depth": 1
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(output["summary"]["searchTimeMs"].as_f64().is_some());
+    }
+
+    #[test]
+    fn test_search_callers_multi_ext_filter() {
+        // Regression test: server_ext="cs,xml,sql" must be split on commas.
+        // Before fix, "cs" != "cs,xml,sql" → all files filtered out → empty callTree.
+        use std::path::PathBuf;
+
+        // Reuse the same data as make_ctx_with_defs but with multi-ext server_ext
+        let ctx = make_ctx_with_defs();
+        // Override server_ext to simulate multi-extension server
+        let multi_ext_ctx = HandlerContext {
+            index: ctx.index.clone(),
+            def_index: ctx.def_index.clone(),
+            server_dir: ctx.server_dir.clone(),
+            server_ext: "cs,xml,sql".to_string(), // multi-extension!
+            metrics: false,
+            index_base: PathBuf::from("."),
+        };
+
+        let result = dispatch_tool(&multi_ext_ctx, "search_callers", &json!({
+            "method": "ExecuteQueryAsync",
+            "depth": 1
+        }));
+        assert!(!result.is_error);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let tree = output["callTree"].as_array().unwrap();
+        assert!(!tree.is_empty(),
+            "Multi-ext server_ext should NOT filter out .cs files. Got empty callTree.");
     }
 
     // --- search_reindex_definitions tests ---
