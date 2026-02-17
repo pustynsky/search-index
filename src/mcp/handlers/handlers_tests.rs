@@ -4,7 +4,7 @@
 use super::*;
 use super::grep::handle_search_grep;
 use super::fast::handle_search_fast;
-use super::utils::{validate_search_dir, is_under_dir, normalize_path_sep, sorted_intersect, build_grouped_line_content};
+use super::utils::validate_search_dir;
 use crate::index::build_trigram_index;
 use crate::Posting;
 use crate::TrigramIndex;

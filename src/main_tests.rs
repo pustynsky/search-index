@@ -1,0 +1,802 @@
+    use super::*;
+    use std::collections::HashMap;
+    use std::fs;
+    use std::io::Write;
+    use regex::Regex;
+
+    // ─── clean_path tests ────────────────────────────────
+
+    #[test]
+    fn test_clean_path_strips_prefix() {
+        assert_eq!(clean_path(r"\\?\C:\Windows\notepad.exe"), r"C:\Windows\notepad.exe");
+    }
+
+    #[test]
+    fn test_clean_path_no_prefix() {
+        assert_eq!(clean_path(r"C:\Windows\notepad.exe"), r"C:\Windows\notepad.exe");
+    }
+
+    #[test]
+    fn test_clean_path_unix_style() {
+        assert_eq!(clean_path("/usr/bin/ls"), "/usr/bin/ls");
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tokenize_basic() {
+        let tokens = tokenize("Hello World", 2);
+        assert_eq!(tokens, vec!["hello", "world"]);
+    }
+
+    #[test]
+    fn test_tokenize_code() {
+        let tokens = tokenize("private readonly HttpClient _client;", 2);
+        assert_eq!(tokens, vec!["private", "readonly", "httpclient", "_client"]);
+    }
+
+    #[test]
+    fn test_tokenize_min_length() {
+        let tokens = tokenize("a bb ccc", 2);
+        assert_eq!(tokens, vec!["bb", "ccc"]);
+    }
+
+    #[test]
+    fn test_tokenize_with_numbers() {
+        let tokens = tokenize("var x2 = getValue(item3);", 2);
+        assert!(tokens.contains(&"x2".to_string()));
+        assert!(tokens.contains(&"getvalue".to_string()));
+        assert!(tokens.contains(&"item3".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_underscores() {
+        let tokens = tokenize("my_variable = some_func()", 2);
+        assert!(tokens.contains(&"my_variable".to_string()));
+        assert!(tokens.contains(&"some_func".to_string()));
+    }
+
+    #[test]
+    fn test_tokenize_empty_string() {
+        let tokens = tokenize("", 2);
+        assert!(tokens.is_empty());
+    }
+
+    #[test]
+    fn test_file_index_not_stale() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let index = FileIndex {
+            root: ".".to_string(),
+            created_at: now,
+            max_age_secs: 3600,
+            entries: vec![],
+        };
+        assert!(!index.is_stale());
+    }
+
+    #[test]
+    fn test_file_index_stale() {
+        let index = FileIndex {
+            root: ".".to_string(),
+            created_at: 0, // epoch = definitely stale
+            max_age_secs: 3600,
+            entries: vec![],
+        };
+        assert!(index.is_stale());
+    }
+
+    #[test]
+    fn test_content_index_not_stale() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let index = ContentIndex {
+            root: ".".to_string(),
+            created_at: now,
+            max_age_secs: 3600,
+            files: vec![],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec![],
+            file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        assert!(!index.is_stale());
+    }
+
+    #[test]
+    fn test_content_index_stale() {
+        let index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec![],
+            file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        assert!(index.is_stale());
+    }
+
+    #[test]
+    fn test_build_and_search_content_index() {
+        let dir = std::env::temp_dir().join("search_test_content_idx");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut f1 = fs::File::create(dir.join("file1.cs")).unwrap();
+        writeln!(f1, "using System;").unwrap();
+        writeln!(f1, "public class HttpClient {{ }}").unwrap();
+
+        let mut f2 = fs::File::create(dir.join("file2.cs")).unwrap();
+        writeln!(f2, "private HttpClient _client;").unwrap();
+        writeln!(f2, "private ILogger _logger;").unwrap();
+
+        let index = build_content_index(&ContentIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false,
+            threads: 1,
+            min_token_len: 2,
+        });
+
+        assert_eq!(index.files.len(), 2);
+        assert!(index.index.contains_key("httpclient"));
+
+        let postings = &index.index["httpclient"];
+        assert_eq!(postings.len(), 2, "HttpClient should appear in both files");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_build_file_index() {
+        let dir = std::env::temp_dir().join("search_test_file_idx");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        fs::write(dir.join("file1.cs"), "public class Foo {}").unwrap();
+        fs::write(dir.join("file2.rs"), "fn main() {}").unwrap();
+
+        let index = build_index(&IndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false,
+            threads: 1,
+        });
+
+        assert!(index.entries.len() >= 2, "Should find at least 2 files");
+        assert!(!index.is_stale());
+
+        let names: Vec<&str> = index.entries.iter()
+            .filter_map(|e| std::path::Path::new(&e.path).file_name().and_then(|n| n.to_str()))
+            .collect();
+        assert!(names.contains(&"file1.cs"), "Should contain file1.cs");
+        assert!(names.contains(&"file2.rs"), "Should contain file2.rs");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── ContentIndex staleness tests ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Serialization roundtrip tests ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_file_index_serialization_roundtrip() {
+        let index = FileIndex {
+            root: "C:\\test".to_string(),
+            created_at: 1000000,
+            max_age_secs: 3600,
+            entries: vec![
+                FileEntry {
+                    path: "C:\\test\\file1.txt".to_string(),
+                    size: 1024,
+                    modified: 999999,
+                    is_dir: false,
+                },
+                FileEntry {
+                    path: "C:\\test\\subdir".to_string(),
+                    size: 0,
+                    modified: 999998,
+                    is_dir: true,
+                },
+            ],
+        };
+        let encoded = bincode::serialize(&index).unwrap();
+        let decoded: FileIndex = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(decoded.root, "C:\\test");
+        assert_eq!(decoded.entries.len(), 2);
+        assert_eq!(decoded.entries[0].path, "C:\\test\\file1.txt");
+        assert_eq!(decoded.entries[0].size, 1024);
+        assert!(!decoded.entries[0].is_dir);
+        assert!(decoded.entries[1].is_dir);
+    }
+
+    #[test]
+    fn test_content_index_serialization_roundtrip() {
+        let mut idx = HashMap::new();
+        idx.insert(
+            "httpclient".to_string(),
+            vec![Posting {
+                file_id: 0,
+                lines: vec![5, 12, 30],
+            }],
+        );
+        let index = ContentIndex {
+            root: "C:\\test".to_string(),
+            created_at: 1000000,
+            max_age_secs: 3600,
+            files: vec!["C:\\test\\Program.cs".to_string()],
+            index: idx,
+            total_tokens: 100,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![50],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        let encoded = bincode::serialize(&index).unwrap();
+        let decoded: ContentIndex = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(decoded.root, "C:\\test");
+        assert_eq!(decoded.files.len(), 1);
+        assert_eq!(decoded.total_tokens, 100);
+        assert_eq!(decoded.file_token_counts, vec![50]);
+        let postings = decoded.index.get("httpclient").unwrap();
+        assert_eq!(postings.len(), 1);
+        assert_eq!(postings[0].file_id, 0);
+        assert_eq!(postings[0].lines, vec![5, 12, 30]);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_tf_idf_more_relevant_file_scores_higher() {
+        // File A: small file, HttpClient is 50% of tokens -> high TF
+        // File B: big file, HttpClient is 1% of tokens -> low TF
+        let total_docs = 1000.0_f64;
+        let doc_freq = 100.0_f64;
+        let idf = (total_docs / doc_freq).ln();
+
+        let tf_a = 5.0 / 10.0;  // 50% of file A
+        let tf_b = 5.0 / 500.0; // 1% of file B
+
+        let score_a = tf_a * idf;
+        let score_b = tf_b * idf;
+
+        assert!(score_a > score_b, "Smaller, more focused file should rank higher");
+        assert!(score_a > 0.0);
+        assert!(score_b > 0.0);
+    }
+
+    #[test]
+    fn test_tf_idf_rare_term_scores_higher() {
+        // Same TF, but term A appears in 10 docs, term B in 900 docs
+        let total_docs = 1000.0_f64;
+        let tf = 0.1;
+
+        let idf_rare = (total_docs / 10.0).ln();
+        let idf_common = (total_docs / 900.0).ln();
+
+        let score_rare = tf * idf_rare;
+        let score_common = tf * idf_common;
+
+        assert!(score_rare > score_common, "Rare term should score higher");
+    }
+
+    // ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Integration test: build file index ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── Multi-term search tests ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_multi_term_or_search() {
+        let dir = std::env::temp_dir().join("search_test_multi_or");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut f1 = fs::File::create(dir.join("both.cs")).unwrap();
+        writeln!(f1, "class Foo {{ HttpClient client; ILogger logger; }}").unwrap();
+
+        let mut f2 = fs::File::create(dir.join("only_client.cs")).unwrap();
+        writeln!(f2, "class Bar {{ HttpClient client; }}").unwrap();
+
+        let mut f3 = fs::File::create(dir.join("only_logger.cs")).unwrap();
+        writeln!(f3, "class Baz {{ ILogger logger; }}").unwrap();
+
+        let mut f4 = fs::File::create(dir.join("neither.cs")).unwrap();
+        writeln!(f4, "class Empty {{ int x; }}").unwrap();
+
+        let args = ContentIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: true,
+            threads: 1,
+            min_token_len: 2,
+        };
+        let index = build_content_index(&args);
+
+        // OR: files with "httpclient" OR "ilogger"
+        let term1_postings = index.index.get("httpclient");
+        let term2_postings = index.index.get("ilogger");
+
+        assert!(term1_postings.is_some());
+        assert!(term2_postings.is_some());
+
+        // Collect all file_ids from both terms (union = OR)
+        let mut or_files: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for p in term1_postings.unwrap() { or_files.insert(p.file_id); }
+        for p in term2_postings.unwrap() { or_files.insert(p.file_id); }
+
+        // both.cs, only_client.cs, only_logger.cs = 3 files
+        assert_eq!(or_files.len(), 3, "OR should match 3 files");
+
+        // AND: intersection
+        let t1_files: std::collections::HashSet<u32> = term1_postings.unwrap().iter().map(|p| p.file_id).collect();
+        let t2_files: std::collections::HashSet<u32> = term2_postings.unwrap().iter().map(|p| p.file_id).collect();
+        let and_files: Vec<u32> = t1_files.intersection(&t2_files).cloned().collect();
+
+        // Only both.cs
+        assert_eq!(and_files.len(), 1, "AND should match 1 file");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_multi_term_and_search() {
+        let dir = std::env::temp_dir().join("search_test_multi_and");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut f1 = fs::File::create(dir.join("all_three.cs")).unwrap();
+        writeln!(f1, "HttpClient Task ILogger").unwrap();
+
+        let mut f2 = fs::File::create(dir.join("two_of_three.cs")).unwrap();
+        writeln!(f2, "HttpClient Task SomeOther").unwrap();
+
+        let args = ContentIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: true,
+            threads: 1,
+            min_token_len: 2,
+        };
+        let index = build_content_index(&args);
+
+        // Check all three terms exist
+        let terms = ["httpclient", "task", "ilogger"];
+        for term in &terms {
+            assert!(index.index.contains_key(*term), "Term '{}' should be in index", term);
+        }
+
+        // AND: only all_three.cs should have all 3 terms
+        let file_sets: Vec<std::collections::HashSet<u32>> = terms.iter()
+            .map(|t| index.index.get(*t).unwrap().iter().map(|p| p.file_id).collect())
+            .collect();
+
+        let intersection = file_sets.iter().skip(1).fold(file_sets[0].clone(), |acc, s| {
+            acc.intersection(s).cloned().collect()
+        });
+
+        assert_eq!(intersection.len(), 1, "Only 1 file should contain all 3 terms");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_regex_token_matching() {
+        let dir = std::env::temp_dir().join("search_test_regex");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut f1 = fs::File::create(dir.join("caches.cs")).unwrap();
+        writeln!(f1, "ITenantCache IUserCache ISessionCache INotAMatch").unwrap();
+
+        let args = ContentIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: true,
+            threads: 1,
+            min_token_len: 2,
+        };
+        let index = build_content_index(&args);
+
+        // Regex "i.*cache" should match itenantcache, iusercache, isessioncache
+        let re = Regex::new("(?i)^i.*cache$").unwrap();
+        let matching_tokens: Vec<&String> = index.index.keys()
+            .filter(|k| re.is_match(k))
+            .collect();
+
+        assert!(matching_tokens.len() >= 3,
+            "Should match at least 3 cache tokens, got {}: {:?}", matching_tokens.len(), matching_tokens);
+
+        // "inotamatch" should NOT match the cache regex
+        assert!(
+            !matching_tokens.contains(&&"inotamatch".to_string()),
+            "inotamatch should not match i.*cache pattern"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_regex_no_match() {
+        let dir = std::env::temp_dir().join("search_test_regex_no");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut f1 = fs::File::create(dir.join("simple.cs")).unwrap();
+        writeln!(f1, "class Foo {{ int x; }}").unwrap();
+
+        let args = ContentIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: true,
+            threads: 1,
+            min_token_len: 2,
+        };
+        let index = build_content_index(&args);
+
+        let re = Regex::new("(?i)^zzzznonexistent$").unwrap();
+        let matching: Vec<&String> = index.index.keys()
+            .filter(|k| re.is_match(k))
+            .collect();
+
+        assert_eq!(matching.len(), 0, "Non-existent pattern should match 0 tokens");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_regex_matches_partial_tokens() {
+        let dir = std::env::temp_dir().join("search_test_regex_partial");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut f1 = fs::File::create(dir.join("async.cs")).unwrap();
+        writeln!(f1, "GetAsync PostAsync SendAsync SyncMethod").unwrap();
+
+        let args = ContentIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: true,
+            threads: 1,
+            min_token_len: 2,
+        };
+        let index = build_content_index(&args);
+
+        // Pattern ".*async" should match getasync, postasync, sendasync
+        let re = Regex::new("(?i)^.*async$").unwrap();
+        let matching: Vec<&String> = index.index.keys()
+            .filter(|k| re.is_match(k))
+            .collect();
+
+        assert!(matching.len() >= 3, "Should match at least 3 async tokens, got {}: {:?}", matching.len(), matching);
+        assert!(
+            !matching.contains(&&"syncmethod".to_string()),
+            "syncmethod should not match .*async$ pattern"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_exclude_dir_filters_paths() {
+        let dir = std::env::temp_dir().join("search_excl_dir");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::create_dir_all(dir.join("zzztests")).unwrap();
+        fs::create_dir_all(dir.join("zzztests").join("zzzE2E")).unwrap();
+
+        let mut f1 = fs::File::create(dir.join("src").join("main.cs")).unwrap();
+        writeln!(f1, "class Main {{ HttpClient client; }}").unwrap();
+
+        let mut f2 = fs::File::create(dir.join("zzztests").join("test1.cs")).unwrap();
+        writeln!(f2, "class Test1 {{ HttpClient client; }}").unwrap();
+
+        let mut f3 = fs::File::create(dir.join("zzztests").join("zzzE2E").join("e2e.cs")).unwrap();
+        writeln!(f3, "class E2ETest {{ HttpClient client; }}").unwrap();
+
+        let args = ContentIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: true,
+            threads: 1,
+            min_token_len: 2,
+        };
+        let index = build_content_index(&args);
+
+        assert_eq!(index.files.len(), 3, "Should index 3 files");
+
+        // Simulate exclude_dir filtering (using unique name to avoid matching temp path)
+        let exclude_dirs = vec!["zzztests".to_string()];
+        let postings = index.index.get("httpclient").unwrap();
+        let filtered: Vec<_> = postings.iter()
+            .filter(|p| {
+                let path = &index.files[p.file_id as usize];
+                !exclude_dirs.iter().any(|excl| path.to_lowercase().contains(&excl.to_lowercase()))
+            })
+            .collect();
+
+        // Only src/main.cs should remain (zzztests/ and zzztests/zzzE2E/ excluded)
+        assert_eq!(filtered.len(), 1, "After excluding 'zzztests' dir, should have 1 file");
+        assert!(
+            index.files[filtered[0].file_id as usize].contains("main.cs"),
+            "Remaining file should be main.cs"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_exclude_pattern_filters_files() {
+        let dir = std::env::temp_dir().join("search_test_exclude_pat");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut f1 = fs::File::create(dir.join("Service.cs")).unwrap();
+        writeln!(f1, "class Service {{ HttpClient c; }}").unwrap();
+
+        let mut f2 = fs::File::create(dir.join("ServiceMock.cs")).unwrap();
+        writeln!(f2, "class ServiceMock {{ HttpClient c; }}").unwrap();
+
+        let mut f3 = fs::File::create(dir.join("ServiceTests.cs")).unwrap();
+        writeln!(f3, "class ServiceTests {{ HttpClient c; }}").unwrap();
+
+        let args = ContentIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: true,
+            threads: 1,
+            min_token_len: 2,
+        };
+        let index = build_content_index(&args);
+
+        let postings = index.index.get("httpclient").unwrap();
+
+        // Exclude Mock and Tests
+        let excludes = vec!["mock".to_string(), "tests".to_string()];
+        let filtered: Vec<_> = postings.iter()
+            .filter(|p| {
+                let path = &index.files[p.file_id as usize];
+                !excludes.iter().any(|excl| path.to_lowercase().contains(&excl.to_lowercase()))
+            })
+            .collect();
+
+        assert_eq!(filtered.len(), 1, "After excluding Mock and Tests, should have 1 file");
+        assert!(
+            index.files[filtered[0].file_id as usize].contains("Service.cs")
+                && !index.files[filtered[0].file_id as usize].contains("Mock"),
+            "Remaining file should be Service.cs (not Mock or Tests)"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────ΓöÇ
+
+    #[test]
+    fn test_context_lines_calculation() {
+        // Test the context window logic directly
+        let total_lines = 10;
+        let match_line: usize = 5; // 0-indexed
+        let ctx = 2;
+
+        let start = match_line.saturating_sub(ctx);
+        let end = (match_line + ctx).min(total_lines - 1);
+
+        assert_eq!(start, 3, "Context should start at line 3 (2 before line 5)");
+        assert_eq!(end, 7, "Context should end at line 7 (2 after line 5)");
+    }
+
+    #[test]
+    fn test_context_lines_at_file_boundaries() {
+        // Match at line 1 (index 0) with context 3 -> should not go below 0
+        let match_line: usize = 0;
+        let ctx = 3;
+        let total_lines = 10;
+
+        let start = match_line.saturating_sub(ctx);
+        let end = (match_line + ctx).min(total_lines - 1);
+
+        assert_eq!(start, 0, "Context should not go below 0");
+        assert_eq!(end, 3, "Context should extend to line 3");
+
+        // Match at last line with context 3 -> should not exceed total
+        let match_line2: usize = 9;
+        let start2 = match_line2.saturating_sub(ctx);
+        let end2 = (match_line2 + ctx).min(total_lines - 1);
+
+        assert_eq!(start2, 6, "Context before should be line 6");
+        assert_eq!(end2, 9, "Context should not exceed total_lines - 1");
+    }
+
+    #[test]
+    fn test_context_merges_overlapping_ranges() {
+        // Two matches close together should merge context
+        let match_lines = vec![4usize, 6usize]; // 0-indexed
+        let ctx = 2;
+        let total_lines = 15;
+
+        let mut lines_to_show: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        for &m in &match_lines {
+            let start = m.saturating_sub(ctx);
+            let end = (m + ctx).min(total_lines - 1);
+            for i in start..=end {
+                lines_to_show.insert(i);
+            }
+        }
+
+        // Lines 2-8 should be in the set (merged ranges)
+        let result: Vec<usize> = lines_to_show.into_iter().collect();
+        assert_eq!(result, vec![2, 3, 4, 5, 6, 7, 8], "Overlapping contexts should merge");
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────ΓöÇ
+
+    #[test]
+    fn test_phrase_search_finds_exact_phrase() {
+        let dir = std::env::temp_dir().join("search_phrase_test");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut f1 = fs::File::create(dir.join("has_phrase.cs")).unwrap();
+        writeln!(f1, "using System;").unwrap();
+        writeln!(f1, "var client = new HttpClient();").unwrap();
+        writeln!(f1, "client.GetAsync(\"/api\");").unwrap();
+
+        let mut f2 = fs::File::create(dir.join("has_words_but_not_phrase.cs")).unwrap();
+        writeln!(f2, "// HttpClient is useful").unwrap();
+        writeln!(f2, "// but we use new patterns here").unwrap();
+        writeln!(f2, "var x = new Something();").unwrap();
+
+        let mut f3 = fs::File::create(dir.join("no_match.cs")).unwrap();
+        writeln!(f3, "class Empty {{ }}").unwrap();
+
+        let args = ContentIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: true,
+            threads: 1,
+            min_token_len: 2,
+        };
+        let index = build_content_index(&args);
+
+        // Simulate phrase search: tokenize, AND search, then verify
+        let phrase = "new HttpClient";
+        let phrase_lower = phrase.to_lowercase();
+        let phrase_tokens = tokenize(&phrase_lower, 2);
+
+        assert_eq!(phrase_tokens, vec!["new", "httpclient"]);
+
+        // AND search: find files with both "new" AND "httpclient"
+        let mut candidate_ids: Option<std::collections::HashSet<u32>> = None;
+        for token in &phrase_tokens {
+            if let Some(postings) = index.index.get(token.as_str()) {
+                let ids: std::collections::HashSet<u32> = postings.iter().map(|p| p.file_id).collect();
+                candidate_ids = Some(match candidate_ids {
+                    Some(existing) => existing.intersection(&ids).cloned().collect(),
+                    None => ids,
+                });
+            }
+        }
+        let candidates = candidate_ids.unwrap_or_default();
+        // Both files 1 and 2 have "new" and "httpclient" (but not as adjacent phrase in file 2)
+        assert!(candidates.len() >= 1, "Should find at least 1 candidate");
+
+        // Verify: only file 1 has the exact phrase
+        let mut verified = Vec::new();
+        for &fid in &candidates {
+            let path = &index.files[fid as usize];
+            if let Ok(content) = fs::read_to_string(path) {
+                if content.to_lowercase().contains(&phrase_lower) {
+                    verified.push(fid);
+                }
+            }
+        }
+
+        assert_eq!(verified.len(), 1, "Only 1 file should contain exact phrase 'new HttpClient'");
+        assert!(
+            index.files[verified[0] as usize].contains("has_phrase"),
+            "The verified file should be has_phrase.cs"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_phrase_search_no_match() {
+        let dir = std::env::temp_dir().join("search_phrase_nomatch");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut f1 = fs::File::create(dir.join("file.cs")).unwrap();
+        writeln!(f1, "class Foo {{ int x; string y; }}").unwrap();
+
+        let args = ContentIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: true,
+            threads: 1,
+            min_token_len: 2,
+        };
+        let index = build_content_index(&args);
+
+        let phrase = "new HttpClient";
+        let phrase_lower = phrase.to_lowercase();
+        let phrase_tokens = tokenize(&phrase_lower, 2);
+
+        // "new" and "httpclient" are not in the index for this file
+        let has_all = phrase_tokens.iter().all(|t| index.index.contains_key(t.as_str()));
+        assert!(!has_all, "Not all phrase tokens should exist in index");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_phrase_search_case_insensitive() {
+        let dir = std::env::temp_dir().join("search_phrase_case");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let mut f1 = fs::File::create(dir.join("mixed.cs")).unwrap();
+        writeln!(f1, "var c = New HTTPCLIENT();").unwrap();
+
+        let args = ContentIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: true,
+            threads: 1,
+            min_token_len: 2,
+        };
+        let index = build_content_index(&args);
+
+        let phrase = "new HttpClient";
+        let phrase_lower = phrase.to_lowercase();
+
+        // Verify case-insensitive match
+        let fid = 0u32;
+        let content = fs::read_to_string(&index.files[fid as usize]).unwrap();
+        assert!(
+            content.to_lowercase().contains(&phrase_lower),
+            "Case-insensitive phrase match should work"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }

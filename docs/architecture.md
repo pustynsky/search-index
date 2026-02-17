@@ -78,7 +78,7 @@ All indexes are:
 
 ### 2. Content Index (Inverted Index)
 
-The core data structure. Maps every token to the files and line numbers where it appears.
+The core data structure. Maps every token to the files and line numbers where it appears. **Language-agnostic** — the tokenizer splits on non-alphanumeric boundaries and lowercases, requiring no language grammar. Works with any text file.
 
 ```
 Forward view (conceptual):
@@ -104,7 +104,7 @@ Inverted view (actual storage):
 
 ### 3. Definition Index (AST Index)
 
-Structural code search using tree-sitter AST parsing. Six cross-referencing indexes over the same `Vec<DefinitionEntry>`, plus a pre-computed call graph:
+**Language-specific** structural code search using tree-sitter AST parsing (currently C# only). Six cross-referencing indexes over the same `Vec<DefinitionEntry>`, plus a pre-computed call graph:
 
 ```mermaid
 graph LR
@@ -371,11 +371,20 @@ src/
 
 **Dependency direction:** `main.rs` → `index.rs` → `lib.rs` (types). `mcp/*` → `index.rs` + `definitions.rs`. No circular dependencies. MCP layer depends on core index types but core has no knowledge of MCP.
 
-## Supported Languages
+## Language Support
+
+The engine has two layers with **different language coverage**:
+
+| Layer | Tools | Language Support | How it works |
+| ----- | ----- | ---------------- | ------------ |
+| **Content search** | `search grep`, `content-index`, `search_grep` (MCP) | **Any text file** — language-agnostic | Splits text on non-alphanumeric boundaries, lowercases tokens, builds an inverted index. No language grammar needed. Works equally well with C#, Rust, Python, JS/TS, XML, JSON, Markdown, config files, etc. |
+| **AST / structural search** | `search def-index`, `search_definitions`, `search_callers` (MCP) | **C#-specific** (SQL parser retained but disabled) | Uses tree-sitter to parse source into an AST, extracts classes, methods, interfaces, call sites. Requires a language-specific grammar. |
+
+### AST Parser Status
 
 | Language   | Parser                  | Definition Types                                                                                           | Status |
 | ---------- | ----------------------- | ---------------------------------------------------------------------------------------------------------- | ------ |
 | C# (.cs)   | tree-sitter-c-sharp     | class, interface, struct, enum, record, method, constructor, property, field, delegate, event, enum member | ✅ Active |
 | SQL (.sql) | *(disabled)*            | stored procedure, table, view, function, user-defined type, column, index                                  | ⏸️ Disabled — `tree-sitter-sequel-tsql` 0.4 requires language version 15, incompatible with tree-sitter 0.24 (supports 13-14). Parsing code is retained for future use. |
 
-Content indexing (tokenizer) is language-agnostic — works with any text file.
+> **Key takeaway:** You can use `content-index` / `search_grep` on **any** codebase regardless of language. Only `def-index` / `search_definitions` / `search_callers` require a supported tree-sitter grammar (currently C#).

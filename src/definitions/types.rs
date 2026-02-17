@@ -174,7 +174,7 @@ EXAMPLES:
   Custom threads:     search def-index --dir C:\Projects --ext cs --threads 8
 
 PERFORMANCE:
-  48,643 files → 846,167 definitions in ~14s (24 threads)
+  48,643 files -> 846,167 definitions in ~14s (24 threads)
   Index size: ~230 MB on disk
 "#)]
 pub struct DefIndexArgs {
