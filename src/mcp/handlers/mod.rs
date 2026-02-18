@@ -241,6 +241,14 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "maxTotalBodyLines": {
                         "type": "integer",
                         "description": "Maximum total lines of body content across ALL returned definitions. When budget is exhausted, remaining definitions are returned without body (with 'bodyOmitted' marker). Prevents output explosion when many definitions match. (default: 500, 0 = unlimited)"
+                    },
+                    "audit": {
+                        "type": "boolean",
+                        "description": "Return index coverage report instead of search results. Shows: total files, files with/without definitions, read errors, lossy UTF-8 files, and suspicious files (files >500 bytes with 0 definitions — possible parse failures). Use auditMinBytes to adjust the threshold. (default: false)"
+                    },
+                    "auditMinBytes": {
+                        "type": "integer",
+                        "description": "Minimum file size in bytes to flag as suspicious when audit=true. Files with 0 definitions but more than this many bytes are reported as potentially failed parses. (default: 500)"
                     }
                 },
                 "required": []

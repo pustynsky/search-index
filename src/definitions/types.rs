@@ -164,6 +164,10 @@ pub struct DefinitionIndex {
     /// Number of files that contained non-UTF8 bytes and were read with lossy conversion.
     #[serde(default)]
     pub lossy_file_count: usize,
+    /// Files that were read and parsed but produced 0 definitions.
+    /// Each entry is (file_id, byte_size). Files >500 bytes with 0 defs are suspicious.
+    #[serde(default)]
+    pub empty_file_ids: Vec<(u32, u64)>,
 }
 
 // ─── CLI Args ────────────────────────────────────────────────────────
@@ -212,4 +216,37 @@ pub struct DefIndexArgs {
     /// tree-sitter parser instance. 0 = auto-detect CPU cores.
     #[arg(short, long, default_value = "0")]
     pub threads: usize,
+}
+
+#[derive(Parser, Debug)]
+#[command(after_long_help = r#"WHAT IT DOES:
+  Loads a previously built definition index (.didx file) from disk and
+  reports coverage statistics: how many files have definitions, how many
+  are empty, and which "suspicious" files (>N bytes but 0 definitions)
+  may have parsing issues.
+
+  This is a read-only operation — it does NOT rebuild the index.
+
+EXAMPLES:
+  Audit with defaults:     search def-audit --dir C:\Projects --ext cs
+  Lower threshold:         search def-audit --dir C:\Projects --ext cs --min-bytes 2000
+  Show lossy files too:    search def-audit --dir C:\Projects --ext cs --show-lossy
+"#)]
+pub struct DefAuditArgs {
+    /// Directory that was indexed (must match the --dir used during def-index)
+    #[arg(short, long, default_value = ".")]
+    pub dir: String,
+
+    /// File extensions that were indexed (must match the --ext used during def-index)
+    #[arg(short, long, default_value = "cs")]
+    pub ext: String,
+
+    /// Minimum file size in bytes to flag as suspicious.
+    /// Files with 0 definitions but more than this many bytes are reported.
+    #[arg(long, default_value = "500")]
+    pub min_bytes: u64,
+
+    /// Also show files that required lossy UTF-8 conversion.
+    #[arg(long)]
+    pub show_lossy: bool,
 }

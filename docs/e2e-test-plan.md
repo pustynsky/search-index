@@ -2085,3 +2085,97 @@ Then send `search_definitions` with `file: "Program.cs"` — should return `Data
 ```powershell
 Remove-Item -Recurse -Force $testDir
 ```
+
+
+---
+
+### T-AUDIT: Definition index audit mode
+
+**Background:** The `search_definitions` tool supports an `audit` parameter that returns index coverage statistics — how many files have definitions, how many are empty, and which suspicious files (large but 0 definitions) may have parsing issues.
+
+**Prerequisites:** Server running with `--definitions` flag
+
+**Command (MCP JSON-RPC):**
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_definitions","arguments":{"audit":true}}}
+```
+
+**Expected response structure:**
+
+```json
+{
+  "audit": {
+    "totalFiles": "<number>",
+    "filesWithDefinitions": "<number>",
+    "filesWithoutDefinitions": "<number>",
+    "readErrors": "<number>",
+    "lossyUtf8Files": "<number>",
+    "suspiciousFiles": "<number>",
+    "suspiciousThresholdBytes": 500
+  },
+  "suspiciousFiles": ["<array of {file, bytes}>"]
+}
+```
+
+**Assertions:**
+- `audit.totalFiles` > 0
+- `audit.filesWithDefinitions` > 0
+- `audit.filesWithDefinitions` + `audit.filesWithoutDefinitions` ≤ `audit.totalFiles`
+- `audit.readErrors` ≥ 0
+- `suspiciousFiles` is an array
+- Each entry in `suspiciousFiles` has `file` (string) and `bytes` (number > threshold)
+
+**With custom threshold:**
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_definitions","arguments":{"audit":true,"auditMinBytes":10000}}}
+```
+
+Should return fewer suspicious files (only those >10KB with 0 definitions).
+
+
+---
+
+### T-DEF-AUDIT: Definition index audit CLI command
+
+**Background:** The `search def-audit` CLI subcommand loads a previously built `.didx` file from disk and reports index coverage: how many files have definitions, how many are empty, and which suspicious files (large but 0 definitions) may have parsing issues. This does NOT rebuild the index.
+
+**Prerequisites:** A definition index must already be built via `search def-index`.
+
+**Command:**
+
+```powershell
+# Build first (if not already built)
+search def-index --dir $TEST_DIR --ext rs
+
+# Audit (instant — loads from disk)
+search def-audit --dir $TEST_DIR --ext rs
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr contains `[def-audit] Index:` with total files count
+- stderr contains `with definitions` count > 0
+- stderr contains `without definitions` count ≥ 0
+- stderr contains `definitions,` followed by `read errors` and `lossy-UTF8 files`
+
+**With custom threshold:**
+
+```powershell
+search def-audit --dir $TEST_DIR --ext rs --min-bytes 10000
+```
+
+- Should show fewer suspicious files (only those >10KB with 0 definitions)
+
+**When no index exists:**
+
+```powershell
+search def-audit --dir C:\nonexistent --ext cs
+```
+
+- stderr contains `No definition index found`
+- Exit code: 0

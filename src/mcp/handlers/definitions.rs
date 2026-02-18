@@ -45,6 +45,40 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
     let include_body = args.get("includeBody").and_then(|v| v.as_bool()).unwrap_or(false);
     let max_body_lines = args.get("maxBodyLines").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
     let max_total_body_lines = args.get("maxTotalBodyLines").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
+    let audit = args.get("audit").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // --- audit mode: return index coverage report ---
+    if audit {
+        let suspicious_threshold = args.get("auditMinBytes")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(500) as u64;
+
+        let files_with_defs = index.file_index.len();
+        let total_files = index.files.len();
+        let files_without_defs = index.empty_file_ids.len();
+
+        let suspicious: Vec<Value> = index.empty_file_ids.iter()
+            .filter(|(_, size)| *size > suspicious_threshold)
+            .map(|(fid, size)| {
+                let path = index.files.get(*fid as usize).map(|s| s.as_str()).unwrap_or("?");
+                json!({ "file": path, "bytes": size })
+            })
+            .collect();
+
+        let output = json!({
+            "audit": {
+                "totalFiles": total_files,
+                "filesWithDefinitions": files_with_defs,
+                "filesWithoutDefinitions": files_without_defs,
+                "readErrors": index.parse_errors,
+                "lossyUtf8Files": index.lossy_file_count,
+                "suspiciousFiles": suspicious.len(),
+                "suspiciousThresholdBytes": suspicious_threshold,
+            },
+            "suspiciousFiles": suspicious,
+        });
+        return ToolCallResult::success(serde_json::to_string(&output).unwrap());
+    }
 
     // --- containsLine: find containing method/class by line number ---
     if let Some(line_num) = contains_line {

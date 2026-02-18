@@ -64,6 +64,9 @@ pub(crate) enum Commands {
     /// Build a code definition index (classes, methods, interfaces, etc.)
     DefIndex(definitions::DefIndexArgs),
 
+    /// Audit definition index coverage (load from disk, no rebuild)
+    DefAudit(definitions::DefAuditArgs),
+
     /// Remove orphaned index files.
     Cleanup,
 
@@ -85,6 +88,7 @@ pub fn run() {
         Commands::Grep(args) => cmd_grep(args),
         Commands::Serve(args) => { serve::cmd_serve(args); Ok(()) },
         Commands::DefIndex(args) => cmd_def_index(args),
+        Commands::DefAudit(args) => cmd_def_audit(args),
         Commands::Cleanup => {
             let idx_base = index_dir();
             eprintln!("Scanning for orphaned indexes in {}...", idx_base.display());
@@ -142,6 +146,53 @@ fn cmd_def_index(args: definitions::DefIndexArgs) -> Result<(), SearchError> {
     definitions::save_definition_index(&index, &idx_base)?;
     eprintln!("[def-index] Done! {} definitions from {} files",
         index.definitions.len(), index.files.len());
+    Ok(())
+}
+
+fn cmd_def_audit(args: definitions::DefAuditArgs) -> Result<(), SearchError> {
+    let idx_base = index_dir();
+    let exts = args.ext.split(',').map(|s| s.trim().to_lowercase()).collect::<Vec<_>>().join(",");
+
+    let index = match definitions::load_definition_index(&args.dir, &exts, &idx_base) {
+        Some(idx) => idx,
+        None => {
+            eprintln!("[def-audit] No definition index found for dir='{}' ext='{}'. Run 'search def-index' first.", args.dir, args.ext);
+            return Ok(());
+        }
+    };
+
+    let files_with_defs = index.file_index.len();
+    let total_files = index.files.len();
+    let files_without_defs = index.empty_file_ids.len();
+
+    eprintln!("[def-audit] Index: {} total files, {} with definitions, {} without definitions",
+        total_files, files_with_defs, files_without_defs);
+    eprintln!("[def-audit] {} definitions, {} read errors, {} lossy-UTF8 files",
+        index.definitions.len(), index.parse_errors, index.lossy_file_count);
+
+    let suspicious: Vec<_> = index.empty_file_ids.iter()
+        .filter(|(_, size)| *size > args.min_bytes)
+        .collect();
+
+    if suspicious.is_empty() {
+        eprintln!("[def-audit] No suspicious files (all files >{}B have definitions). ✓", args.min_bytes);
+    } else {
+        eprintln!("[def-audit] {} suspicious files (>{}B with 0 definitions):",
+            suspicious.len(), args.min_bytes);
+        for (fid, size) in &suspicious {
+            let path = index.files.get(*fid as usize).map(|s| s.as_str()).unwrap_or("?");
+            eprintln!("  {} ({} bytes)", path, size);
+        }
+    }
+
+    if args.show_lossy && index.lossy_file_count > 0 {
+        eprintln!("\n[def-audit] Files with lossy UTF-8 conversion:");
+        // We don't store the list of lossy paths in the index (only count),
+        // so we can't enumerate them here. Re-run def-index to see warnings.
+        eprintln!("  (lossy file paths are logged during def-index build, not stored in index)");
+        eprintln!("  Re-run: search def-index --dir {} --ext {} 2>&1 | findstr /i \"lossy\"", args.dir, args.ext);
+    }
+
     Ok(())
 }
 

@@ -392,6 +392,31 @@ search def-index --dir C:\Projects --ext cs,ts,tsx
 search def-index --dir C:\Projects --ext cs --threads 8
 ```
 
+### `search def-audit` — Audit Definition Index Coverage
+
+Loads a previously built `.didx` file from disk (instant, no rebuild) and reports which files have 0 definitions. Files >500 bytes with 0 definitions are flagged as "suspicious" — possible parse failures.
+
+```bash
+# Show all suspicious files (>500B, 0 definitions)
+search def-audit --dir C:\Projects --ext cs
+
+# Only flag files >2KB as suspicious
+search def-audit --dir C:\Projects --ext cs --min-bytes 2000
+```
+
+**Example output:**
+
+```
+[def-audit] Index: 48730 total files, 48177 with definitions, 553 without definitions
+[def-audit] 854865 definitions, 0 read errors, 44 lossy-UTF8 files
+[def-audit] 390 suspicious files (>500B with 0 definitions):
+  C:\...\GlobalSuppressions.cs (2312 bytes)
+  C:\...\AssemblyInfo.cs (2122 bytes)
+  ...
+```
+
+> **Note:** Most "suspicious" files are legitimate — `AssemblyInfo.cs` and `GlobalSuppressions.cs` contain assembly-level attributes that the parser doesn't extract. Use `--min-bytes` to raise the threshold.
+
 **What it extracts:**
 
 | Language | Definition Types |
@@ -477,7 +502,7 @@ search serve --dir C:\Projects --ext cs --watch --definitions --metrics
 | Tool                  | Description                                                      |
 | --------------------- | ---------------------------------------------------------------- |
 | `search_grep`         | Search content index with TF-IDF ranking, regex, phrase, AND/OR  |
-| `search_definitions`  | Search code definitions: classes, methods, interfaces, enums, functions, type aliases, SPs. Supports `containsLine` to find which method/class contains a given line number. Supports `includeBody` to return source code inline. (requires `--definitions`) |
+| `search_definitions`  | Search code definitions: classes, methods, interfaces, enums, functions, type aliases, SPs. Supports `containsLine` to find which method/class contains a given line number. Supports `includeBody` to return source code inline. Supports `audit` mode to check index coverage and find files with parse failures. (requires `--definitions`) |
 | `search_callers`      | Find all callers of a method and build a recursive call tree (up or down). Supports C# and TypeScript/TSX. Combines grep index + AST definition index to trace call chains in a single request. (requires `--definitions`) |
 | `search_find`         | Live filesystem walk (⚠️ slow for large dirs)                    |
 | `search_fast`         | Search pre-built file name index (instant). Supports comma-separated patterns for multi-file lookup (OR logic). |
@@ -610,6 +635,8 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 | `includeBody`        | boolean | false   | Include source code body inline                                    |
 | `maxBodyLines`       | integer | 100     | Max lines per definition body (0 = unlimited)                      |
 | `maxTotalBodyLines`  | integer | 500     | Max total body lines across all results (0 = unlimited)            |
+| `audit`              | boolean | false   | Return index coverage report instead of search results             |
+| `auditMinBytes`      | integer | 500     | Min file size to flag as suspicious in audit mode                  |
 
 **`containsLine` -- find containing method by line number:**
 
@@ -686,6 +713,34 @@ When a definition's body exceeds `maxBodyLines`, the `body` array is truncated a
   }
 }
 ```
+
+**`audit` -- index coverage report:**
+
+Check if all files in the repository are properly indexed. Files >500 bytes with 0 definitions are flagged as suspicious (possible parse failures).
+
+```json
+// Request
+{ "audit": true }
+
+// Response
+{
+  "audit": {
+    "totalFiles": 48730,
+    "filesWithDefinitions": 48177,
+    "filesWithoutDefinitions": 553,
+    "readErrors": 0,
+    "lossyUtf8Files": 44,
+    "suspiciousFiles": 390,
+    "suspiciousThresholdBytes": 500
+  },
+  "suspiciousFiles": [
+    { "file": "Tools\\CodeGenerator\\GlobalSuppressions.cs", "bytes": 2312 },
+    { "file": "Tests\\Common\\AssemblyInfo.cs", "bytes": 2122 }
+  ]
+}
+```
+
+> **Note:** Most "suspicious" files are legitimate — `AssemblyInfo.cs` and `GlobalSuppressions.cs` contain assembly-level attributes that the parser doesn't extract as definitions. Use `auditMinBytes` to raise the threshold if needed.
 
 **Manual testing (without AI):**
 

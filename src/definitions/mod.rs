@@ -115,6 +115,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                 let mut chunk_defs: Vec<(u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>)> = Vec::new();
                 let mut errors = 0usize;
                 let mut lossy_files: Vec<String> = Vec::new();
+                let mut empty_files: Vec<(u32, u64)> = Vec::new(); // (file_id, byte_size) for files with 0 defs
 
                 for (file_id, file_path) in &chunk {
                     let (content, was_lossy) = match read_file_lossy(Path::new(file_path)) {
@@ -124,6 +125,8 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                     if was_lossy {
                         lossy_files.push(file_path.clone());
                     }
+
+                    let content_len = content.len() as u64;
 
                     let ext = Path::new(file_path.as_str())
                         .extension()
@@ -140,10 +143,12 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 
                     if !file_defs.is_empty() {
                         chunk_defs.push((*file_id, file_defs, file_calls));
+                    } else {
+                        empty_files.push((*file_id, content_len));
                     }
                 }
 
-                (chunk_defs, errors, lossy_files)
+                (chunk_defs, errors, lossy_files, empty_files)
             })
         }).collect();
 
@@ -168,12 +173,14 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     }
 
     let mut lossy_file_count = 0usize;
-    for (chunk_defs, errors, lossy_files) in thread_results {
+    let mut empty_file_ids: Vec<(u32, u64)> = Vec::new();
+    for (chunk_defs, errors, lossy_files, empty_files) in thread_results {
         parse_errors += errors;
         for f in &lossy_files {
             eprintln!("[def-index] WARNING: file contains non-UTF8 bytes (lossy conversion applied): {}", f);
         }
         lossy_file_count += lossy_files.len();
+        empty_file_ids.extend(empty_files);
         for (file_id, file_defs, file_calls) in chunk_defs {
             let base_def_idx = definitions.len() as u32;
 
@@ -224,16 +231,32 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         }
     }
 
+    // Report suspicious files (>500 bytes but 0 definitions)
+    let suspicious_threshold = 500u64;
+    let suspicious: Vec<_> = empty_file_ids.iter()
+        .filter(|(_, size)| *size > suspicious_threshold)
+        .collect();
+    if !suspicious.is_empty() {
+        eprintln!("[def-index] WARNING: {} files with >{}B but 0 definitions. Run 'search def-audit' to see full list.",
+            suspicious.len(), suspicious_threshold);
+    }
+
     let elapsed = start.elapsed();
+    let files_with_defs = total_files - empty_file_ids.len() - parse_errors;
     eprintln!(
-        "[def-index] Parsed {} files in {:.1}s, extracted {} definitions, {} call sites ({} read errors, {} lossy-utf8 files, {} threads)",
+        "[def-index] Parsed {} files in {:.1}s: {} with definitions, {} empty, {} read errors, {} lossy-utf8, {} threads",
         total_files,
         elapsed.as_secs_f64(),
-        definitions.len(),
-        total_call_sites,
+        files_with_defs,
+        empty_file_ids.len(),
         parse_errors,
         lossy_file_count,
         num_threads
+    );
+    eprintln!(
+        "[def-index] Extracted {} definitions, {} call sites",
+        definitions.len(),
+        total_call_sites,
     );
 
     let now = SystemTime::now()
@@ -256,6 +279,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         method_calls,
         parse_errors,
         lossy_file_count,
+        empty_file_ids,
     }
 }
 
