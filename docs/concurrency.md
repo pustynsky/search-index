@@ -4,11 +4,12 @@
 
 The system uses three distinct concurrency strategies depending on the operation phase:
 
-| Phase        | Strategy                                     | Primitives                                            | Why                                |
-| ------------ | -------------------------------------------- | ----------------------------------------------------- | ---------------------------------- |
-| Index build  | Thread pool (parallel walk + parallel parse) | `WalkBuilder::build_parallel()`, `std::thread::scope` | CPU-bound, embarrassingly parallel |
-| MCP server   | Single-threaded event loop                   | Sequential stdin line reads                           | JSON-RPC is inherently sequential  |
-| File watcher | Dedicated OS thread + shared state           | `Arc<RwLock<T>>`, `mpsc::channel`                     | Must not block the event loop      |
+| Phase           | Strategy                                     | Primitives                                            | Why                                                |
+| --------------- | -------------------------------------------- | ----------------------------------------------------- | -------------------------------------------------- |
+| Index build     | Thread pool (parallel walk + parallel parse) | `WalkBuilder::build_parallel()`, `std::thread::scope` | CPU-bound, embarrassingly parallel                 |
+| Async startup   | Background thread(s) + atomic flags          | `std::thread::spawn`, `Arc<AtomicBool>`               | Event loop starts immediately, no client timeout   |
+| MCP server      | Single-threaded event loop                   | Sequential stdin line reads                           | JSON-RPC is inherently sequential                  |
+| File watcher    | Dedicated OS thread + shared state           | `Arc<RwLock<T>>`, `mpsc::channel`                     | Must not block the event loop                      |
 
 ```mermaid
 graph TB
@@ -28,9 +29,15 @@ graph TB
         TN --> MERGE
     end
 
+    subgraph "Async Startup (if no index on disk)"
+        BG1[Background Thread 1<br/>build_content_index] -->|write lock + AtomicBool| IDX2["Arc<RwLock<ContentIndex>>"]
+        BG2[Background Thread 2<br/>build_definition_index] -->|write lock + AtomicBool| DIDX2["Arc<RwLock<DefinitionIndex>>"]
+    end
+
     subgraph "Server Phase"
         STDIN[stdin reader<br/>single thread] -->|read lock| IDX["Arc<RwLock<ContentIndex>>"]
         STDIN -->|read lock| DIDX["Arc<RwLock<DefinitionIndex>>"]
+        STDIN -->|check| FLAGS["AtomicBool: content_ready, def_ready"]
 
         WT[Watcher Thread] -->|write lock| IDX
         WT -->|write lock| DIDX
@@ -154,7 +161,30 @@ for line in stdin.lock().lines() {
 - No I/O multiplexing needed — single input source (stdin), single output (stdout)
 - Adding tokio would increase binary size and compile time significantly
 
-**Read lock acquisition:** Each query acquires a read lock on the index. Multiple concurrent reads are allowed by `RwLock`, but since we're single-threaded, there's never actual read-read contention. The lock exists solely to synchronize with the watcher thread.
+**Read lock acquisition:** Each query acquires a read lock on the index. Multiple concurrent reads are allowed by `RwLock`, but since we're single-threaded, there's never actual read-read contention. The lock exists to synchronize with the watcher thread and the background build thread (during async startup).
+
+## Phase 2.5: Async Startup (Background Index Build)
+
+When no pre-built index exists on disk (first run), the server spawns background threads to build indexes without blocking the event loop:
+
+```
+cmd_serve()
+  ├── empty ContentIndex in Arc<RwLock>
+  ├── empty DefinitionIndex in Arc<RwLock>
+  ├── content_ready = Arc<AtomicBool>(false)
+  ├── def_ready = Arc<AtomicBool>(false)
+  ├── try load from disk → if found: swap + set ready flag (synchronous, < 3s)
+  │   else: std::thread::spawn → build + swap + set ready flag (30-300s)
+  └── run_server() ← starts immediately
+        └── dispatch_tool checks AtomicBool before each search tool
+```
+
+**Synchronization:**
+
+- `AtomicBool` with `Release`/`Acquire` ordering gates tool readiness — cheap (no lock contention)
+- Background thread acquires a single write lock to swap the fully-built index into the `Arc<RwLock>`, then sets the `AtomicBool` flag
+- Tools like `search_help`, `search_info`, `search_find` bypass the readiness check (they don't use content/def indexes)
+- `search_reindex` during background build returns "already building" error to prevent double-builds
 
 ## Phase 3: File Watcher
 
@@ -250,8 +280,10 @@ if let Some(ref def_idx) = def_index {
 
 | Data              | Owner                          | Synchronization                             | Invariant                                                                                |
 | ----------------- | ------------------------------ | ------------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `ContentIndex`    | `Arc<RwLock<ContentIndex>>`    | Read: server thread. Write: watcher thread. | Forward index + inverted index always consistent within a single write lock acquisition. |
+| `ContentIndex`    | `Arc<RwLock<ContentIndex>>`    | Read: server thread. Write: watcher thread, background build thread (once at startup). | Forward index + inverted index always consistent within a single write lock acquisition. |
 | `DefinitionIndex` | `Arc<RwLock<DefinitionIndex>>` | Same as ContentIndex.                       | Multi-indexes (name, kind, attr, etc.) always consistent within a single write.          |
+| `content_ready`   | `Arc<AtomicBool>`              | Write: background build thread (once). Read: server thread (every dispatch). | `Ordering::Release` on write, `Ordering::Acquire` on read — guarantees index data is visible. |
+| `def_ready`       | `Arc<AtomicBool>`              | Same as `content_ready`.                    | Same guarantee.                                                                          |
 | stdin/stdout      | MCP server thread (exclusive)  | No sharing.                                 | All JSON-RPC I/O on single thread.                                                       |
 | stderr            | Any thread                     | OS-level line buffering.                    | Log lines may interleave but each `eprintln!` is atomic per line.                        |
 

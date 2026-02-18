@@ -180,7 +180,7 @@ fn is_stale(&self) -> bool {
 | ----------------------------------- | ------------------------------------------------------------ | -------------------------------- |
 | Index stale, `--auto-reindex true`  | Rebuild automatically                                        | N/A (index stays in RAM)         |
 | Index stale, `--auto-reindex false` | Print warning, use stale                                     | N/A                              |
-| Index missing                       | Build automatically (`search fast`) or error (`search grep`) | Build at startup                 |
+| Index missing                       | Build automatically (`search fast`) or error (`search grep`) | Build in background (async startup) |
 | With `--watch`                      | N/A                                                          | Incremental updates, never stale |
 
 Default max age: 24 hours (`--max-age-hours 24`).

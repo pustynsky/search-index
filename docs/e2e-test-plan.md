@@ -2283,3 +2283,150 @@ cargo run -- grep "fn" -d $TEST_DIR -e $TEST_EXT
 **Validates:** LZ4 compression, magic byte detection, backward compatibility, compression ratio logging.
 
 **Status:** ✅ Covered by unit tests: `test_save_load_compressed_roundtrip`, `test_load_compressed_legacy_uncompressed`, `test_load_compressed_missing_file_returns_none`, `test_compressed_file_smaller_than_uncompressed`
+
+
+---
+
+### T-ASYNC: Async MCP Server Startup
+
+Tests for the async startup feature that allows the MCP server event loop to start immediately
+while indexes are built in the background.
+
+#### T-ASYNC-01: `search_grep` returns "building" message when content index not ready
+
+**Scenario:** MCP server starts without a pre-built content index on disk (first run on a new codebase).
+
+**MCP Request (sent immediately after server process starts):**
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
+```
+
+**Expected:** Immediate response with `protocolVersion`, `serverInfo`, `capabilities`.
+
+**Then send:**
+
+```json
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"HttpClient"}}}
+```
+
+**Expected:** `isError: true`, message contains "being built in the background".
+
+**Validates:** Server responds to `initialize` immediately, `search_grep` returns friendly error during build.
+
+**Status:** ✅ Covered by unit tests: `test_dispatch_grep_while_content_index_building`
+
+---
+
+#### T-ASYNC-02: `search_definitions` returns "building" message when def index not ready
+
+**MCP Request:**
+
+```json
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"UserService"}}}
+```
+
+**Expected:** `isError: true`, message contains "being built in the background".
+
+**Status:** ✅ Covered by unit tests: `test_dispatch_definitions_while_def_index_building`
+
+---
+
+#### T-ASYNC-03: `search_callers` returns "building" message when def index not ready
+
+**MCP Request:**
+
+```json
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"GetUserAsync"}}}
+```
+
+**Expected:** `isError: true`, message contains "being built in the background".
+
+**Status:** ✅ Covered by unit tests: `test_dispatch_callers_while_def_index_building`
+
+---
+
+#### T-ASYNC-04: `search_fast` returns "building" message when content index not ready
+
+**MCP Request:**
+
+```json
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_fast","arguments":{"pattern":"UserService"}}}
+```
+
+**Expected:** `isError: true`, message contains "being built in the background".
+
+**Status:** ✅ Covered by unit tests: `test_dispatch_fast_while_content_index_building`
+
+---
+
+#### T-ASYNC-05: `search_reindex` returns "already building" message during background build
+
+**MCP Request:**
+
+```json
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_reindex","arguments":{}}}
+```
+
+**Expected:** `isError: true`, message contains "already being built".
+
+**Status:** ✅ Covered by unit tests: `test_dispatch_reindex_while_content_index_building`
+
+---
+
+#### T-ASYNC-06: `search_help` and `search_info` work during index build
+
+**MCP Requests:**
+
+```json
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"search_help","arguments":{}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"search_info","arguments":{}}}
+```
+
+**Expected:** Both return `isError: false` with valid results, even while index is building.
+
+**Status:** ✅ Covered by unit tests: `test_dispatch_help_works_while_index_building`
+
+---
+
+#### T-ASYNC-07: `search_find` works during index build (uses filesystem walk, not content index)
+
+**MCP Request:**
+
+```json
+{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"search_find","arguments":{"pattern":"main"}}}
+```
+
+**Expected:** `isError: false`, returns file system results (not dependent on content index).
+
+**Status:** ✅ Covered by unit tests: `test_dispatch_find_works_while_index_building`
+
+---
+
+#### T-ASYNC-08: Tools work normally after background build completes
+
+**Scenario:** Wait for background build to complete (check logs for "Content index ready"), then retry search.
+
+**MCP Request:**
+
+```json
+{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"HttpClient"}}}
+```
+
+**Expected:** `isError: false`, returns normal search results.
+
+**Validates:** Background build atomically swaps the index and sets `content_ready` flag.
+
+**Status:** ✅ Covered by existing unit tests (all tests run with `content_ready: true`).
+
+---
+
+#### T-ASYNC-09: Pre-built index loads synchronously (no background build needed)
+
+**Scenario:** Server starts with a pre-built index on disk (normal restart scenario).
+
+**Expected:** Content index loaded from disk (< 3s), `content_ready` set immediately before event loop starts. All tools work on the first request.
+
+**Validates:** Fast path — no background thread spawned when index exists on disk.
+
+**Status:** ✅ Covered by existing unit tests + manual verification.

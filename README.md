@@ -37,7 +37,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Regex support** — full Rust regex syntax for pattern matching
 - **Respects `.gitignore`** — automatically skips ignored files
 - **Extension filtering** — limit search to specific file types
-- **MCP Server** — native Model Context Protocol server for AI agents (VS Code Roo, Copilot, Claude)
+- **MCP Server** — native Model Context Protocol server for AI agents (VS Code Roo, Copilot, Claude) with async startup (responds to `initialize` immediately, builds indexes in background)
 - **Code definition index** — tree-sitter AST parsing for structural code search *(C# and TypeScript/TSX; SQL parser retained but disabled — see [Supported Languages](docs/architecture.md#supported-languages))*
 - **Parallel tokenization** — content index tokenization parallelized across all CPU cores via thread-local hash maps + merge
 - **Parallel parsing** — multi-threaded tree-sitter parsing with lazy grammar loading (~16-32s for 48K files, varies by CPU)
@@ -455,7 +455,7 @@ Each definition includes: name, kind, file path, line range, full signature, mod
 
 ### `search serve` — MCP Server (AI Agent Integration)
 
-Starts a Model Context Protocol (MCP) server over stdio. Loads the content index into memory for instant queries (~0.001s per search). AI agents connect via JSON-RPC 2.0.
+Starts a Model Context Protocol (MCP) server over stdio. The server starts its event loop **immediately** and responds to `initialize` / `tools/list` without waiting for indexes to build. If a pre-built index exists on disk, it is loaded synchronously (< 3s). Otherwise, indexes are built in a background thread — search tools return a friendly "Index is being built, please retry" message until ready. This eliminates startup timeouts when Roo/VS Code launches the server for the first time.
 
 ```bash
 # Start MCP server for C# files

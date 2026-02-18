@@ -108,7 +108,7 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 | **Lock-free (crossbeam SkipMap, dashmap)** | Adds dependency, more complex code, marginal benefit — we have exactly 1 writer and writes are infrequent (debounced to every 500ms). Lock contention is near-zero. |
 | **Copy-on-write (Arc swap)**               | Would require cloning the entire index on update (~400MB). Only viable with an immutable/persistent data structure.                                                 |
 | **Actor model (channels)**                 | Adds complexity. The MCP server is single-threaded on stdin, so actor model doesn't provide concurrency benefit.                                                    |
-| **No locking (single-threaded)**           | Not possible — watcher runs on a separate OS thread by design (notify crate requirement).                                                                           |
+| **No locking (single-threaded)**           | Not possible — watcher and background build threads run on separate OS threads by design.                                                                           |
 
 **Known limitations:**
 
