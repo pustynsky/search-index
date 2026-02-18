@@ -36,7 +36,6 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
     let use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
     let max_results = args.get("maxResults")
         .and_then(|v| v.as_u64())
-        .map(|v| if v == 0 { 100 } else { v })
         .unwrap_or(100) as usize;
     let exclude_dir: Vec<String> = args.get("excludeDir")
         .and_then(|v| v.as_array())

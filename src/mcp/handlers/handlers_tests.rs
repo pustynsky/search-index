@@ -753,6 +753,48 @@ fn test_search_definitions_has_contains_line() {
     assert!(props.contains_key("containsLine"), "Should have containsLine parameter");
 }
 
+// --- maxResults=0 means unlimited tests ---
+
+#[test]
+fn test_search_definitions_max_results_zero_means_unlimited() {
+    let ctx = make_ctx_with_defs();
+    // maxResults=0 should return ALL definitions, not cap at 100
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "maxResults": 0
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalResults"].as_u64().unwrap();
+    let returned = output["definitions"].as_array().unwrap().len() as u64;
+    assert!(total > 0, "Should have definitions in test context");
+    assert_eq!(returned, total, "maxResults=0 should return ALL definitions (unlimited), got {}/{}", returned, total);
+}
+
+#[test]
+fn test_search_definitions_max_results_one_caps_output() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "maxResults": 1
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let returned = output["definitions"].as_array().unwrap().len();
+    assert_eq!(returned, 1, "maxResults=1 should return exactly 1 definition");
+}
+
+#[test]
+fn test_search_definitions_max_results_default_is_100() {
+    let ctx = make_ctx_with_defs();
+    // When maxResults is omitted, default should be 100
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalResults"].as_u64().unwrap();
+    let returned = output["definitions"].as_array().unwrap().len() as u64;
+    // Our test context has fewer than 100 definitions, so returned == total
+    assert_eq!(returned, total, "With default maxResults (100), should return all definitions when total < 100");
+}
+
 // --- resolve_call_site tests ---
 
 #[test]
