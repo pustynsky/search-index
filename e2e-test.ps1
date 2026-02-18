@@ -212,5 +212,14 @@ Write-Host "  T25-T52: MCP serve tests - run manually (see e2e-test-plan.md)"
 # T53-T58: TypeScript callers (MCP)
 Write-Host "  T53-T58: TypeScript callers MCP tests - run manually (see e2e-test-plan.md)"
 
+# Cleanup: remove index files created during E2E tests
+Write-Host "`nCleaning up test indexes..."
+$ErrorActionPreference = "Continue"
+# Remove indexes for the test directory (targeted — won't touch other projects)
+Invoke-Expression "$Binary cleanup --dir $TestDir 2>&1" | Out-Null
+# Remove orphaned indexes (e.g. T-SHUTDOWN temp dir that was already deleted)
+Invoke-Expression "$Binary cleanup 2>&1" | Out-Null
+$ErrorActionPreference = "Stop"
+
 Write-Host "`n=== Results: $passed passed, $failed failed, $total total ===`n"
 if ($failed -gt 0) { exit 1 }

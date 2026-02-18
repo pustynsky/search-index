@@ -661,6 +661,102 @@
         let result: Vec<usize> = lines_to_show.into_iter().collect();
         assert_eq!(result, vec![2, 3, 4, 5, 6, 7, 8], "Overlapping contexts should merge");
     }
+    // ─── cleanup_indexes_for_dir tests ───────────────────
+
+    #[test]
+    fn test_cleanup_indexes_for_dir_removes_matching() {
+        let tmp = std::env::temp_dir().join(format!("search_cleanup_test_{}", std::process::id()));
+        let idx_base = tmp.join("indexes");
+        fs::create_dir_all(&idx_base).unwrap();
+
+        // Create a test directory to act as the "root"
+        let test_root = tmp.join("myproject");
+        fs::create_dir_all(&test_root).unwrap();
+        fs::write(test_root.join("hello.cs"), "class Hello {}").unwrap();
+
+        // Build and save indexes for this directory
+        let root_str = test_root.to_string_lossy().to_string();
+
+        // Save a file index
+        let file_idx = build_index(&IndexArgs {
+            dir: root_str.clone(), max_age_hours: 24,
+            hidden: false, no_ignore: false, threads: 1,
+        });
+        save_index(&file_idx, &idx_base).unwrap();
+
+        // Save a content index
+        let content_idx = build_content_index(&ContentIndexArgs {
+            dir: root_str.clone(), ext: "cs".to_string(), max_age_hours: 24,
+            hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
+        });
+        save_content_index(&content_idx, &idx_base).unwrap();
+
+        // Verify index files exist
+        let count_before: usize = fs::read_dir(&idx_base).unwrap()
+            .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|ext|
+                ext == "idx" || ext == "cidx" || ext == "didx"))
+            .count();
+        assert!(count_before >= 2, "Expected at least 2 index files, got {}", count_before);
+
+        // Run cleanup for that directory
+        let removed = cleanup_indexes_for_dir(&root_str, &idx_base);
+        assert_eq!(removed, count_before, "Should remove all indexes for the directory");
+
+        // Verify no index files remain
+        let count_after: usize = fs::read_dir(&idx_base).unwrap()
+            .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|ext|
+                ext == "idx" || ext == "cidx" || ext == "didx"))
+            .count();
+        assert_eq!(count_after, 0, "No index files should remain");
+
+        // Cleanup temp dir
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_cleanup_indexes_for_dir_preserves_other() {
+        let tmp = std::env::temp_dir().join(format!("search_cleanup_other_{}", std::process::id()));
+        let idx_base = tmp.join("indexes");
+        fs::create_dir_all(&idx_base).unwrap();
+
+        // Create two test directories
+        let dir_a = tmp.join("project_a");
+        let dir_b = tmp.join("project_b");
+        fs::create_dir_all(&dir_a).unwrap();
+        fs::create_dir_all(&dir_b).unwrap();
+        fs::write(dir_a.join("a.cs"), "class A {}").unwrap();
+        fs::write(dir_b.join("b.cs"), "class B {}").unwrap();
+
+        let root_a = dir_a.to_string_lossy().to_string();
+        let root_b = dir_b.to_string_lossy().to_string();
+
+        // Build indexes for both directories
+        let idx_a = build_index(&IndexArgs {
+            dir: root_a.clone(), max_age_hours: 24,
+            hidden: false, no_ignore: false, threads: 1,
+        });
+        save_index(&idx_a, &idx_base).unwrap();
+
+        let idx_b = build_index(&IndexArgs {
+            dir: root_b.clone(), max_age_hours: 24,
+            hidden: false, no_ignore: false, threads: 1,
+        });
+        save_index(&idx_b, &idx_base).unwrap();
+
+        // Cleanup only dir_a
+        let removed = cleanup_indexes_for_dir(&root_a, &idx_base);
+        assert_eq!(removed, 1, "Should remove exactly 1 index for dir_a");
+
+        // dir_b index should still exist
+        let remaining: usize = fs::read_dir(&idx_base).unwrap()
+            .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|ext|
+                ext == "idx" || ext == "cidx" || ext == "didx"))
+            .count();
+        assert_eq!(remaining, 1, "dir_b index should still exist");
+
+        // Cleanup temp dir
+        let _ = fs::remove_dir_all(&tmp);
+    }
 
     // ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────ΓöÇ
 
