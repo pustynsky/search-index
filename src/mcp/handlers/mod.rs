@@ -190,7 +190,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Definition name to search for. Supports substring match. Comma-separated for multi-term OR search. Example: 'UserService' or 'IUser,UserService'"
+                        "description": "Definition name to search for. Supports substring match. Comma-separated for multi-term OR search -- find ALL related types in ONE call instead of separate queries. Examples: 'UserService' (single), 'UserService,IUserService,UserController' (finds ALL three in one query), 'Order,IOrder,OrderFactory' (all naming variants at once)"
                     },
                     "kind": {
                         "type": "string",

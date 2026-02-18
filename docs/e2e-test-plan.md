@@ -1249,6 +1249,59 @@ cargo run -- tips
 
 ---
 
+### T42: `tips` / `search_help` — Strategy recipes present
+
+**Command (CLI):**
+
+```powershell
+cargo run -- tips
+```
+
+**Expected:**
+
+- Output contains "STRATEGY RECIPES" section
+- Contains "Architecture Exploration" recipe with steps and anti-patterns
+- Contains "Call Chain Investigation" recipe
+- Contains "Stack Trace / Bug Investigation" recipe
+
+**Command (MCP):**
+
+```powershell
+$input = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_help","arguments":{}}}'
+) -join "`n"
+echo $input | cargo run -- serve -d $TEST_DIR -e $TEST_EXT
+```
+
+**Expected:**
+
+- JSON response contains `strategyRecipes` array with 3 entries
+- Each recipe has `name`, `when`, `steps`, `antiPatterns` fields
+
+**Validates:** Strategy recipes are exposed in both CLI and MCP outputs.
+
+---
+
+### T42b: `tips` / `search_help` — Query budget and multi-term tips present
+
+**Command (CLI):**
+
+```powershell
+cargo run -- tips
+```
+
+**Expected:**
+
+- Output contains tip about "Query budget: aim for 3 or fewer search calls"
+- Output contains tip about "Multi-term name in search_definitions"
+- Multi-term tip mentions comma-separated example: `UserService,IUserService,UserController`
+
+**Validates:** New efficiency guidance tips are visible in CLI output and MCP `search_help`.
+
+---
+
 
 ## TypeScript Support Tests
 

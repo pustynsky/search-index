@@ -77,6 +77,10 @@ Run-Test "T49 def-index-ts"        "$Binary def-index -d $TestDir -e ts"
 Run-Test "T21 invalid-regex"       "$Binary grep `"[invalid`" -d $TestDir -e $TestExt --regex" -ExpectedExit 1
 Run-Test "T22 nonexistent-dir"     "$Binary find test -d /nonexistent/path/xyz" -ExpectedExit 1
 
+# T42/T42b: tips — strategy recipes and query budget
+Run-Test "T42 tips-strategy-recipes" "$Binary tips | Select-String 'STRATEGY RECIPES'"
+Run-Test "T42b tips-query-budget"    "$Binary tips | Select-String 'Query budget'"
+
 # T25-T52: serve (MCP)
 Write-Host "  T25-T52: MCP serve tests - run manually (see e2e-test-plan.md)"
 
