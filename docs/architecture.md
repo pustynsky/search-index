@@ -72,6 +72,7 @@ Three independent index types, each optimized for a different query pattern:
 All indexes are:
 
 - **Serialized with bincode** — fast binary format, zero-copy deserialization
+- **LZ4 frame-compressed on disk** — all index files (`.idx`, `.cidx`, `.didx`) are wrapped in LZ4 frame compression via the `lz4_flex` crate (`FrameEncoder`/`FrameDecoder`). Files start with a 4-byte `LZ4S` magic header for format identification. Compression is streaming (no intermediate full buffer in memory). Typical compression ratio is ~4–5× (e.g., 697 MB → ~150 MB for content indexes). Legacy uncompressed files are still supported — auto-detected on load by checking the magic header for backward compatibility.
 - **Stored deterministically** — file path is `hash(canonical_dir [+ extensions])` as hex
 - **Self-describing** — each index embeds its root directory, creation timestamp, and staleness threshold
 - **Independent** — can be built, loaded, or deleted without affecting other indexes

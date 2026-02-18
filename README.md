@@ -43,6 +43,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Parallel parsing** — multi-threaded tree-sitter parsing with lazy grammar loading (~16-32s for 48K files, varies by CPU)
 - **File watcher** — incremental index updates on file changes (<1s per file for content + definition indexes)
 - **Substring search** — trigram-indexed substring matching within tokens (e.g., `DatabaseConnection` finds `databaseconnectionfactory`) — ~0.07ms vs ~44ms for regex
+- **LZ4 index compression** — all index files (.idx, .cidx, .didx) are LZ4 frame-compressed on disk with backward-compatible loading of legacy uncompressed files
 
 ## Performance
 

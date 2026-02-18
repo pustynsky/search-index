@@ -3,7 +3,7 @@
 use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::{index_dir, ContentIndex, FileIndex};
+use crate::{index_dir, index::load_compressed, ContentIndex, FileIndex};
 
 pub fn cmd_info() {
     let dir = index_dir();
@@ -29,42 +29,41 @@ pub fn cmd_info() {
         let ext = path.extension().and_then(|e| e.to_str());
 
         if ext == Some("idx") {
-            if let Ok(data) = fs::read(&path)
-                && let Ok(index) = bincode::deserialize::<FileIndex>(&data) {
-                    found = true;
-                    let age_secs = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or(Duration::ZERO)
-                        .as_secs()
-                        .saturating_sub(index.created_at);
-                    let age_hours = age_secs as f64 / 3600.0;
-                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                    let stale = if index.is_stale() { " [STALE]" } else { "" };
-                    println!(
-                        "  [FILE] {} -- {} entries, {:.1} MB, {:.1}h ago{}",
-                        index.root, index.entries.len(),
-                        size as f64 / 1_048_576.0, age_hours, stale
-                    );
-                }
-        } else if ext == Some("cidx")
-            && let Ok(data) = fs::read(&path)
-                && let Ok(index) = bincode::deserialize::<ContentIndex>(&data) {
-                    found = true;
-                    let age_secs = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or(Duration::ZERO)
-                        .as_secs()
-                        .saturating_sub(index.created_at);
-                    let age_hours = age_secs as f64 / 3600.0;
-                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                    let stale = if index.is_stale() { " [STALE]" } else { "" };
-                    println!(
-                        "  [CONTENT] {} -- {} files, {} tokens, exts: [{}], {:.1} MB, {:.1}h ago{}",
-                        index.root, index.files.len(), index.total_tokens,
-                        index.extensions.join(", "),
-                        size as f64 / 1_048_576.0, age_hours, stale
-                    );
-                }
+            if let Some(index) = load_compressed::<FileIndex>(&path, "file-index") {
+                found = true;
+                let age_secs = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(Duration::ZERO)
+                    .as_secs()
+                    .saturating_sub(index.created_at);
+                let age_hours = age_secs as f64 / 3600.0;
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let stale = if index.is_stale() { " [STALE]" } else { "" };
+                println!(
+                    "  [FILE] {} -- {} entries, {:.1} MB, {:.1}h ago{}",
+                    index.root, index.entries.len(),
+                    size as f64 / 1_048_576.0, age_hours, stale
+                );
+            }
+        } else if ext == Some("cidx") {
+            if let Some(index) = load_compressed::<ContentIndex>(&path, "content-index") {
+                found = true;
+                let age_secs = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(Duration::ZERO)
+                    .as_secs()
+                    .saturating_sub(index.created_at);
+                let age_hours = age_secs as f64 / 3600.0;
+                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                let stale = if index.is_stale() { " [STALE]" } else { "" };
+                println!(
+                    "  [CONTENT] {} -- {} files, {} tokens, exts: [{}], {:.1} MB, {:.1}h ago{}",
+                    index.root, index.files.len(), index.total_tokens,
+                    index.extensions.join(", "),
+                    size as f64 / 1_048_576.0, age_hours, stale
+                );
+            }
+        }
     }
 
     if !found {
@@ -86,71 +85,69 @@ pub fn cmd_info_json() -> serde_json::Value {
             let ext = path.extension().and_then(|e| e.to_str());
 
             if ext == Some("idx") {
-                if let Ok(data) = fs::read(&path)
-                    && let Ok(index) = bincode::deserialize::<FileIndex>(&data) {
-                        let age_secs = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or(Duration::ZERO)
-                            .as_secs()
-                            .saturating_sub(index.created_at);
-                        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                        indexes.push(serde_json::json!({
-                            "type": "file",
-                            "root": index.root,
-                            "entries": index.entries.len(),
-                            "sizeMb": (size as f64 / 1_048_576.0 * 10.0).round() / 10.0,
-                            "ageHours": (age_secs as f64 / 3600.0 * 10.0).round() / 10.0,
-                            "stale": index.is_stale(),
-                        }));
+                if let Some(index) = load_compressed::<FileIndex>(&path, "file-index") {
+                    let age_secs = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or(Duration::ZERO)
+                        .as_secs()
+                        .saturating_sub(index.created_at);
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    indexes.push(serde_json::json!({
+                        "type": "file",
+                        "root": index.root,
+                        "entries": index.entries.len(),
+                        "sizeMb": (size as f64 / 1_048_576.0 * 10.0).round() / 10.0,
+                        "ageHours": (age_secs as f64 / 3600.0 * 10.0).round() / 10.0,
+                        "stale": index.is_stale(),
+                    }));
+                }
+            } else if ext == Some("cidx") {
+                if let Some(index) = load_compressed::<ContentIndex>(&path, "content-index") {
+                    let age_secs = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or(Duration::ZERO)
+                        .as_secs()
+                        .saturating_sub(index.created_at);
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    indexes.push(serde_json::json!({
+                        "type": "content",
+                        "root": index.root,
+                        "files": index.files.len(),
+                        "totalTokens": index.total_tokens,
+                        "extensions": index.extensions,
+                        "sizeMb": (size as f64 / 1_048_576.0 * 10.0).round() / 10.0,
+                        "ageHours": (age_secs as f64 / 3600.0 * 10.0).round() / 10.0,
+                        "stale": index.is_stale(),
+                    }));
+                }
+            } else if ext == Some("didx") {
+                if let Some(index) = load_compressed::<crate::definitions::DefinitionIndex>(&path, "definition-index") {
+                    let age_secs = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or(Duration::ZERO)
+                        .as_secs()
+                        .saturating_sub(index.created_at);
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    let call_sites: usize = index.method_calls.values().map(|v| v.len()).sum();
+                    let mut def_info = serde_json::json!({
+                        "type": "definition",
+                        "root": index.root,
+                        "files": index.files.len(),
+                        "definitions": index.definitions.len(),
+                        "callSites": call_sites,
+                        "extensions": index.extensions,
+                        "sizeMb": (size as f64 / 1_048_576.0 * 10.0).round() / 10.0,
+                        "ageHours": (age_secs as f64 / 3600.0 * 10.0).round() / 10.0,
+                    });
+                    if index.parse_errors > 0 {
+                        def_info["readErrors"] = serde_json::json!(index.parse_errors);
                     }
-            } else if ext == Some("cidx")
-                && let Ok(data) = fs::read(&path)
-                    && let Ok(index) = bincode::deserialize::<ContentIndex>(&data) {
-                        let age_secs = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or(Duration::ZERO)
-                            .as_secs()
-                            .saturating_sub(index.created_at);
-                        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                        indexes.push(serde_json::json!({
-                            "type": "content",
-                            "root": index.root,
-                            "files": index.files.len(),
-                            "totalTokens": index.total_tokens,
-                            "extensions": index.extensions,
-                            "sizeMb": (size as f64 / 1_048_576.0 * 10.0).round() / 10.0,
-                            "ageHours": (age_secs as f64 / 3600.0 * 10.0).round() / 10.0,
-                            "stale": index.is_stale(),
-                        }));
+                    if index.lossy_file_count > 0 {
+                        def_info["lossyUtf8Files"] = serde_json::json!(index.lossy_file_count);
                     }
-            else if ext == Some("didx")
-                && let Ok(data) = fs::read(&path)
-                    && let Ok(index) = bincode::deserialize::<crate::definitions::DefinitionIndex>(&data) {
-                        let age_secs = SystemTime::now()
-                            .duration_since(UNIX_EPOCH)
-                            .unwrap_or(Duration::ZERO)
-                            .as_secs()
-                            .saturating_sub(index.created_at);
-                        let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                        let call_sites: usize = index.method_calls.values().map(|v| v.len()).sum();
-                        let mut def_info = serde_json::json!({
-                            "type": "definition",
-                            "root": index.root,
-                            "files": index.files.len(),
-                            "definitions": index.definitions.len(),
-                            "callSites": call_sites,
-                            "extensions": index.extensions,
-                            "sizeMb": (size as f64 / 1_048_576.0 * 10.0).round() / 10.0,
-                            "ageHours": (age_secs as f64 / 3600.0 * 10.0).round() / 10.0,
-                        });
-                        if index.parse_errors > 0 {
-                            def_info["readErrors"] = serde_json::json!(index.parse_errors);
-                        }
-                        if index.lossy_file_count > 0 {
-                            def_info["lossyUtf8Files"] = serde_json::json!(index.lossy_file_count);
-                        }
-                        indexes.push(def_info);
-                    }
+                    indexes.push(def_info);
+                }
+            }
         }
     }
 

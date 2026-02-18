@@ -29,8 +29,8 @@ Real production C# codebase (enterprise backend monorepo):
 | Total token occurrences      | 33,082,236         |
 | Definitions (AST)            | ~846,000           |
 | Call sites                   | ~2.4M              |
-| Content index size           | 241.7–333.4 MB (varies by trigram inclusion) |
-| Definition index size        | ~325 MB            |
+| Content index size           | 223.7 MB on disk (LZ4 compressed; ~350 MB uncompressed) |
+| Definition index size        | 103.1 MB on disk (LZ4 compressed; ~328 MB uncompressed) |
 | Files parsed for definitions | 48,599–48,649 (varies by run) |
 
 ## Content Search: search vs ripgrep
@@ -42,7 +42,7 @@ Single-term search for `HttpClient` across the full codebase. search.exe token m
 | `rg HttpClient -g '*.cs' -l`                   | Live file scan                    | 32.0s     | baseline     |
 | `search find "HttpClient" --contents -e cs -c` | Live parallel walk (24 threads)   | 14.5s     | **2×**       |
 | `search grep "HttpClient" -e cs -c`            | Inverted index (total incl. load) | 1.76s     | **18×**      |
-| ↳ index load from disk                         | bincode deserialize ~242 MB       | 1.02s     | —            |
+| ↳ index load from disk                         | LZ4 decompress + bincode deserialize (223.7 MB on disk) | 1.19s | — |
 | ↳ search + TF-IDF rank                         | HashMap lookup + scoring          | 0.757ms   | **42,300×**  |
 
 > **Note:** In MCP server mode, the index is loaded once at startup. All subsequent queries pay only the search+rank cost (0.6–4ms depending on hardware), not the load cost.
@@ -51,7 +51,7 @@ Single-term search for `HttpClient` across the full codebase. search.exe token m
 
 ## CLI Search Latency (index pre-loaded from disk)
 
-Measured via `search grep` on 48,779-file C# index (754K unique tokens). Search+Rank is the pure in-memory search time; total CLI time also includes index load from disk (~1.0s):
+Measured via `search grep` on 48,779-file C# index (754K unique tokens). Search+Rank is the pure in-memory search time; total CLI time also includes index load from disk (~1.2s, LZ4 decompress + bincode deserialize):
 
 | Query Type                                | Search+Rank Time | Files Matched | Notes |
 | ----------------------------------------- | ---------------- | ------------- | ----- |
@@ -294,11 +294,11 @@ Three distinct indexes, each built independently:
 
 ### Build times across machines
 
-| Index Type                 | Files           | Machine 1 (24 threads) | Machine 2 (16 threads) | Disk Size |
-| -------------------------- | --------------- | ---------------------- | ---------------------- | --------- |
-| FileIndex (C:\Windows)     | 333,875 entries | ~3s                    | —                      | 47.8 MB   |
-| ContentIndex (C# files)    | 48,599 files    | 7.0s                   | 15.9s                  | 241.7 MB  |
-| DefinitionIndex (C#)       | ~48,600 files   | 16.1s                  | 32.0s                  | ~324 MB   |
+| Index Type                 | Files           | Machine 1 (24 threads) | Machine 2 (16 threads) | Disk Size (LZ4 compressed) |
+| -------------------------- | --------------- | ---------------------- | ---------------------- | -------------------------- |
+| FileIndex (C:\Windows)     | 333,875 entries | ~3s                    | —                      | 47.8 MB                    |
+| ContentIndex (C# files)    | 48,599 files    | 7.0s                   | 15.9s                  | 223.7 MB (1.6× compression) |
+| DefinitionIndex (C#)       | ~48,600 files   | 16.1s                  | 32.0s                  | 103.1 MB (3.2× compression) |
 
 **Why is def-index 2× slower than content-index?**
 
@@ -358,13 +358,15 @@ Measured on 5,000-file synthetic index (15.9 MB serialized):
 
 Extrapolated for real 241.7 MB index: ~700ms deserialize (matches measured 689ms load time).
 
+> **Note:** Since Feb 2026, all index files are LZ4 frame-compressed on disk. The serialization benchmarks above measure raw bincode without compression. Actual load times include LZ4 decompression — see [Index Load Times](#index-load-times-measured) for compressed load measurements.
+
 ## Index Load Times (measured)
 
-| Index Type             | Files   | Disk Size | Load Time                                            |
-| ---------------------- | ------- | --------- | ---------------------------------------------------- |
-| ContentIndex           | 48,599  | 241.7 MB  | 0.689s                                               |
-| FileIndex (C:\Windows) | 333,875 | 47.8 MB   | 0.055s                                               |
-| DefinitionIndex        | ~48,600 | ~324 MB   | ~1.5s (measured on Machine 2)                        |
+| Index Type             | Files   | Disk Size (LZ4)  | Load Time (LZ4 decompress + deserialize)             |
+| ---------------------- | ------- | ---------------- | ---------------------------------------------------- |
+| ContentIndex           | 48,599  | 223.7 MB         | 1.186s                                               |
+| FileIndex (C:\Windows) | 333,875 | 47.8 MB          | 0.055s                                               |
+| DefinitionIndex        | ~48,600 | 103.1 MB         | 1.284s                                               |
 
 ## Comparison with ripgrep
 
@@ -380,14 +382,14 @@ Measured on 48,779-file C# codebase (see `docs/run-benchmarks.ps1` for automated
 | Call tree (MCP)                 | N/A     | ~0.5ms                 | ∞           |
 | Index build (content, one-time) | N/A     | 7–16s                  | —           |
 | Index build (defs, one-time)    | N/A     | 16–32s                 | —           |
-| Disk overhead                   | None    | ~566 MB (content+defs) | —           |
+| Disk overhead                   | None    | ~327 MB (LZ4 compressed content+defs) | —  |
 | RAM (server mode, estimated)    | None    | ~500 MB (not measured) | —           |
 
 ## Bottlenecks and Scaling Limits
 
 | Bottleneck              | Measured Value       | Cause                                | Mitigation                               |
 | ----------------------- | -------------------- | ------------------------------------ | ---------------------------------------- |
-| Index load              | ~1.0s for 242 MB     | bincode deserialization + allocation | Memory-map + lazy load (not implemented) |
+| Index load              | ~1.2s for 224 MB (LZ4) | LZ4 decompression + bincode deserialization | Memory-map + lazy load (not implemented) |
 | Phrase search           | ~345ms               | Line-by-line file scan for phrase verification | Consider positional index (not implemented) |
 | Regex search            | 61–68ms for 754K tokens | Linear scan of all keys           | FST for prefix queries (not implemented) |
 | Multi-term OR (3 terms) | 5.6ms                | Scoring 13K+ posting entries         | Acceptable for interactive use           |
@@ -407,7 +409,7 @@ Benchmarks measured on two machines using the same benchmark script (`run-benchm
 | Regex (I.*Cache) | 61ms | 340ms | 5.6× | CPU |
 | HttpClient (token) | 0.757ms | 0.848ms | 1.1× | CPU |
 | Live file walk | 14.4s | 983ms | 0.07× (M2 faster) | Disk I/O |
-| Index load (startup) | ~1.0s | ~4.0s | 4× | CPU (deserialize) |
+| Index load (startup) | ~1.2s | ~4.0s | 3.3× | CPU (LZ4 decompress + deserialize) |
 | Content index build | 7.0s | 15.9s | 2.3× | CPU + I/O |
 | Def index build | 16.1s | 32.0s | 2× | CPU |
 | Watcher update (1 file) | ~5ms (from logs) | ~0.9s | 180× | CPU (tree-sitter) |
