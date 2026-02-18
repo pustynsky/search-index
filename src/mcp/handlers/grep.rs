@@ -596,7 +596,15 @@ fn handle_phrase_search(
 
     let candidates = candidate_file_ids.unwrap_or_default();
 
-    // Step 2: Verify phrase (read file once, cache content for show_lines)
+    // Step 2: Verify phrase match in raw file content.
+    //
+    // When the original phrase contains non-alphanumeric characters (XML tags,
+    // angle brackets, etc.), the tokenizer strips them, causing false positives.
+    // In that case, we match using the original phrase as a case-insensitive
+    // substring against raw file content instead of the tokenized regex.
+    // This eliminates false positives from tokenization stripping punctuation.
+    let phrase_has_punctuation = phrase.chars().any(|c| !c.is_alphanumeric() && !c.is_whitespace());
+
     struct PhraseMatch {
         file_path: String,
         lines: Vec<u32>,
@@ -606,23 +614,32 @@ fn handle_phrase_search(
 
     for &file_id in &candidates {
         let file_path = &index.files[file_id as usize];
-        if let Ok(content) = std::fs::read_to_string(file_path)
-            && phrase_re.is_match(&content) {
-                let mut matching_lines = Vec::new();
+        if let Ok(content) = std::fs::read_to_string(file_path) {
+            let mut matching_lines = Vec::new();
+            if phrase_has_punctuation {
+                // Use raw phrase substring match (case-insensitive) to avoid
+                // false positives from tokenizer stripping punctuation
+                for (line_num, line) in content.lines().enumerate() {
+                    if line.to_lowercase().contains(&phrase_lower) {
+                        matching_lines.push((line_num + 1) as u32);
+                    }
+                }
+            } else if phrase_re.is_match(&content) {
+                // Use tokenized phrase regex (no punctuation → no false positives)
                 for (line_num, line) in content.lines().enumerate() {
                     if phrase_re.is_match(line) {
                         matching_lines.push((line_num + 1) as u32);
                     }
                 }
-                if !matching_lines.is_empty() {
-                    results.push(PhraseMatch {
-                        file_path: file_path.clone(),
-                        lines: matching_lines,
-                        // Only keep content in memory if we'll need it for show_lines
-                        content: if show_lines { Some(content) } else { None },
-                    });
-                }
             }
+            if !matching_lines.is_empty() {
+                results.push(PhraseMatch {
+                    file_path: file_path.clone(),
+                    lines: matching_lines,
+                    content: if show_lines { Some(content) } else { None },
+                });
+            }
+        }
     }
 
     let total_files = results.len();

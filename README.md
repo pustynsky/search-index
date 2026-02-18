@@ -330,7 +330,7 @@ search grep "HttpClient" -d C:\Projects -e cs
 | `-C, --context <N>` | Show N context lines around matches (with --show-lines)   |
 | `-B, --before <N>`  | Show N lines before each match (with --show-lines)        |
 | `-A, --after <N>`   | Show N lines after each match (with --show-lines)         |
-| `--phrase`          | Phrase search: find exact phrase via index + verification |
+| `--phrase`          | Phrase search: find exact phrase via index + verification. When the phrase contains punctuation (e.g., `</Property>`), a post-filter verifies matching lines against the raw untokenized text to eliminate false positives |
 | `--substring`       | Substring search via trigram index (MCP: `substring: true`) |
 
 ---
