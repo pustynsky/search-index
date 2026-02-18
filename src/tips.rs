@@ -99,9 +99,9 @@ pub fn tips() -> Vec<Tip> {
             example: "search grep \"Newtonsoft.Json\" -e csproj  |  MCP: terms='Newtonsoft.Json', ext='csproj'",
         },
         Tip {
-            rule: "Language scope: content search = any language, AST = C# only",
-            why: "search_grep / content-index use a language-agnostic tokenizer -- works with any text file (C#, Rust, Python, JS, XML, etc.). search_definitions / search_callers / def-index use tree-sitter AST parsing -- currently C# only.",
-            example: "search grep works on -e rs,py,js,xml,json | search_definitions/search_callers require C# (.cs) files",
+            rule: "Language scope: content search = any language, AST = C# and TypeScript/TSX",
+            why: "search_grep / content-index use a language-agnostic tokenizer -- works with any text file (C#, Rust, Python, JS, XML, etc.). search_definitions / def-index use tree-sitter AST parsing -- supports C# and TypeScript/TSX. search_callers uses call-graph analysis -- currently C# only (TypeScript planned for Phase 2).",
+            example: "search grep works on -e rs,py,js,xml,json | search_definitions supports .cs, .ts, .tsx | search_callers requires C# (.cs) files",
         },
         Tip {
             rule: "Response truncation: large results are auto-capped at ~16KB",
@@ -139,7 +139,7 @@ pub fn performance_tiers() -> Vec<PerfTier> {
 pub fn tool_priority() -> Vec<ToolPriority> {
     vec![
         ToolPriority { rank: 1, tool: "search_callers", description: "call trees up/down (<1ms, C# only)" },
-        ToolPriority { rank: 2, tool: "search_definitions", description: "structural: classes, methods, containsLine (C# only)" },
+        ToolPriority { rank: 2, tool: "search_definitions", description: "structural: classes, methods, functions, interfaces, typeAliases, variables, containsLine (C# and TypeScript/TSX)" },
         ToolPriority { rank: 3, tool: "search_grep", description: "content: exact/OR/AND, substring, phrase, regex (any language)" },
         ToolPriority { rank: 4, tool: "search_fast", description: "file name lookup (~35ms, any file)" },
         ToolPriority { rank: 5, tool: "search_find", description: "live walk (~3s, last resort)" },

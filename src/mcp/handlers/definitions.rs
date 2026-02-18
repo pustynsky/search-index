@@ -34,7 +34,10 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
     let parent_filter = args.get("parent").and_then(|v| v.as_str());
     let contains_line = args.get("containsLine").and_then(|v| v.as_u64()).map(|v| v as u32);
     let use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
-    let max_results = args.get("maxResults").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
+    let max_results = args.get("maxResults")
+        .and_then(|v| v.as_u64())
+        .map(|v| if v == 0 { 100 } else { v })
+        .unwrap_or(100) as usize;
     let exclude_dir: Vec<String> = args.get("excludeDir")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())

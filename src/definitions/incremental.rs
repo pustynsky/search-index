@@ -6,6 +6,7 @@ use tracing::warn;
 
 use super::types::*;
 use super::parser_csharp::parse_csharp_definitions;
+use super::parser_typescript::parse_typescript_definitions;
 
 /// Update definitions for a single file (incremental).
 /// Removes old definitions for the file, parses it again, adds new ones.
@@ -35,11 +36,23 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
     };
 
     // Parse the file
-    let mut cs_parser = tree_sitter::Parser::new();
-    cs_parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).ok();
-
-    let (file_defs, file_calls) = match ext.to_lowercase().as_str() {
-        "cs" => parse_csharp_definitions(&mut cs_parser, &content, file_id),
+    let ext_lower = ext.to_lowercase();
+    let (file_defs, file_calls) = match ext_lower.as_str() {
+        "cs" => {
+            let mut cs_parser = tree_sitter::Parser::new();
+            cs_parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).ok();
+            parse_csharp_definitions(&mut cs_parser, &content, file_id)
+        }
+        "ts" | "tsx" => {
+            let mut ts_parser = tree_sitter::Parser::new();
+            let ts_lang = if ext_lower == "tsx" {
+                tree_sitter_typescript::LANGUAGE_TSX
+            } else {
+                tree_sitter_typescript::LANGUAGE_TYPESCRIPT
+            };
+            ts_parser.set_language(&ts_lang.into()).ok();
+            parse_typescript_definitions(&mut ts_parser, &content, file_id)
+        }
         _ => (Vec::new(), Vec::new()),
     };
 

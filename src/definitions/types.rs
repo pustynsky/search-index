@@ -22,6 +22,10 @@ pub enum DefinitionKind {
     Delegate,
     Event,
     EnumMember,
+    // TypeScript kinds
+    Function,
+    TypeAlias,
+    Variable,
     // SQL kinds
     StoredProcedure,
     Table,
@@ -47,6 +51,9 @@ impl DefinitionKind {
             Self::Delegate => "delegate",
             Self::Event => "event",
             Self::EnumMember => "enumMember",
+            Self::Function => "function",
+            Self::TypeAlias => "typeAlias",
+            Self::Variable => "variable",
             Self::StoredProcedure => "storedProcedure",
             Self::Table => "table",
             Self::View => "view",
@@ -81,6 +88,9 @@ impl std::str::FromStr for DefinitionKind {
             "delegate" => Ok(Self::Delegate),
             "event" => Ok(Self::Event),
             "enummember" => Ok(Self::EnumMember),
+            "function" => Ok(Self::Function),
+            "typealias" => Ok(Self::TypeAlias),
+            "variable" => Ok(Self::Variable),
             "storedprocedure" => Ok(Self::StoredProcedure),
             "table" => Ok(Self::Table),
             "view" => Ok(Self::View),
@@ -156,9 +166,10 @@ use clap::Parser;
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = r#"WHAT IT DOES:
-  Parses C# and SQL files using tree-sitter to extract code structure:
+  Parses C#, TypeScript, and SQL files using tree-sitter to extract code structure:
     - C#: classes, interfaces, structs, enums, records, methods, constructors,
       properties, fields, delegates, events, enum members
+    - TypeScript/TSX: functions, type aliases, variables, classes, interfaces, enums, methods
     - SQL: stored procedures, tables, views, functions, user-defined types
       (requires compatible tree-sitter-sql grammar)
 
@@ -170,7 +181,9 @@ use clap::Parser;
 
 EXAMPLES:
   Index C# files:     search def-index --dir C:\Projects --ext cs
+  Index TypeScript:   search def-index --dir C:\Projects --ext ts,tsx
   Index C# + SQL:     search def-index --dir C:\Projects --ext cs,sql
+  Index all:          search def-index --dir C:\Projects --ext cs,sql,ts,tsx
   Custom threads:     search def-index --dir C:\Projects --ext cs --threads 8
 
 PERFORMANCE:
@@ -184,6 +197,7 @@ pub struct DefIndexArgs {
 
     /// File extensions to parse, comma-separated.
     /// C# (.cs) uses tree-sitter-c-sharp grammar.
+    /// TypeScript (.ts, .tsx) uses tree-sitter-typescript grammar.
     /// SQL (.sql) parsing is currently disabled (no compatible T-SQL grammar for tree-sitter 0.24).
     #[arg(short, long, default_value = "cs")]
     pub ext: String,

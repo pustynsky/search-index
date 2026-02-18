@@ -183,8 +183,10 @@ const MAX_MATCHED_TOKENS: usize = 20;
 /// Progressive truncation strategy:
 /// 1. Cap `lines` arrays in each file entry (keep first N, add `linesOmitted`)
 /// 2. Cap `matchedTokens` in summary (keep first N, add `matchedTokensOmitted`)
-/// 3. Remove file entries from the tail until under budget
-/// 4. Add `responseTruncated` + `truncationReason` to summary
+/// 3. Remove `lines` arrays entirely from file entries
+/// 4. Remove file entries from the tail until under budget
+/// 5. **Generic fallback**: truncate any top-level array (e.g. `definitions`,
+///    `containingDefinitions`, `callTree`) — covers non-grep response formats
 ///
 /// `max_bytes` = 0 disables truncation entirely.
 /// Returns the (possibly truncated) JSON value.
@@ -283,20 +285,83 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
         }
     }
 
+    // Check size after phase 4
+    let size_after_p4 = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
+    if size_after_p4 <= max_bytes {
+        inject_truncation_metadata(&mut output, &reasons, initial_size);
+        return output;
+    }
+
+    // Phase 5: Generic fallback — truncate any top-level array that isn't "files"
+    // (already handled above). This covers "definitions", "containingDefinitions",
+    // "callTree", or any future tool response format.
+    let current_size = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
+    if current_size > max_bytes {
+        if let Some(obj) = output.as_object_mut() {
+            // Find the largest top-level array (skip "files" — already handled)
+            let largest_array_key = obj.iter()
+                .filter(|(k, v)| *k != "files" && *k != "summary" && v.is_array())
+                .max_by_key(|(_, v)| v.as_array().map(|a| a.len()).unwrap_or(0))
+                .map(|(k, _)| k.clone());
+
+            if let Some(key) = largest_array_key {
+                if let Some(arr) = obj.get_mut(&key).and_then(|v| v.as_array_mut()) {
+                    let original_count = arr.len();
+                    if original_count > 0 {
+                        // Estimate how many entries to keep
+                        let avg_entry_size = current_size / original_count.max(1);
+                        let target_entries = if avg_entry_size > 0 {
+                            max_bytes / avg_entry_size
+                        } else {
+                            original_count / 2
+                        };
+                        let keep = target_entries.max(1).min(original_count);
+                        let actual_kept = keep; // capture before truncate
+                        arr.truncate(keep);
+                        let removed = original_count - arr.len();
+                        if removed > 0 {
+                            reasons.push(format!(
+                                "truncated '{}' array from {} to {} entries",
+                                key, original_count, arr.len()
+                            ));
+                            // Update 'returned' in summary to reflect actual array length
+                            if let Some(summary) = obj.get_mut("summary") {
+                                summary["returned"] = json!(actual_kept);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     inject_truncation_metadata(&mut output, &reasons, initial_size);
     output
 }
 
 /// Add truncation metadata to the summary object.
+/// Adapts the hint message based on the response format (grep vs definitions).
 fn inject_truncation_metadata(output: &mut Value, reasons: &[String], original_bytes: usize) {
     if reasons.is_empty() {
         return;
     }
+
+    // Detect response type to provide a relevant hint
+    let has_files = output.get("files").is_some();
+    let has_definitions = output.get("definitions").is_some();
+    let hint = if has_definitions {
+        "Response truncated. Narrow your search with more specific name, kind, file, or parent filters, or reduce maxResults."
+    } else if has_files {
+        "Use countOnly=true for broad queries, or narrow with dir/ext/exclude filters"
+    } else {
+        "Response truncated. Use more specific filters to reduce result size."
+    };
+
     if let Some(summary) = output.get_mut("summary") {
         summary["responseTruncated"] = json!(true);
         summary["truncationReason"] = json!(reasons.join("; "));
         summary["originalResponseBytes"] = json!(original_bytes);
-        summary["hint"] = json!("Use countOnly=true for broad queries, or narrow with dir/ext/exclude filters");
+        summary["hint"] = json!(hint);
     }
 }
 
@@ -773,5 +838,94 @@ mod tests {
         let small = ToolCallResult::success(r#"{"files":[],"summary":{"totalFiles":0}}"#.to_string());
         let result = truncate_response_if_needed(small, DEFAULT_MAX_RESPONSE_BYTES);
         assert!(!result.is_error);
+    }
+
+    #[test]
+    fn test_truncate_definitions_array() {
+        // Build a search_definitions-style response with many definitions — way over budget
+        let mut defs = Vec::new();
+        for i in 0..5000 {
+            defs.push(json!({
+                "name": format!("SomeDefinitionName_{}", i),
+                "kind": "property",
+                "file": format!("/some/long/path/to/deeply/nested/file_{}.ts", i % 100),
+                "lines": format!("{}-{}", i * 10, i * 10 + 5),
+                "modifiers": ["public"],
+                "parent": format!("SomeParentClass_{}", i % 50),
+            }));
+        }
+        let output = json!({
+            "definitions": defs,
+            "summary": {
+                "totalResults": 5000,
+                "returned": 5000,
+                "searchTimeMs": 1.23,
+                "indexFiles": 500,
+                "totalDefinitions": 50000,
+            }
+        });
+
+        let initial_size = serde_json::to_string(&output).unwrap().len();
+        assert!(initial_size > DEFAULT_MAX_RESPONSE_BYTES,
+            "Test setup: definitions response should be over budget ({} bytes)", initial_size);
+
+        let result = truncate_large_response(output, DEFAULT_MAX_RESPONSE_BYTES);
+        let result_str = serde_json::to_string(&result).unwrap();
+
+        // Definitions array should be truncated
+        let result_defs = result.get("definitions").and_then(|d| d.as_array()).unwrap();
+        assert!(result_defs.len() < 5000,
+            "Definitions count should be reduced from 5000, got {}", result_defs.len());
+
+        // Summary should indicate truncation
+        let summary = result.get("summary").unwrap();
+        assert_eq!(summary.get("responseTruncated").and_then(|v| v.as_bool()), Some(true));
+        assert!(summary.get("truncationReason").is_some());
+        let reason = summary["truncationReason"].as_str().unwrap();
+        assert!(reason.contains("definitions"),
+            "Truncation reason should mention 'definitions', got: {}", reason);
+
+        // 'returned' in summary should reflect actual array length after truncation
+        let returned = summary.get("returned").and_then(|v| v.as_u64()).unwrap() as usize;
+        assert_eq!(returned, result_defs.len(),
+            "summary.returned ({}) should match actual definitions array length ({})",
+            returned, result_defs.len());
+
+        // Hint should be definitions-specific (not grep-specific)
+        let hint = summary.get("hint").and_then(|v| v.as_str()).unwrap();
+        assert!(hint.contains("name") && hint.contains("kind") && hint.contains("file"),
+            "Hint should mention definitions-specific filters, got: {}", hint);
+        assert!(!hint.contains("countOnly"),
+            "Hint should NOT mention countOnly (that's for grep), got: {}", hint);
+
+        // Result should be reasonably close to budget
+        assert!(result_str.len() <= DEFAULT_MAX_RESPONSE_BYTES * 2,
+            "Response {} bytes should be near budget {}", result_str.len(), DEFAULT_MAX_RESPONSE_BYTES);
+    }
+
+    #[test]
+    fn test_truncate_grep_hint_unchanged() {
+        // Verify grep-style responses still get the grep-specific hint
+        let mut files = Vec::new();
+        for i in 0..1000 {
+            files.push(json!({
+                "path": format!("/some/long/path/to/file_{}.cs", i),
+                "score": 0.001,
+                "occurrences": 1,
+                "lines": [1],
+            }));
+        }
+        let output = json!({
+            "files": files,
+            "summary": {"totalFiles": 1000, "totalOccurrences": 1000}
+        });
+
+        let result = truncate_large_response(output, DEFAULT_MAX_RESPONSE_BYTES);
+        let summary = result.get("summary").unwrap();
+        let hint = summary.get("hint").and_then(|v| v.as_str()).unwrap();
+        assert!(hint.contains("countOnly"),
+            "Grep hint should mention countOnly, got: {}", hint);
+        assert!(!hint.contains("kind"),
+            "Grep hint should NOT mention definitions filters, got: {}", hint);
     }
 }

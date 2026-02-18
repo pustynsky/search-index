@@ -469,8 +469,8 @@ cargo run -- def-index -d $TEST_DIR -e $TEST_EXT
 
 **Validates:** Tree-sitter parsing, definition extraction, persistence.
 
-**Note:** For `.rs` files, 0 definitions is expected (parser supports C#/SQL only).
-For C# projects, expect hundreds/thousands of definitions.
+**Note:** For `.rs` files, 0 definitions is expected (parser supports C#/TypeScript/SQL only).
+For C# or TypeScript projects, expect hundreds/thousands of definitions.
 
 ---
 
@@ -678,12 +678,12 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 **Expected:**
 
 - stdout: JSON-RPC response with definition results
-- For Rust codebase: 0 results (tree-sitter supports C#/SQL only)
-- For C# codebase: results with `name`, `kind`, `file`, `lines`
+- For Rust codebase: 0 results (tree-sitter supports C#/TypeScript/SQL only)
+- For C# or TypeScript codebase: results with `name`, `kind`, `file`, `lines`
 
 **Validates:** search_definitions handler, definition index loading, AST-based search.
 
-**Note:** Requires `--definitions` flag. For `.rs` files, 0 results is expected.
+**Note:** Requires `--definitions` flag. For `.rs` files, 0 results is expected. For TypeScript files, definition kinds include `function`, `typeAlias`, `variable`, etc.
 
 ---
 
@@ -1250,6 +1250,270 @@ cargo run -- tips
 ---
 
 
+## TypeScript Support Tests
+
+### T44: `def-index` — Build TypeScript definition index
+
+**Command:**
+
+```powershell
+cargo run -- def-index -d $TEST_DIR -e ts
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr: `[def-index] Found N files to parse`
+- stderr: `[def-index] Parsed N files in X.Xs, extracted M definitions`
+- A `.didx` file created
+- Definitions include TypeScript-specific kinds: `function`, `class`, `interface`, `enum`, `typeAlias`, `variable`
+
+**Validates:** Tree-sitter TypeScript parsing, definition extraction for `.ts` files.
+
+---
+
+### T45: `def-index` — Build TypeScript + TSX definition index
+
+**Command:**
+
+```powershell
+cargo run -- def-index -d $TEST_DIR -e ts,tsx
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr: `[def-index] Found N files to parse` (N includes both `.ts` and `.tsx` files)
+- stderr: `[def-index] Parsed N files in X.Xs, extracted M definitions`
+- Definitions extracted from both `.ts` and `.tsx` files
+
+**Validates:** Mixed `.ts` + `.tsx` extension handling in definition indexing. TSX files are parsed using the TSX grammar.
+
+---
+
+### T46: `serve` — MCP search_definitions finds TypeScript functions
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"function"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definition results
+- Results contain TypeScript function declarations with `kind: "function"`
+- Each definition includes `name`, `file`, `lines`, `signature`
+
+**Validates:** `search_definitions` with `kind` filter works for TypeScript-specific definition kinds.
+
+**Note:** Requires a TypeScript project with function declarations.
+
+---
+
+### T47: `serve` — MCP search_definitions finds TypeScript class by name
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"UserService"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definition results matching `UserService`
+- Result includes class definition with correct file path and line range
+
+**Validates:** Name-based search works for TypeScript definitions.
+
+**Note:** Replace `UserService` with a class name that exists in the TypeScript project.
+
+---
+
+### T48: `serve` — MCP search_definitions finds decorated TypeScript classes
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"attribute":"injectable"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definition results
+- Results contain TypeScript classes decorated with `@Injectable()` or similar decorators
+- Decorator names are stored as attributes (lowercased, without `@` prefix)
+
+**Validates:** TypeScript decorator extraction and attribute-based search.
+
+**Note:** Replace `injectable` with a decorator name that exists in the TypeScript project.
+
+---
+
+### T49: `def-index` — Mixed C# + TypeScript definition index
+
+**Command:**
+
+```powershell
+cargo run -- def-index -d $TEST_DIR -e cs,ts
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr: `[def-index] Found N files to parse` (N includes both `.cs` and `.ts` files)
+- stderr: `[def-index] Parsed N files in X.Xs, extracted M definitions`
+- Both C# definitions (classes, methods, etc.) and TypeScript definitions (functions, type aliases, etc.) are present in the index
+
+**Validates:** Mixed-language definition indexing. C# files use the C# parser, TypeScript files use the TypeScript parser, and both coexist in the same `.didx` index.
+
+---
+
+### T50: `serve` — Incremental TypeScript definition update via watcher
+
+**Scenario:** Start the MCP server with `--watch --definitions` for a TypeScript project. Modify a `.ts` file (add or rename a function). The watcher should detect the change and re-parse the file, updating definitions in-place.
+
+**Command:**
+
+```powershell
+# Start server in background
+$server = Start-Process -PassThru -NoNewWindow cargo -ArgumentList "run -- serve --dir $TEST_DIR --ext ts --watch --definitions"
+
+# Wait for server to initialize
+Start-Sleep -Seconds 3
+
+# Modify a .ts file (add a new function)
+Add-Content "$TEST_DIR\some_file.ts" "`nexport function newTestFunction(): void { }"
+
+# Wait for watcher debounce
+Start-Sleep -Seconds 2
+
+# Query for the new function
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"newTestFunction"}}}'
+) -join "`n"
+echo $msgs | & $server.Path
+```
+
+**Expected:**
+
+- After file modification, stderr shows watcher detecting the change
+- `search_definitions` finds `newTestFunction` with correct file and line info
+
+**Validates:** Incremental definition update for TypeScript files via the file watcher.
+
+**Note:** This is a manual test requiring a running server. Clean up the added function after testing.
+
+---
+
+### T51: `serve` — TypeScript-specific definition kinds (typeAlias, variable)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"typeAlias"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definitions of kind `typeAlias`
+- Results contain TypeScript `type` declarations (e.g., `type Props = { ... }`)
+
+**Command (variable kind):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"variable"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definitions of kind `variable`
+- Results contain exported `const`/`let`/`var` declarations
+
+**Validates:** TypeScript-specific definition kinds (`typeAlias`, `variable`) are correctly extracted and searchable.
+
+**Note:** Requires a TypeScript project with type aliases and exported variables.
+
+---
+
+### T52: `serve` — Response truncation for `search_definitions` broad queries
+
+**Scenario:** When `search_definitions` returns a large result set (e.g., broad `kind: "property"`
+query on a large codebase), the response must be truncated to stay within the `--max-response-kb`
+budget. Unlike `search_grep` (which uses Phase 1-4 with its `files` array structure),
+`search_definitions` uses a `definitions` array — truncation Phase 5 (generic array fallback)
+handles this. The `summary` must include truncation metadata with a definitions-specific hint.
+
+**Command (broad query expected to exceed 16KB):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"property","maxResults":500}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,ts,tsx --definitions --metrics 2>$null
+```
+
+**Expected (if > 16KB):**
+
+- `summary.responseTruncated` = `true`
+- `summary.truncationReason` contains `"truncated 'definitions' array"`
+- `summary.returned` matches actual `definitions` array length (not the pre-truncation count)
+- `summary.totalResults` reflects the full match count (before both `maxResults` and Phase 5 truncation)
+- `summary.hint` mentions `"name, kind, file, or parent filters"` (NOT `"countOnly"`)
+- `summary.originalResponseBytes` > response budget
+
+**Negative test — narrow query stays under budget:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"truncate_large_response","kind":"method"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir . --ext rs --definitions --metrics 2>$null
+```
+
+**Expected:**
+
+- `summary.responseTruncated` is absent
+- `definitions` array contains the full result set
+
+**Validates:** Phase 5 generic array truncation for non-grep response formats, definitions-specific hint, `returned` count accuracy after truncation.
+
+**Note:** Requires a large enough codebase with 500+ properties to trigger truncation. If the test codebase is small, increase `maxResults` or use `--max-response-kb 4` to lower the budget.
+
+---
+
+
 ## Automation Script
 
 Save as `e2e-test.ps1` and run from workspace root:
@@ -1335,10 +1599,16 @@ Run-Test "T20 def-index"           "$Binary def-index -d $TestDir -e $TestExt"
 Run-Test "T21 invalid-regex"       "$Binary grep `"[invalid`" -d $TestDir -e $TestExt --regex" -ExpectedExit 1
 Run-Test "T22 nonexistent-dir"     "$Binary find test -d /nonexistent/path/xyz" -ExpectedExit 1
 
-# T25-T30, T28a-T28e: serve (MCP)
+# T20b: def-index with TypeScript (T49 — mixed C#/TS)
+# Only runs if TestExt includes ts/tsx or if we detect .ts files
+Run-Test "T49 def-index-ts"        "$Binary def-index -d $TestDir -e ts"
+
+# T25-T52: serve (MCP)
 # Note: MCP tests require piping JSON-RPC to stdin, which is hard to automate in simple PowerShell.
 # These are manual verification tests — run them individually per the test plan.
-Write-Host "  T25-T30, T28a-T28e: MCP serve tests — run manually (see e2e-test-plan.md)"
+# Includes: T25-T30 (grep/find MCP), T42 (grep truncation), T44-T51 (TypeScript definitions),
+#           T52 (definitions truncation Phase 5).
+Write-Host "  T25-T52: MCP serve tests — run manually (see e2e-test-plan.md)"
 
 Write-Host "`n=== Results: $passed passed, $failed failed, $total total ===`n"
 if ($failed -gt 0) { exit 1 }

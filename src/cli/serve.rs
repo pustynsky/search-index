@@ -89,7 +89,7 @@ pub fn cmd_serve(args: ServeArgs) {
     // Load or build definition index if --definitions
     let def_index = if args.definitions {
         let def_start = Instant::now();
-        let def_exts = "cs,sql";
+        let def_exts = "cs,sql,ts,tsx";
 
         let def_idx = match definitions::load_definition_index(&dir_str, def_exts, &idx_base) {
             Some(idx) => {
