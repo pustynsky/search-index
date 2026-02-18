@@ -184,7 +184,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_definitions".to_string(),
-            description: "Search code definitions -- classes, interfaces, methods, properties, enums. Uses pre-built tree-sitter AST index for instant results (~0.001s). LANGUAGE-SPECIFIC: currently C# only (tree-sitter grammar required; SQL parser retained but disabled). Requires server started with --definitions flag. Supports 'containsLine' to find which method/class contains a given line number (no more manual read_file!). Supports 'includeBody' to return actual source code inline, eliminating read_file calls.".to_string(),
+            description: "Search code definitions -- classes, interfaces, methods, properties, enums. Uses pre-built tree-sitter AST index for instant results (~0.001s). LANGUAGE-SPECIFIC: Supports C# and TypeScript/TSX (tree-sitter grammars). SQL parser retained but disabled. Requires server started with --definitions flag. Supports 'containsLine' to find which method/class contains a given line number (no more manual read_file!). Supports 'includeBody' to return actual source code inline, eliminating read_file calls.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -194,8 +194,8 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "kind": {
                         "type": "string",
-                        "enum": ["class", "interface", "method", "property", "field", "enum", "struct", "record", "constructor", "delegate", "event", "enumMember", "storedProcedure", "table", "view", "sqlFunction", "userDefinedType", "column", "sqlIndex"],
-                        "description": "Filter by definition kind. C# kinds: class, interface, method, property, field, enum, struct, record, constructor, delegate, event. SQL kinds: storedProcedure, table, view, sqlFunction, userDefinedType."
+                        "enum": ["class", "interface", "method", "property", "field", "enum", "struct", "record", "constructor", "delegate", "event", "enumMember", "function", "typeAlias", "variable", "storedProcedure", "table", "view", "sqlFunction", "userDefinedType", "column", "sqlIndex"],
+                        "description": "Filter by definition kind. C# kinds: class, interface, method, property, field, enum, struct, record, constructor, delegate, event. TypeScript kinds: function, typeAlias, variable (plus shared: class, interface, method, property, field, enum, constructor, enumMember). SQL kinds: storedProcedure, table, view, sqlFunction, userDefinedType."
                     },
                     "attribute": {
                         "type": "string",
@@ -248,7 +248,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_callers".to_string(),
-            description: "RECOMMENDED for call chain analysis — find all callers of a method and build a call tree (up or down) in a SINGLE sub-millisecond request. LANGUAGE-SPECIFIC: currently C# only (requires tree-sitter AST definition index). Replaces 7+ sequential search_grep + read_file calls. Combines grep index with AST definition index. Returns a hierarchical call tree with method signatures, file paths, and line numbers. IMPORTANT: Always specify the 'class' parameter when you know the containing class — without it, results may mix callers from unrelated classes that have a method with the same name. DI-aware: class='UserService' automatically includes callers using IUserService. Requires server started with --definitions flag.".to_string(),
+            description: "RECOMMENDED for call chain analysis — find all callers of a method and build a call tree (up or down) in a SINGLE sub-millisecond request. LANGUAGE-SPECIFIC: currently C# only (TypeScript call-site extraction planned for Phase 2). Replaces 7+ sequential search_grep + read_file calls. Combines grep index with AST definition index. Returns a hierarchical call tree with method signatures, file paths, and line numbers. IMPORTANT: Always specify the 'class' parameter when you know the containing class — without it, results may mix callers from unrelated classes that have a method with the same name. DI-aware: class='UserService' automatically includes callers using IUserService. Requires server started with --definitions flag.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

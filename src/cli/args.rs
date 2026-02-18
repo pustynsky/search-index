@@ -157,8 +157,10 @@ pub struct ContentIndexArgs {
 EXAMPLES:
   Basic:          search serve --dir C:\Projects\MyApp --ext cs
   Multi-ext:      search serve --dir C:\Projects --ext cs,sql,csproj
+  C# + TypeScript: search serve --dir C:\Projects --ext cs,ts,tsx
   With watcher:   search serve --dir C:\Projects --ext cs --watch
   With defs:      search serve --dir C:\Projects --ext cs --watch --definitions
+  TS defs:        search serve --dir C:\Projects --ext ts,tsx --watch --definitions
   Custom debounce: search serve --dir . --ext rs --watch --debounce-ms 1000
 
 VS CODE CONFIGURATION (.vscode/mcp.json):
@@ -173,11 +175,13 @@ VS CODE CONFIGURATION (.vscode/mcp.json):
 
 AVAILABLE TOOLS (exposed via MCP):
   search_grep        -- Search content index (TF-IDF ranked, regex, phrase, multi-term)
-  search_definitions -- Search code definitions: classes, methods, interfaces, enums, SPs
-                       Supports containsLine to find which method/class contains a line.
-                       (requires --definitions flag)
+  search_definitions -- Search code definitions: classes, methods, interfaces, enums, SPs,
+                        functions, type aliases, variables. Supports C# and TypeScript/TSX.
+                        Supports containsLine to find which method/class/function contains
+                        a line. (requires --definitions flag)
   search_callers     -- Find all callers of a method and build a call tree (up/down).
                        Combines grep index + AST index. Replaces 7+ manual queries with 1.
+                       Currently C# only (TypeScript planned for Phase 2).
                        (requires --definitions flag)
   search_find        -- Live filesystem search (no index, slow for large dirs)
   search_fast        -- Search file name index (instant)

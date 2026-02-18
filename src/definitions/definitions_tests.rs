@@ -539,3 +539,276 @@ public class MyService {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ─── TypeScript Parsing Tests ────────────────────────────────────────
+
+use super::parser_typescript::parse_typescript_definitions;
+
+#[test]
+fn test_parse_ts_class() {
+    let source = "export class UserService extends BaseService implements IUserService { }";
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let class_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Class).collect();
+    assert_eq!(class_defs.len(), 1);
+    assert_eq!(class_defs[0].name, "UserService");
+    assert!(class_defs[0].base_types.iter().any(|b| b.contains("BaseService")));
+    assert!(class_defs[0].base_types.iter().any(|b| b.contains("IUserService")));
+    assert!(class_defs[0].modifiers.contains(&"export".to_string()));
+}
+
+#[test]
+fn test_parse_ts_abstract_class() {
+    let source = r#"abstract class AbstractHandler {
+    abstract handle(): void;
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let class_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Class).collect();
+    assert_eq!(class_defs.len(), 1);
+    assert_eq!(class_defs[0].name, "AbstractHandler");
+    assert!(class_defs[0].modifiers.contains(&"abstract".to_string()));
+
+    let method_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Method).collect();
+    assert!(method_defs.len() >= 1);
+    assert_eq!(method_defs[0].name, "handle");
+    assert!(method_defs[0].modifiers.contains(&"abstract".to_string()));
+}
+
+#[test]
+fn test_parse_ts_interface() {
+    let source = r#"export interface IOrderProcessor {
+    process(order: Order): Promise<void>;
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let iface_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Interface).collect();
+    assert_eq!(iface_defs.len(), 1);
+    assert_eq!(iface_defs[0].name, "IOrderProcessor");
+    assert!(iface_defs[0].modifiers.contains(&"export".to_string()));
+
+    // Interface should have a property child for the method signature
+    let prop_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Property).collect();
+    assert!(prop_defs.len() >= 1);
+}
+
+#[test]
+fn test_parse_ts_function() {
+    let source = "export async function fetchUser(id: string): Promise<User> { return {} as User; }";
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let fn_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Function).collect();
+    assert_eq!(fn_defs.len(), 1);
+    assert_eq!(fn_defs[0].name, "fetchUser");
+    assert!(fn_defs[0].modifiers.contains(&"export".to_string()));
+    assert!(fn_defs[0].modifiers.contains(&"async".to_string()));
+    assert!(fn_defs[0].signature.is_some());
+    let sig = fn_defs[0].signature.as_ref().unwrap();
+    assert!(sig.contains("id: string"));
+}
+
+#[test]
+fn test_parse_ts_method() {
+    let source = r#"class UserManager {
+    public async getUser(id: string): Promise<User> { return {} as User; }
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let method_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Method).collect();
+    assert_eq!(method_defs.len(), 1);
+    assert_eq!(method_defs[0].name, "getUser");
+    assert!(method_defs[0].modifiers.contains(&"public".to_string()));
+    assert!(method_defs[0].modifiers.contains(&"async".to_string()));
+    assert_eq!(method_defs[0].parent, Some("UserManager".to_string()));
+}
+
+#[test]
+fn test_parse_ts_constructor() {
+    let source = r#"class OrderService {
+    constructor(private userService: IUserService) { }
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let ctor_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Constructor).collect();
+    assert_eq!(ctor_defs.len(), 1);
+    assert_eq!(ctor_defs[0].name, "constructor");
+    assert_eq!(ctor_defs[0].parent, Some("OrderService".to_string()));
+    assert!(ctor_defs[0].signature.is_some());
+    let sig = ctor_defs[0].signature.as_ref().unwrap();
+    assert!(sig.contains("userService"));
+}
+
+#[test]
+fn test_parse_ts_enum() {
+    let source = r#"export enum OrderStatus {
+    Pending,
+    Active,
+    Completed
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let enum_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Enum).collect();
+    assert_eq!(enum_defs.len(), 1);
+    assert_eq!(enum_defs[0].name, "OrderStatus");
+
+    let member_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::EnumMember).collect();
+    assert_eq!(member_defs.len(), 3);
+}
+
+#[test]
+fn test_parse_ts_type_alias() {
+    let source = "export type UserId = string | number;";
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let ta_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::TypeAlias).collect();
+    assert_eq!(ta_defs.len(), 1);
+    assert_eq!(ta_defs[0].name, "UserId");
+    assert!(ta_defs[0].modifiers.contains(&"export".to_string()));
+}
+
+#[test]
+fn test_parse_ts_variable() {
+    let source = "export const MAX_RETRIES = 3;";
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let var_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Variable).collect();
+    assert_eq!(var_defs.len(), 1);
+    assert_eq!(var_defs[0].name, "MAX_RETRIES");
+    assert!(var_defs[0].modifiers.contains(&"export".to_string()));
+}
+
+#[test]
+fn test_parse_ts_decorators() {
+    let source = r#"@Injectable()
+@Component({selector: 'app'})
+class AppComponent {}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let class_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Class).collect();
+    assert_eq!(class_defs.len(), 1);
+    assert_eq!(class_defs[0].name, "AppComponent");
+    assert_eq!(class_defs[0].attributes.len(), 2);
+    assert!(class_defs[0].attributes.iter().any(|a| a.contains("Injectable")));
+    assert!(class_defs[0].attributes.iter().any(|a| a.contains("Component")));
+}
+
+#[test]
+fn test_parse_ts_field() {
+    let source = r#"class DataHolder {
+    private readonly name: string = '';
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let field_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Field).collect();
+    assert_eq!(field_defs.len(), 1);
+    assert_eq!(field_defs[0].name, "name");
+    assert!(field_defs[0].modifiers.contains(&"private".to_string()));
+    assert!(field_defs[0].modifiers.contains(&"readonly".to_string()));
+}
+
+#[test]
+fn test_parse_ts_interface_property() {
+    let source = r#"interface IEntity {
+    readonly id: string;
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let prop_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Property).collect();
+    assert_eq!(prop_defs.len(), 1);
+    assert_eq!(prop_defs[0].name, "id");
+    assert!(prop_defs[0].modifiers.contains(&"readonly".to_string()));
+}
+
+#[test]
+fn test_parse_tsx_file() {
+    let source = r#"export class AppComponent {
+    render() { return <div/>; }
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TSX.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let class_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Class).collect();
+    assert_eq!(class_defs.len(), 1);
+    assert_eq!(class_defs[0].name, "AppComponent");
+
+    let method_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Method).collect();
+    assert_eq!(method_defs.len(), 1);
+    assert_eq!(method_defs[0].name, "render");
+}
+
+#[test]
+fn test_ts_incremental_update() {
+    let dir = std::env::temp_dir().join("search_def_ts_incr");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Step 1: Create a .ts file and add it to the index
+    let test_file = dir.join("service.ts");
+    std::fs::write(&test_file, "export class OrderService { process(): void {} }").unwrap();
+
+    let mut index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0, extensions: vec!["ts".to_string()],
+        files: Vec::new(), definitions: Vec::new(), name_index: HashMap::new(),
+        kind_index: HashMap::new(), attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(), file_index: HashMap::new(),
+        path_to_id: HashMap::new(), method_calls: HashMap::new(),
+    };
+
+    let clean = PathBuf::from(crate::clean_path(&test_file.to_string_lossy()));
+    update_file_definitions(&mut index, &clean);
+
+    assert!(!index.definitions.is_empty());
+    assert!(index.name_index.contains_key("orderservice"));
+    assert!(index.name_index.contains_key("process"));
+    assert_eq!(index.files.len(), 1);
+
+    // Step 2: Modify the .ts file — rename class, add a method
+    std::fs::write(&test_file, r#"export class UpdatedService {
+    execute(): void {}
+    validate(): boolean { return true; }
+}"#).unwrap();
+
+    update_file_definitions(&mut index, &clean);
+
+    assert!(!index.name_index.contains_key("orderservice"));
+    assert!(!index.name_index.contains_key("process"));
+    assert!(index.name_index.contains_key("updatedservice"));
+    assert!(index.name_index.contains_key("execute"));
+    assert!(index.name_index.contains_key("validate"));
+
+    // Step 3: Remove the file (simulate deletion by writing empty)
+    std::fs::write(&test_file, "").unwrap();
+    update_file_definitions(&mut index, &clean);
+
+    // All named definitions from that file should be gone from name index
+    assert!(!index.name_index.contains_key("updatedservice"));
+    assert!(!index.name_index.contains_key("execute"));
+    assert!(!index.name_index.contains_key("validate"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

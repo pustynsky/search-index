@@ -38,7 +38,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Respects `.gitignore`** — automatically skips ignored files
 - **Extension filtering** — limit search to specific file types
 - **MCP Server** — native Model Context Protocol server for AI agents (VS Code Roo, Copilot, Claude)
-- **Code definition index** — tree-sitter AST parsing for structural code search *(currently C#-specific; SQL parser retained but disabled — see [Supported Languages](docs/architecture.md#supported-languages))*
+- **Code definition index** — tree-sitter AST parsing for structural code search *(C# and TypeScript/TSX; SQL parser retained but disabled — see [Supported Languages](docs/architecture.md#supported-languages))*
 - **Parallel parsing** — multi-threaded tree-sitter parsing across all CPU cores (~16-32s for 48K files, varies by CPU)
 - **File watcher** — incremental index updates on file changes (<1s per file for content + definition indexes)
 - **Substring search** — trigram-indexed substring matching within tokens (e.g., `DatabaseConnection` finds `databaseconnectionfactory`) — ~0.07ms vs ~44ms for regex
@@ -373,14 +373,20 @@ Removed 2 orphaned index file(s).
 
 ### `search def-index` — Build Code Definition Index
 
-Parses source files using tree-sitter to extract structural code definitions (classes, methods, interfaces, enums, etc.). **Unlike the content index, this is language-specific** — currently C# only (SQL parser is retained but disabled). See [Supported Languages](docs/architecture.md#supported-languages) for details.
+Parses source files using tree-sitter to extract structural code definitions (classes, methods, interfaces, enums, etc.). **Unlike the content index, this is language-specific** — supports C# and TypeScript/TSX (SQL parser is retained but disabled). See [Supported Languages](docs/architecture.md#supported-languages) for details.
 
 ```bash
 # Index C# files
 search def-index --dir C:\Projects --ext cs
 
-# Index C# + SQL files
-search def-index --dir C:\Projects --ext cs,sql
+# Index TypeScript files
+search def-index --dir C:\Projects --ext ts
+
+# Index TypeScript + TSX files
+search def-index --dir C:\Projects --ext ts,tsx
+
+# Index C# + TypeScript together (mixed-language project)
+search def-index --dir C:\Projects --ext cs,ts,tsx
 
 # Custom thread count
 search def-index --dir C:\Projects --ext cs --threads 8
@@ -391,9 +397,10 @@ search def-index --dir C:\Projects --ext cs --threads 8
 | Language | Definition Types |
 | -------- | ---|
 | C# (.cs) | classes, interfaces, structs, enums, records, methods, constructors, properties, fields, delegates, events, enum members |
+| TypeScript (.ts, .tsx) | classes, interfaces, enums, functions, type aliases, variables (const/let/var), methods, constructors, properties, enum members |
 | SQL (.sql) | stored procedures, tables, views, functions, user-defined types (requires compatible tree-sitter grammar) |
 
-Each definition includes: name, kind, file path, line range, full signature, modifiers (public/static/async/etc.), attributes (`[ServiceProvider]`, `[ApiController]`, etc.), base types/interfaces, and parent class.
+Each definition includes: name, kind, file path, line range, full signature, modifiers (public/static/async/etc.), attributes/decorators (`[ServiceProvider]`, `@Injectable()`, etc.), base types/interfaces, and parent class.
 
 **Performance:**
 
@@ -422,11 +429,20 @@ Starts a Model Context Protocol (MCP) server over stdio. Loads the content index
 # Start MCP server for C# files
 search serve --dir C:\Projects --ext cs
 
+# Start MCP server for TypeScript files
+search serve --dir C:\Projects --ext ts,tsx
+
 # With file watching (auto-updates index when files change)
 search serve --dir C:\Projects --ext cs --watch
 
 # With code definition index (enables search_definitions tool)
 search serve --dir C:\Projects --ext cs --watch --definitions
+
+# With TypeScript definitions
+search serve --dir C:\Projects --ext ts,tsx --watch --definitions
+
+# Mixed C# + TypeScript project
+search serve --dir C:\Projects --ext cs,ts,tsx --watch --definitions
 
 # Multiple extensions
 search serve --dir C:\Projects --ext cs,sql,csproj --watch
@@ -456,7 +472,7 @@ search serve --dir C:\Projects --ext cs --watch --definitions --metrics
 | Tool                  | Description                                                      |
 | --------------------- | ---------------------------------------------------------------- |
 | `search_grep`         | Search content index with TF-IDF ranking, regex, phrase, AND/OR  |
-| `search_definitions`  | Search code definitions: classes, methods, interfaces, enums, SPs. Supports `containsLine` to find which method/class contains a given line number. Supports `includeBody` to return source code inline. (requires `--definitions`) |
+| `search_definitions`  | Search code definitions: classes, methods, interfaces, enums, functions, type aliases, SPs. Supports `containsLine` to find which method/class contains a given line number. Supports `includeBody` to return source code inline. (requires `--definitions`) |
 | `search_callers`      | Find all callers of a method and build a recursive call tree (up or down). Combines grep index + AST definition index to trace call chains in a single request. (requires `--definitions`) |
 | `search_find`         | Live filesystem walk (⚠️ slow for large dirs)                    |
 | `search_fast`         | Search pre-built file name index (instant). Supports comma-separated patterns for multi-file lookup (OR logic). |
@@ -577,8 +593,8 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 | Parameter            | Type    | Default | Description                                                        |
 | -------------------- | ------- | ------- | ------------------------------------------------------------------ |
 | `name`               | string  | —       | Substring or comma-separated OR search                             |
-| `kind`               | string  | —       | Filter by definition kind (class, method, property, etc.)          |
-| `attribute`          | string  | —       | Filter by C# attribute                                             |
+| `kind`               | string  | —       | Filter by definition kind (class, method, property, function, typeAlias, variable, etc.) |
+| `attribute`          | string  | —       | Filter by C# attribute or TypeScript decorator                     |
 | `baseType`           | string  | —       | Filter by base type/interface                                      |
 | `file`               | string  | —       | Filter by file path substring                                      |
 | `parent`             | string  | —       | Filter by parent class name                                        |
@@ -793,7 +809,7 @@ cargo test -- --nocapture
 | MCP Handlers | Tool definitions, grep dispatch, callers, definitions, containsLine |
 | Substring/Trigram | Trigram generation, trigram index build, sorted intersection, substring search (partial match, full match, no match, short query, case-insensitive, multi-term, mutually exclusive modes, dirty rebuild), 13 e2e integration tests |
 | File Watcher | Forward index, incremental update, file removal, bulk threshold, trigram dirty flag |
-| Definitions | C# parsing, SQL parsing, incremental update, serialization |
+| Definitions | C# parsing, TypeScript/TSX parsing, SQL parsing, incremental update, serialization |
 | Property tests (proptest) | Tokenizer invariants (always lowercase, min length, deterministic, valid chars, monotonic), posting roundtrip, index consistency, TF-IDF ordering, clean_path idempotency |
 | Benchmarks (criterion) | Tokenizer throughput, index lookup latency, TF-IDF scoring, regex scan, serialization |
 
