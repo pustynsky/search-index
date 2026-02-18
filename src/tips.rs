@@ -24,6 +24,14 @@ pub struct ToolPriority {
     pub description: &'static str,
 }
 
+/// A strategy recipe for a common task pattern.
+pub struct Strategy {
+    pub name: &'static str,
+    pub when: &'static str,
+    pub steps: &'static [&'static str],
+    pub anti_patterns: &'static [&'static str],
+}
+
 // ─── Single source of truth ─────────────────────────────────────────
 
 pub fn tips() -> Vec<Tip> {
@@ -108,6 +116,61 @@ pub fn tips() -> Vec<Tip> {
             why: "Broad queries (short substring, common tokens) can return thousands of files. The server auto-truncates responses to ~16KB (~4K tokens) to avoid filling LLM context. summary.totalFiles always shows the FULL count. Use countOnly=true or narrow with dir/ext/exclude to get focused results.",
             example: "If responseTruncated=true appears, narrow your query: add ext, dir, excludeDir, or use countOnly=true. Server flag --max-response-kb adjusts the limit (0=unlimited).",
         },
+        Tip {
+            rule: "Multi-term name in search_definitions: find ALL types in ONE call",
+            why: "The name parameter accepts comma-separated terms (OR logic). Find a class + its interface + related types in a single query instead of 3 separate calls.",
+            example: "search_definitions name='UserService,IUserService,UserController' -> finds ALL matching definitions in one call",
+        },
+        Tip {
+            rule: "Query budget: aim for 3 or fewer search calls per exploration task",
+            why: "Each search call adds latency and LLM context. Use multi-term queries, includeBody, and combined filters to minimize round-trips. Most architecture questions can be answered in 1-3 calls.",
+            example: "Step 1: search_definitions name='OrderService,IOrderService' includeBody=true (map + read). Step 2: search_callers method='ProcessOrder' class='OrderService' (call chain). Done in 2 calls.",
+        },
+    ]
+}
+
+pub fn strategies() -> Vec<Strategy> {
+    vec![
+        Strategy {
+            name: "Architecture Exploration",
+            when: "User asks 'how is X structured', 'explain module X', or 'show me the architecture of X'",
+            steps: &[
+                "Step 1 - Map the landscape (1 call): search_definitions name='X' maxResults=50 includeBody=false -> lists ALL classes, interfaces, enums, methods in one shot",
+                "Step 2 - Read key implementations (1 call): search_definitions name='<top 3-5 key classes from step 1>' includeBody=true maxBodyLines=30 -> returns source code of the most important files",
+                "Step 3 (optional) - Scope and dependencies (1 call): search_grep terms='X' countOnly=true -> scale (how many files, occurrences); or search_fast pattern='X' dirsOnly=true -> directory structure",
+            ],
+            anti_patterns: &[
+                "Don't use list_files + read_file to explore architecture -- search_definitions returns classes, methods, file paths, and source code in ONE call",
+                "Don't search one kind at a time (class, then interface, then enum) -- omit kind filter to get everything at once",
+                "Don't use countOnly first then re-query with body -- go straight to includeBody=true with maxBodyLines",
+                "Don't search for file names separately if search_definitions already found them (results include file paths)",
+                "Don't make separate queries for ClassName and IClassName -- use comma-separated: name='ClassName,IClassName'",
+            ],
+        },
+        Strategy {
+            name: "Call Chain Investigation",
+            when: "User asks 'who calls X', 'trace how X is invoked', or 'show the call chain for X'",
+            steps: &[
+                "Step 1 - Get call tree (1 call): search_callers method='MethodName' class='ClassName' depth=3 direction='up' -> full caller hierarchy",
+                "Step 2 (optional) - Read caller source (1 call): search_definitions name='<top callers from step 1>' includeBody=true -> see what callers actually do",
+            ],
+            anti_patterns: &[
+                "Don't omit the class parameter -- without it, results mix callers from ALL classes with the same method name",
+                "Don't use search_grep to manually find callers -- search_callers does it in sub-millisecond with DI/interface resolution",
+            ],
+        },
+        Strategy {
+            name: "Stack Trace / Bug Investigation",
+            when: "User provides a stack trace, error at file:line, or asks 'what method is at line N'",
+            steps: &[
+                "Step 1 - Identify method (1 call): search_definitions file='FileName.cs' containsLine=42 includeBody=true -> returns the method + its parent class with source code",
+                "Step 2 (optional) - Trace callers (1 call): search_callers method='<method from step 1>' class='<class from step 1>' depth=2 -> who triggered this code path",
+            ],
+            anti_patterns: &[
+                "Don't use read_file to manually scan for the method -- containsLine finds it instantly with proper class context",
+                "Don't guess the method name from the stack trace -- use containsLine for precise AST-based lookup",
+            ],
+        },
     ]
 }
 
@@ -162,6 +225,21 @@ pub fn render_cli() -> String {
         out.push_str(&format!("    Example: {}\n\n", tip.example));
     }
 
+    out.push_str("STRATEGY RECIPES\n");
+    out.push_str("----------------\n");
+    for strat in strategies() {
+        out.push_str(&format!("  [{}]\n", strat.name));
+        out.push_str(&format!("  When: {}\n", strat.when));
+        for step in strat.steps {
+            out.push_str(&format!("    - {}\n", step));
+        }
+        out.push_str("  Anti-patterns:\n");
+        for ap in strat.anti_patterns {
+            out.push_str(&format!("    X {}\n", ap));
+        }
+        out.push('\n');
+    }
+
     out.push_str("PERFORMANCE TIERS\n");
     out.push_str("-----------------\n");
     for tier in performance_tiers() {
@@ -189,6 +267,15 @@ pub fn render_json() -> Value {
         })
     }).collect();
 
+    let strategy_recipes: Vec<Value> = strategies().iter().map(|s| {
+        json!({
+            "name": s.name,
+            "when": s.when,
+            "steps": s.steps,
+            "antiPatterns": s.anti_patterns,
+        })
+    }).collect();
+
     let mut tiers = serde_json::Map::new();
     for tier in performance_tiers() {
         let key = format!("{}_{}", tier.name.to_lowercase(), tier.range.replace(['<', '>', ' '], ""));
@@ -201,6 +288,7 @@ pub fn render_json() -> Value {
 
     json!({
         "bestPractices": best_practices,
+        "strategyRecipes": strategy_recipes,
         "performanceTiers": tiers,
         "toolPriority": priority,
     })
@@ -210,10 +298,23 @@ pub fn render_json() -> Value {
 pub fn render_instructions() -> String {
     let mut out = String::new();
     out.push_str("⚠️ IMPORTANT: Call search_help first to learn best practices before using other search tools.\n\n");
+    out.push_str("⚡ PREFER search-index tools OVER built-in read_file / list_files / list_code_definition_names for code exploration.\n");
+    out.push_str("   search_definitions returns classes, methods, bodies, and file paths in ONE call — no need to list_files then read_file.\n");
+    out.push_str("   search_callers builds full call trees in <1ms — no need to grep then read_file each caller.\n");
+    out.push_str("   search_grep finds content across 100K files instantly — no need to search_files with regex.\n");
+    out.push_str("   Only use read_file when you need exact file content for EDITING (apply_diff / write_to_file).\n\n");
     out.push_str("search-index MCP server — Best Practices for Tool Selection\n\n");
 
     for (i, tip) in tips().iter().enumerate() {
         out.push_str(&format!("{}. {}: {}\n", i + 1, tip.rule.to_uppercase(), tip.why));
+    }
+
+    out.push_str("\nSTRATEGY RECIPES (aim for <=3 search calls per task):\n");
+    for strat in strategies() {
+        out.push_str(&format!("  [{}] {}\n", strat.name, strat.when));
+        for step in strat.steps {
+            out.push_str(&format!("    - {}\n", step));
+        }
     }
 
     out.push_str("\nTOOL PRIORITY:\n");
@@ -253,10 +354,29 @@ mod tests {
     }
 
     #[test]
+    fn test_strategies_not_empty() {
+        assert!(!strategies().is_empty());
+    }
+
+    #[test]
     fn test_render_json_has_best_practices() {
         let json = render_json();
         let practices = json["bestPractices"].as_array().unwrap();
         assert_eq!(practices.len(), tips().len());
+    }
+
+    #[test]
+    fn test_render_json_has_strategy_recipes() {
+        let json = render_json();
+        let recipes = json["strategyRecipes"].as_array().unwrap();
+        assert_eq!(recipes.len(), strategies().len());
+        // Each recipe has required fields
+        for recipe in recipes {
+            assert!(recipe["name"].is_string(), "recipe must have name");
+            assert!(recipe["when"].is_string(), "recipe must have when");
+            assert!(recipe["steps"].is_array(), "recipe must have steps");
+            assert!(recipe["antiPatterns"].is_array(), "recipe must have antiPatterns");
+        }
     }
 
     #[test]
@@ -269,6 +389,11 @@ mod tests {
         assert!(text.contains("includeBody"), "instructions should mention includeBody");
         assert!(text.contains("countOnly"), "instructions should mention countOnly");
         assert!(text.contains("search_help"), "instructions should mention search_help");
+        assert!(text.contains("STRATEGY RECIPES"), "instructions should include strategy recipes");
+        assert!(text.contains("Architecture Exploration"), "instructions should include arch exploration recipe");
+        assert!(text.contains("<=3 search calls"), "instructions should mention query budget");
+        assert!(text.contains("PREFER search-index tools OVER built-in read_file"), "instructions should tell LLM to prefer search-index over read_file");
+        assert!(text.contains("Only use read_file when you need exact file content for EDITING"), "instructions should clarify when read_file is appropriate");
     }
 
     /// CLI output must be pure ASCII — no Unicode box-drawing, em-dashes, arrows, or emoji.
@@ -297,6 +422,15 @@ mod tests {
         let cli = render_cli();
         for tip in tips() {
             assert!(cli.contains(tip.rule), "CLI output missing tip: {}", tip.rule);
+        }
+
+        // Verify strategy recipes are consistent across renderers
+        let strategy_count = strategies().len();
+        let recipes = json["strategyRecipes"].as_array().unwrap();
+        assert_eq!(recipes.len(), strategy_count, "JSON and strategies() count mismatch");
+
+        for strat in strategies() {
+            assert!(cli.contains(strat.name), "CLI output missing strategy: {}", strat.name);
         }
     }
 }

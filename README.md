@@ -479,9 +479,9 @@ search serve --dir C:\Projects --ext cs --watch --definitions --metrics
 | `search_info`         | Show all indexes with status, sizes, age                         |
 | `search_reindex`      | Force rebuild + reload content index                             |
 | `search_reindex_definitions` | Force rebuild + reload definition index (requires `--definitions`) |
-| `search_help`         | Returns best practices guide for tool selection, performance tiers, and common pitfalls |
+| `search_help`         | Returns best practices guide, strategy recipes (architecture exploration, call chain investigation, stack trace analysis), performance tiers, and common pitfalls |
 
-> **CLI users**: Run `search tips` to see the same best practices in your terminal.
+> **CLI users**: Run `search tips` to see the same best practices and strategy recipes in your terminal. Strategy recipes provide step-by-step patterns for common tasks (e.g., "explain the architecture of module X") with a target of ≤3 search calls per exploration task.
 
 **Setup in VS Code (step-by-step):**
 
