@@ -408,6 +408,12 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
         handles.into_iter().map(|h| h.join().unwrap()).collect()
     });
 
+    // Free raw file contents — no longer needed after tokenization.
+    // This releases ~1.6 GB for large repos (80K files × ~20KB avg content).
+    // Without this drop, the file data stays alive until function return,
+    // causing peak memory to be ~1.6 GB higher during build vs. load-from-disk.
+    drop(file_data);
+
     // ─── Merge per-thread results ───────────────────────────────
     let mut files: Vec<String> = Vec::with_capacity(file_count);
     let mut file_token_counts: Vec<u32> = Vec::with_capacity(file_count);
