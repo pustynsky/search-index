@@ -247,8 +247,9 @@ sequenceDiagram
 **Design decisions:**
 
 - **Stdio transport** — no HTTP overhead, direct pipe from VS Code process manager
+- **Async startup** — event loop starts immediately with empty indexes; pre-built indexes load synchronously from disk (< 3s), otherwise build in background threads. `AtomicBool` flags (`content_ready`, `def_ready`) gate search tools — they return "index is building" until ready. `initialize`, `tools/list`, `search_help`, `search_info`, and `search_find` work immediately.
 - **Single-threaded event loop** — JSON-RPC is sequential; index reads use `RwLock` for watcher concurrency
-- **Indexes held in `Arc<RwLock<T>>`** — watcher thread writes, server thread reads
+- **Indexes held in `Arc<RwLock<T>>`** — watcher thread writes, server thread reads; background build thread writes once at completion
 - **All logging to stderr** — stdout is exclusively for JSON-RPC protocol messages
 - **Response size truncation** — all tool responses are capped at ~32KB (~8K tokens) to prevent filling LLM context windows. Progressive truncation: cap line arrays → remove lineContent → cap matchedTokens → remove lines → reduce file count. Truncation metadata (`responseTruncated`, `truncationReason`, `hint`) is injected into the summary so the LLM knows to narrow its query.
 

@@ -8,6 +8,7 @@ mod grep;
 pub(crate) mod utils;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -332,6 +333,34 @@ pub struct HandlerContext {
     pub index_base: PathBuf,
     /// Maximum response size in bytes before truncation kicks in. 0 = no limit.
     pub max_response_bytes: usize,
+    /// Whether the content index has been fully built/loaded.
+    /// Tools return a "building" message when false.
+    pub content_ready: Arc<AtomicBool>,
+    /// Whether the definition index has been fully built/loaded.
+    /// Tools return a "building" message when false.
+    pub def_ready: Arc<AtomicBool>,
+}
+
+/// Message returned when the content index is still building in background.
+const INDEX_BUILDING_MSG: &str =
+    "Content index is currently being built in the background. Please retry in a few seconds.";
+
+/// Message returned when the definition index is still building in background.
+const DEF_INDEX_BUILDING_MSG: &str =
+    "Definition index is currently being built in the background. Please retry in a few seconds.";
+
+/// Message returned when search_reindex is called while a background build is in progress.
+const ALREADY_BUILDING_MSG: &str =
+    "Index is already being built in the background. Please wait for it to finish.";
+
+/// Returns true when a tool requires the content index to be ready.
+fn requires_content_index(tool_name: &str) -> bool {
+    matches!(tool_name, "search_grep" | "search_fast" | "search_reindex")
+}
+
+/// Returns true when a tool requires the definition index to be ready.
+fn requires_def_index(tool_name: &str) -> bool {
+    matches!(tool_name, "search_definitions" | "search_callers" | "search_reindex_definitions")
 }
 
 /// Dispatch a tool call to the right handler.
@@ -342,6 +371,20 @@ pub fn dispatch_tool(
     arguments: &Value,
 ) -> ToolCallResult {
     let dispatch_start = Instant::now();
+
+    // Check readiness: if the required index is still building, return early
+    if requires_content_index(tool_name) && !ctx.content_ready.load(Ordering::Acquire) {
+        if tool_name == "search_reindex" {
+            return ToolCallResult::error(ALREADY_BUILDING_MSG.to_string());
+        }
+        return ToolCallResult::error(INDEX_BUILDING_MSG.to_string());
+    }
+    if requires_def_index(tool_name) && !ctx.def_ready.load(Ordering::Acquire) {
+        if tool_name == "search_reindex_definitions" {
+            return ToolCallResult::error(ALREADY_BUILDING_MSG.to_string());
+        }
+        return ToolCallResult::error(DEF_INDEX_BUILDING_MSG.to_string());
+    }
 
     let result = match tool_name {
         "search_grep" => grep::handle_search_grep(ctx, arguments),

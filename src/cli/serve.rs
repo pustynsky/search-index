@@ -1,6 +1,7 @@
 //! MCP server startup and configuration.
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -8,7 +9,7 @@ use tracing::{info, warn};
 
 use crate::{
     build_content_index, save_content_index, load_content_index, find_content_index_for_dir,
-    index_dir, DEFAULT_MIN_TOKEN_LEN,
+    index_dir, ContentIndex, TrigramIndex, DEFAULT_MIN_TOKEN_LEN,
 };
 use crate::definitions;
 use crate::mcp;
@@ -38,110 +39,176 @@ pub fn cmd_serve(args: ServeArgs) {
 
     let idx_base = index_dir();
 
-    // Load or build content index
+    // ─── Async startup: create empty indexes, start event loop immediately ───
+    use std::collections::HashMap;
+
+    let content_ready = Arc::new(AtomicBool::new(false));
+    let def_ready = Arc::new(AtomicBool::new(false));
+
+    // Create an empty ContentIndex so the event loop can start immediately
+    let empty_index = ContentIndex {
+        root: dir_str.clone(),
+        created_at: 0,
+        max_age_secs: 86400,
+        files: Vec::new(),
+        index: HashMap::new(),
+        total_tokens: 0,
+        extensions: extensions.clone(),
+        file_token_counts: Vec::new(),
+        trigram: TrigramIndex::default(),
+        trigram_dirty: false,
+        forward: if args.watch { Some(HashMap::new()) } else { None },
+        path_to_id: if args.watch { Some(HashMap::new()) } else { None },
+    };
+    let index = Arc::new(RwLock::new(empty_index));
+
+    // Try fast load from disk (typically < 3s)
     let start = Instant::now();
-    let index = match load_content_index(&dir_str, &exts_for_load, &idx_base) {
-        Some(idx) => {
-            info!(files = idx.files.len(), tokens = idx.index.len(), "Loaded content index");
-            idx
-        }
-        None => {
-            match find_content_index_for_dir(&dir_str, &idx_base) {
-                Some(idx) => {
-                    info!(files = idx.files.len(), tokens = idx.index.len(), "Found content index for directory");
-                    idx
-                }
-                None => {
-                    info!("No content index found, building from scratch");
-                    let new_idx = build_content_index(&ContentIndexArgs {
-                        dir: dir_str.clone(),
-                        ext: exts_for_load.clone(),
-                        max_age_hours: 24,
-                        hidden: false,
-                        no_ignore: false,
-                        threads: 0,
-                        min_token_len: DEFAULT_MIN_TOKEN_LEN,
-                    });
-                    if let Err(e) = save_content_index(&new_idx, &idx_base) {
-                        warn!(error = %e, "Failed to save content index to disk");
-                    }
-                    new_idx
-                }
-            }
-        }
-    };
+    let loaded = load_content_index(&dir_str, &exts_for_load, &idx_base)
+        .or_else(|| find_content_index_for_dir(&dir_str, &idx_base));
 
-    let load_elapsed = start.elapsed();
-    info!(
-        elapsed_ms = format_args!("{:.1}", load_elapsed.as_secs_f64() * 1000.0),
-        files = index.files.len(),
-        tokens = index.index.len(),
-        "Content index ready"
-    );
-
-    let index = if args.watch {
-        let watch_idx = mcp::watcher::build_watch_index_from(index);
-        Arc::new(RwLock::new(watch_idx))
-    } else {
-        Arc::new(RwLock::new(index))
-    };
-
-    // Load or build definition index if --definitions
-    let def_index = if args.definitions {
-        let def_start = Instant::now();
-        // Supported definition languages (no SQL — currently unsupported)
-        let supported_def_langs: &[&str] = &["cs", "ts", "tsx"];
-        // Intersect with user-provided --ext so we only parse languages actually requested
-        let def_exts = supported_def_langs.iter()
-            .filter(|lang| extensions.iter().any(|e| e.eq_ignore_ascii_case(lang)))
-            .copied()
-            .collect::<Vec<&str>>()
-            .join(",");
-        // Fallback: if no intersection (e.g. user passed only xml,config), use "cs" as minimum
-        let def_exts = if def_exts.is_empty() { "cs".to_string() } else { def_exts };
-
-        let def_idx = match definitions::load_definition_index(&dir_str, &def_exts, &idx_base) {
-            Some(idx) => {
-                info!(definitions = idx.definitions.len(), files = idx.files.len(),
-                    "Loaded definition index from disk");
-                idx
-            }
-            None => {
-                match definitions::find_definition_index_for_dir(&dir_str, &idx_base) {
-                    Some(idx) => {
-                        info!(definitions = idx.definitions.len(), files = idx.files.len(),
-                            "Found definition index for directory");
-                        idx
-                    }
-                    None => {
-                        info!("No definition index found, building with tree-sitter AST parsing");
-                        let new_idx = definitions::build_definition_index(&definitions::DefIndexArgs {
-                            dir: dir_str.clone(),
-                            ext: def_exts.to_string(),
-                            threads: 0,
-                        });
-                        if let Err(e) = definitions::save_definition_index(&new_idx, &idx_base) {
-                            warn!(error = %e, "Failed to save definition index to disk");
-                        }
-                        new_idx
-                    }
-                }
-            }
-        };
-
-        let def_elapsed = def_start.elapsed();
+    if let Some(idx) = loaded {
+        let load_elapsed = start.elapsed();
         info!(
-            elapsed_ms = format_args!("{:.1}", def_elapsed.as_secs_f64() * 1000.0),
-            definitions = def_idx.definitions.len(),
-            files = def_idx.files.len(),
-            "Definition index ready"
+            elapsed_ms = format_args!("{:.1}", load_elapsed.as_secs_f64() * 1000.0),
+            files = idx.files.len(),
+            tokens = idx.index.len(),
+            "Content index loaded from disk"
         );
-        Some(Arc::new(RwLock::new(def_idx)))
+        let idx = if args.watch {
+            mcp::watcher::build_watch_index_from(idx)
+        } else {
+            idx
+        };
+        *index.write().unwrap() = idx;
+        content_ready.store(true, Ordering::Release);
     } else {
+        // Build in background — don't block the event loop
+        let bg_index: Arc<RwLock<ContentIndex>> = Arc::clone(&index);
+        let bg_ready = Arc::clone(&content_ready);
+        let bg_dir = dir_str.clone();
+        let bg_ext = exts_for_load.clone();
+        let bg_idx_base = idx_base.clone();
+        let bg_watch = args.watch;
+
+        std::thread::spawn(move || {
+            info!("Building content index in background...");
+            let build_start = Instant::now();
+            let new_idx = build_content_index(&ContentIndexArgs {
+                dir: bg_dir,
+                ext: bg_ext,
+                max_age_hours: 24,
+                hidden: false,
+                no_ignore: false,
+                threads: 0,
+                min_token_len: DEFAULT_MIN_TOKEN_LEN,
+            });
+            if let Err(e) = save_content_index(&new_idx, &bg_idx_base) {
+                warn!(error = %e, "Failed to save content index to disk");
+            }
+            let new_idx = if bg_watch {
+                mcp::watcher::build_watch_index_from(new_idx)
+            } else {
+                new_idx
+            };
+            let elapsed = build_start.elapsed();
+            info!(
+                elapsed_ms = format_args!("{:.1}", elapsed.as_secs_f64() * 1000.0),
+                files = new_idx.files.len(),
+                tokens = new_idx.index.len(),
+                "Content index ready (background build complete)"
+            );
+            *bg_index.write().unwrap() = new_idx;
+            bg_ready.store(true, Ordering::Release);
+        });
+    }
+
+    // ─── Definition index: same async pattern ───
+    // Supported definition languages (no SQL — currently unsupported)
+    let supported_def_langs: &[&str] = &["cs", "ts", "tsx"];
+    let def_exts = supported_def_langs.iter()
+        .filter(|lang| extensions.iter().any(|e| e.eq_ignore_ascii_case(lang)))
+        .copied()
+        .collect::<Vec<&str>>()
+        .join(",");
+    let def_exts = if def_exts.is_empty() { "cs".to_string() } else { def_exts };
+
+    let def_index = if args.definitions {
+        // Create an empty DefinitionIndex placeholder
+        let empty_def = definitions::DefinitionIndex {
+            root: dir_str.clone(),
+            created_at: 0,
+            extensions: def_exts.split(',').map(|s| s.to_string()).collect(),
+            files: Vec::new(),
+            definitions: Vec::new(),
+            name_index: HashMap::new(),
+            kind_index: HashMap::new(),
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index: HashMap::new(),
+            path_to_id: HashMap::new(),
+            method_calls: HashMap::new(),
+            parse_errors: 0,
+            lossy_file_count: 0,
+            empty_file_ids: Vec::new(),
+        };
+        let def_arc = Arc::new(RwLock::new(empty_def));
+
+        // Try fast load from disk
+        let def_start = Instant::now();
+        let def_loaded = definitions::load_definition_index(&dir_str, &def_exts, &idx_base)
+            .or_else(|| definitions::find_definition_index_for_dir(&dir_str, &idx_base));
+
+        if let Some(idx) = def_loaded {
+            let def_elapsed = def_start.elapsed();
+            info!(
+                elapsed_ms = format_args!("{:.1}", def_elapsed.as_secs_f64() * 1000.0),
+                definitions = idx.definitions.len(),
+                files = idx.files.len(),
+                "Definition index loaded from disk"
+            );
+            *def_arc.write().unwrap() = idx;
+            def_ready.store(true, Ordering::Release);
+        } else {
+            // Build in background
+            let bg_def = Arc::clone(&def_arc);
+            let bg_def_ready = Arc::clone(&def_ready);
+            let bg_dir = dir_str.clone();
+            let bg_def_exts = def_exts.clone();
+            let bg_idx_base = idx_base.clone();
+
+            std::thread::spawn(move || {
+                info!("Building definition index in background...");
+                let build_start = Instant::now();
+                let new_idx = definitions::build_definition_index(&definitions::DefIndexArgs {
+                    dir: bg_dir,
+                    ext: bg_def_exts,
+                    threads: 0,
+                });
+                if let Err(e) = definitions::save_definition_index(&new_idx, &bg_idx_base) {
+                    warn!(error = %e, "Failed to save definition index to disk");
+                }
+                let elapsed = build_start.elapsed();
+                info!(
+                    elapsed_ms = format_args!("{:.1}", elapsed.as_secs_f64() * 1000.0),
+                    definitions = new_idx.definitions.len(),
+                    files = new_idx.files.len(),
+                    "Definition index ready (background build complete)"
+                );
+                *bg_def.write().unwrap() = new_idx;
+                bg_def_ready.store(true, Ordering::Release);
+            });
+        }
+
+        Some(def_arc)
+    } else {
+        // No --definitions flag: mark as ready (N/A)
+        def_ready.store(true, Ordering::Release);
         None
     };
 
-    // Start file watcher if --watch
+    // Start file watcher if --watch (only after content index is available)
+    // Watcher works fine with an empty index — it will update it as files change.
     if args.watch {
         let watch_dir = std::fs::canonicalize(&dir_str)
             .unwrap_or_else(|_| PathBuf::from(&dir_str));
@@ -159,5 +226,9 @@ pub fn cmd_serve(args: ServeArgs) {
     }
 
     let max_response_bytes = if args.max_response_kb == 0 { 0 } else { args.max_response_kb * 1024 };
-    mcp::server::run_server(index, def_index, dir_str, exts_for_load, args.metrics, idx_base, max_response_bytes);
+    mcp::server::run_server(
+        index, def_index, dir_str, exts_for_load,
+        args.metrics, idx_base, max_response_bytes,
+        content_ready, def_ready,
+    );
 }

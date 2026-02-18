@@ -1,5 +1,6 @@
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
 
 use serde_json::{json, Value};
@@ -19,6 +20,8 @@ pub fn run_server(
     metrics: bool,
     index_base: PathBuf,
     max_response_bytes: usize,
+    content_ready: Arc<AtomicBool>,
+    def_ready: Arc<AtomicBool>,
 ) {
     let ctx = HandlerContext {
         index,
@@ -28,6 +31,8 @@ pub fn run_server(
         metrics,
         index_base,
         max_response_bytes,
+        content_ready,
+        def_ready,
     };
 
     let stdin = io::stdin();
@@ -198,6 +203,8 @@ mod tests {
             metrics: false,
             index_base: std::path::PathBuf::from("."),
             max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+            content_ready: Arc::new(AtomicBool::new(true)),
+            def_ready: Arc::new(AtomicBool::new(true)),
         }
     }
 
