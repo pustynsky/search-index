@@ -27,7 +27,17 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
 3. **Stage tracked changes only** — `git add -u` (never auto-add untracked files)
 4. **Prepare commit message** — write a concise commit title
 5. **Prepare PR description** — write a detailed description of all changes in Markdown format
-6. **Ask user to commit manually** — present the commit title + PR description and let the user do `git commit` themselves
+6. **Write PR description to file** — save the PR description to `docs/pr-description.md` so the user can copy it easily (this file is NOT tracked in git — it's a temp artifact)
+7. **Ask user to commit manually** — present the commit title + PR description and let the user do `git commit` themselves
+
+## Environment Rules
+
+- **Windows environment** — this project runs on Windows (cmd / PowerShell). Never use Unix-only commands like `tail`, `head`, `grep`, `sed`, `awk`, `wc`. Use PowerShell equivalents or native Rust/cargo commands instead.
+- **Testing is mandatory** — every code change MUST include:
+  - **Unit tests** covering the new/modified behavior
+  - **E2E test plan update** (`docs/e2e-test-plan.md`) with a test scenario for the change
+  - **E2E test script update** (`e2e-test.ps1`) if the change is CLI-testable
+- **Never skip tests** — even for "internal" optimizations or refactors. If the behavior is testable, add tests.
 
 ## Git Rules
 
