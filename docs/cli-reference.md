@@ -205,18 +205,17 @@ search grep "HttpClient" -d C:\Projects -e cs
 - TF-IDF scores are summed across matching terms — files matching more terms rank higher
 - Output shows `X/N terms` indicating how many of the search terms were found in each file
 
-### Substring search (default in MCP, `--substring` in CLI)
+### Substring search (default in both CLI and MCP)
 
-- **Default in MCP mode** — compound C# identifiers like `IUserService`, `m_userService`, `UserServiceFactory` are automatically found when searching for `UserService`. Auto-disabled when `regex` or `phrase` is used.
-- In CLI mode, use the `--substring` flag explicitly
+- **Default in both CLI and MCP** — compound C# identifiers like `IUserService`, `m_userService`, `UserServiceFactory` are automatically found when searching for `UserService`. Auto-disabled when `--regex`, `--phrase`, or `--exact` is used.
 - Uses a trigram index for fast matching (~1ms) — much faster than regex scanning (~12–44ms)
 - Solves the compound-identifier problem: searching `DatabaseConnection` finds the token `databaseconnectionfactory` even though it's stored as a single token in the inverted index
 - Results sorted by TF-IDF: exact matches rank highest, compound matches lower
 - For queries shorter than 4 characters, a warning is included in the response (trigram matching is less selective for very short queries)
-- Mutually exclusive with `--regex` and `--phrase`
-- CLI example: `search grep "DatabaseConn" -d C:\Projects -e cs --substring`
-- MCP example: `{ "terms": "DatabaseConn" }` (substring is on by default; use `"substring": false` for exact-token-only)
-- Response includes `matchedTokens` field listing which index tokens matched the substring
+- Use `--exact` to disable substring matching and search for exact tokens only
+- CLI example: `search grep "DatabaseConn" -d C:\Projects -e cs` (substring by default)
+- CLI exact: `search grep "DatabaseConn" -d C:\Projects -e cs --exact` (exact tokens only)
+- MCP example: `{ "terms": "DatabaseConn" }` (substring by default; use `"substring": false` for exact-token-only)
 
 ### Regex search (`-r, --regex`)
 
@@ -245,7 +244,7 @@ search grep "HttpClient" -d C:\Projects -e cs
 | `-B, --before <N>`  | Show N lines before each match (with --show-lines)                                                                                                                                                                         |
 | `-A, --after <N>`   | Show N lines after each match (with --show-lines)                                                                                                                                                                          |
 | `--phrase`          | Phrase search: find exact phrase via index + verification. When the phrase contains punctuation (e.g., `</Property>`), a post-filter verifies matching lines against the raw untokenized text to eliminate false positives |
-| `--substring`       | Substring search via trigram index (MCP: `substring: true`)                                                                                                                                                                |
+| `--exact`           | Exact token matching only (disables default substring search)                                                                                                                                                              |
 
 ---
 

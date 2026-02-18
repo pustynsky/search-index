@@ -479,6 +479,10 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     let load_elapsed = start.elapsed();
     let search_start = Instant::now();
 
+    // ─── Determine search mode ──────────────────────────────
+    // Default: substring search (like MCP). Disabled by --exact, --regex, or --phrase.
+    let use_substring = !args.exact && !args.regex && !args.phrase;
+
     // ─── Phrase search mode ─────────────────────────────────
     if args.phrase {
         let phrase = &args.pattern;
@@ -602,7 +606,51 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     let raw_terms: Vec<String> = args.pattern.split(',')
         .map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
 
-    let terms: Vec<String> = if args.regex {
+    let terms: Vec<String> = if use_substring {
+        // Expand terms using trigram index: find all tokens containing each term as a substring
+        let trigram_idx = &index.trigram;
+        let mut expanded = Vec::new();
+        for term in &raw_terms {
+            let matched_tokens: Vec<String> = if term.len() < 3 {
+                // Linear scan for very short terms (no trigrams possible)
+                trigram_idx.tokens.iter()
+                    .filter(|tok| tok.contains(term.as_str()))
+                    .cloned()
+                    .collect()
+            } else {
+                let trigrams = search::generate_trigrams(term);
+                if trigrams.is_empty() {
+                    Vec::new()
+                } else {
+                    let mut candidates: Option<Vec<u32>> = None;
+                    for tri in &trigrams {
+                        if let Some(posting_list) = trigram_idx.trigram_map.get(tri) {
+                            candidates = Some(match candidates {
+                                None => posting_list.clone(),
+                                Some(prev) => crate::mcp::handlers::utils::sorted_intersect(&prev, posting_list),
+                            });
+                        } else {
+                            candidates = Some(Vec::new());
+                            break;
+                        }
+                    }
+                    candidates.unwrap_or_default().into_iter()
+                        .filter_map(|idx| trigram_idx.tokens.get(idx as usize))
+                        .filter(|tok| tok.contains(term.as_str()))
+                        .cloned()
+                        .collect()
+                }
+            };
+            if matched_tokens.is_empty() {
+                eprintln!("Warning: substring '{}' matched 0 tokens", term);
+            } else {
+                eprintln!("Substring '{}' matched {} tokens: {}", term, matched_tokens.len(),
+                    matched_tokens.iter().take(10).cloned().collect::<Vec<_>>().join(", "));
+            }
+            expanded.extend(matched_tokens);
+        }
+        expanded
+    } else if args.regex {
         let mut expanded = Vec::new();
         for pat in &raw_terms {
             match Regex::new(&format!("(?i)^{}$", pat)) {
@@ -621,11 +669,12 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     };
 
     let total_docs = index.files.len() as f64;
-    let mode_str = if args.regex { "REGEX" } else if args.all { "AND" } else { "OR" };
+    let mode_str = if use_substring { if args.all { "SUBSTRING-AND" } else { "SUBSTRING-OR" } }
+        else if args.regex { "REGEX" } else if args.all { "AND" } else { "OR" };
 
     struct FileScore { file_path: String, lines: Vec<u32>, tf_idf: f64, occurrences: usize, terms_matched: usize }
     let mut file_scores: HashMap<u32, FileScore> = HashMap::new();
-    let term_count_for_all = if args.regex { raw_terms.len() } else { terms.len() };
+    let term_count_for_all = if args.regex || use_substring { raw_terms.len() } else { terms.len() };
 
     for term in &terms {
         if let Some(postings) = index.index.get(term.as_str()) {

@@ -248,6 +248,7 @@ pub struct ServeArgs {
   Exclude files:   search grep "HttpClient" -d . -e cs --exclude Mock
   Context lines:   search grep "HttpClient" -d . -e cs --show-lines -C 3
   Before/after:    search grep "HttpClient" -d . -e cs --show-lines -B 2 -A 5
+  Exact tokens:    search grep "UserService" -d C:\Projects -e cs --exact
 
 NOTES:
   - Requires a content index. Build one first:
@@ -255,6 +256,8 @@ NOTES:
   - Results sorted by TF-IDF relevance (most relevant files first)
   - Multi-term: comma-separated, OR by default, AND with --all
   - Regex: pattern matched against all indexed tokens (e.g. 754K unique tokens)
+  - Default: substring search via trigram index (finds IUserService, m_userService)
+  - Use --exact to search for exact tokens only (disables substring matching)
   - Use --show-lines to see actual source code lines from matching files
   - --exclude-dir and --exclude filter results by path substring (case-insensitive)
   - Context lines (-C/-B/-A) show surrounding code, like grep -C
@@ -318,4 +321,11 @@ pub struct GrepArgs {
     /// Phrase search: find exact phrase.
     #[arg(long)]
     pub phrase: bool,
+
+    /// Exact token matching only (disables default substring search).
+    /// By default, grep uses trigram-based substring matching that finds
+    /// compound identifiers (e.g. "UserService" matches IUserService, m_userService).
+    /// Use --exact to search for exact tokens only.
+    #[arg(long)]
+    pub exact: bool,
 }
