@@ -8,8 +8,8 @@ use tracing::{debug, error, info, warn};
 
 use crate::mcp::handlers::{self, HandlerContext};
 use crate::mcp::protocol::*;
-use crate::ContentIndex;
-use crate::definitions::DefinitionIndex;
+use crate::{save_content_index, ContentIndex};
+use crate::definitions::{self, DefinitionIndex};
 
 /// Run the MCP server event loop over stdio
 pub fn run_server(
@@ -102,7 +102,43 @@ pub fn run_server(
         }
     }
 
-    info!("stdin closed, shutting down");
+    info!("stdin closed, saving indexes before shutdown...");
+    save_indexes_on_shutdown(&ctx);
+    info!("Shutdown complete");
+}
+
+/// Save in-memory indexes to disk on graceful shutdown.
+/// This preserves incremental watcher updates that were only held in memory.
+fn save_indexes_on_shutdown(ctx: &HandlerContext) {
+    // Save content index
+    match ctx.index.read() {
+        Ok(idx) => {
+            if idx.files.is_empty() {
+                info!("Content index is empty, skipping save");
+            } else if let Err(e) = save_content_index(&idx, &ctx.index_base) {
+                warn!(error = %e, "Failed to save content index on shutdown");
+            } else {
+                info!(files = idx.files.len(), "Content index saved on shutdown");
+            }
+        }
+        Err(e) => warn!(error = %e, "Failed to read content index for shutdown save"),
+    }
+
+    // Save definition index
+    if let Some(ref def) = ctx.def_index {
+        match def.read() {
+            Ok(idx) => {
+                if idx.files.is_empty() {
+                    info!("Definition index is empty, skipping save");
+                } else if let Err(e) = definitions::save_definition_index(&idx, &ctx.index_base) {
+                    warn!(error = %e, "Failed to save definition index on shutdown");
+                } else {
+                    info!(definitions = idx.definitions.len(), "Definition index saved on shutdown");
+                }
+            }
+            Err(e) => warn!(error = %e, "Failed to read definition index for shutdown save"),
+        }
+    }
 }
 
 fn handle_request(

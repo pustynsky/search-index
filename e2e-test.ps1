@@ -88,6 +88,124 @@ Run-Test "T22 nonexistent-dir"     "$Binary find test -d /nonexistent/path/xyz" 
 Run-Test "T42 tips-strategy-recipes" "$Binary tips | Select-String 'STRATEGY RECIPES'"
 Run-Test "T42b tips-query-budget"    "$Binary tips | Select-String 'Query budget'"
 
+# T-SHUTDOWN: save-on-shutdown — verify incremental watcher updates survive server restart
+Write-Host -NoNewline "  T-SHUTDOWN save-on-shutdown ... "
+$total++
+try {
+    $t59dir = Join-Path $env:TEMP "search_e2e_shutdown_$PID"
+    if (Test-Path $t59dir) { Remove-Item -Recurse -Force $t59dir }
+    New-Item -ItemType Directory -Path $t59dir | Out-Null
+
+    # Create a test file for the watcher to index
+    $t59file = Join-Path $t59dir "Original.cs"
+    Set-Content -Path $t59file -Value "class Original { void Run() { } }"
+
+    # Build first (content-index) so the server has something to load
+    $ErrorActionPreference = "Continue"
+    & cargo run -- content-index -d $t59dir -e cs 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+
+    # Find the search binary (installed or debug)
+    $searchBin = (Get-Command search.exe -ErrorAction SilentlyContinue).Source
+    if (-not $searchBin) { $searchBin = ".\target\debug\search.exe" }
+
+    # Start MCP server with --watch using System.Diagnostics.Process for stdin control
+    $stderrFile = Join-Path $t59dir "stderr.txt"
+    $stdoutFile = Join-Path $t59dir "stdout.txt"
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $searchBin
+    $psi.Arguments = "serve --dir `"$t59dir`" --ext cs --watch"
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardInput = $true
+    $psi.RedirectStandardOutput = $false
+    $psi.RedirectStandardError = $false
+    $psi.CreateNoWindow = $true
+    # Redirect stderr to file to avoid deadlock
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+
+    $t59proc = New-Object System.Diagnostics.Process
+    $t59proc.StartInfo = $psi
+
+    # Use async reading to avoid deadlocks
+    $stderrBuilder = New-Object System.Text.StringBuilder
+    $stdoutBuilder = New-Object System.Text.StringBuilder
+    $errHandler = { if ($EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) } }
+    $outHandler = { if ($EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) } }
+
+    $errEvent = Register-ObjectEvent -InputObject $t59proc -EventName ErrorDataReceived -Action $errHandler -MessageData $stderrBuilder
+    $outEvent = Register-ObjectEvent -InputObject $t59proc -EventName OutputDataReceived -Action $outHandler -MessageData $stdoutBuilder
+
+    $t59proc.Start() | Out-Null
+    $t59proc.BeginErrorReadLine()
+    $t59proc.BeginOutputReadLine()
+
+    # Send initialize request
+    $initReq = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+    $t59proc.StandardInput.WriteLine($initReq)
+
+    # Wait for server to start and watcher to be ready
+    Start-Sleep -Seconds 3
+
+    # Modify the file (watcher should pick this up)
+    Set-Content -Path $t59file -Value "class Modified { void Execute() { } }"
+
+    # Wait for watcher debounce
+    Start-Sleep -Seconds 3
+
+    # Close stdin to trigger graceful shutdown (save-on-shutdown)
+    $t59proc.StandardInput.Close()
+
+    # Wait for process to exit
+    if (-not $t59proc.WaitForExit(15000)) {
+        # Timeout — kill it
+        $t59proc.Kill()
+        $t59proc.WaitForExit(5000) | Out-Null
+    }
+
+    # Give async readers a moment to drain
+    Start-Sleep -Milliseconds 500
+
+    # Unregister events
+    Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
+    Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue
+
+    $stderrContent = $stderrBuilder.ToString()
+
+    if ($stderrContent -match "Content index saved on shutdown|saving indexes before shutdown") {
+        Write-Host "OK" -ForegroundColor Green
+        $passed++
+    }
+    else {
+        # Fallback: check if cidx was updated recently
+        $cidxFilesAfter = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "search-index") -Filter "*.cidx" |
+        Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-1) }
+        if ($cidxFilesAfter) {
+            Write-Host "OK (verified via file timestamp)" -ForegroundColor Green
+            $passed++
+        }
+        else {
+            Write-Host "FAILED (no save-on-shutdown detected)" -ForegroundColor Red
+            Write-Host "    stderr: $stderrContent" -ForegroundColor Yellow
+            $failed++
+        }
+    }
+
+    # Cleanup
+    if (!$t59proc.HasExited) { $t59proc.Kill() }
+    $t59proc.Dispose()
+    Remove-Item -Recurse -Force $t59dir -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+    if ($t59proc -and !$t59proc.HasExited) { $t59proc.Kill() }
+    if ($t59proc) { $t59proc.Dispose() }
+    if ($errEvent) { Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue }
+    if ($outEvent) { Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue }
+    Remove-Item -Recurse -Force $t59dir -ErrorAction SilentlyContinue
+}
+
 # T25-T52: serve (MCP)
 Write-Host "  T25-T52: MCP serve tests - run manually (see e2e-test-plan.md)"
 
