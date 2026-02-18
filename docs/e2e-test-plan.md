@@ -835,6 +835,33 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
+### T28g: `serve` — search_definitions with `maxResults: 0` (unlimited)
+
+**Scenario:** `maxResults=0` should return ALL matching definitions without capping at 100.
+The tool description states `"0 = unlimited"`, and the truncation safety net (`--max-response-kb`)
+handles context size protection independently.
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"method","maxResults":0}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- `summary.totalResults` equals `summary.returned` (no capping at 100)
+- `definitions` array contains ALL matching method definitions
+- Response may be subject to `--max-response-kb` truncation, but `maxResults=0` itself does not limit results
+
+**Validates:** `maxResults=0` means unlimited — previously bugged to map 0→100.
+
+---
+
 ### T29: `serve` — MCP search_callers (requires --definitions)
 
 **Command:**
