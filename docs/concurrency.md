@@ -239,14 +239,16 @@ loop {
 
 The write lock is held for the entire batch, not per-file. This minimizes lock acquisition overhead and ensures atomic batch updates:
 
-| Batch Size | Lock Duration      | Impact on Queries |
-| ---------- | ------------------ | ----------------- |
-| 1 file     | ~5ms               | Imperceptible     |
-| 10 files   | ~50ms              | Brief pause       |
-| 100 files  | Full reindex (~1s) | Noticeable pause  |
-| >100 files | Full reindex (~1s) | Noticeable pause  |
+| Batch Size | Lock Duration         | Impact on Queries |
+| ---------- | --------------------- | ----------------- |
+| 1 file     | ~50-100ms             | Brief pause       |
+| 10 files   | ~500ms-1s             | Noticeable pause  |
+| 100 files  | Full reindex (~7-16s) | Significant pause |
+| >100 files | Full reindex (~7-16s) | Significant pause |
 
-The bulk threshold (default: 100) triggers full reindex instead of incremental updates for large batches (git checkout, branch switch). Full reindex is actually faster than 100+ individual incremental updates because it avoids the forward-index cleanup overhead.
+The bulk threshold (default: 100) triggers full reindex instead of incremental updates for large batches (git checkout, branch switch). Full reindex is actually faster than 100+ individual incremental updates because it rebuilds the entire index from scratch.
+
+> **Memory optimization note:** The forward index (`file_id → Vec<token>`) was removed to save ~1.5 GB of RAM. Incremental updates now use a brute-force scan of the inverted index to remove stale postings (~50-100ms per file, acceptable for watcher debounce windows).
 
 ### Dual Index Updates
 

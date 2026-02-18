@@ -269,14 +269,13 @@ stateDiagram-v2
     FullReindex --> Watching
 ```
 
-**Incremental update path** (per file, ~5ms):
+**Incremental update path** (per file, ~50-100ms):
 
 1. Read file content from disk
-2. Remove old tokens from inverted index (via forward index)
+2. Remove old postings from inverted index (brute-force scan of all tokens for the file_id — no forward index needed, saves ~1.5 GB RAM)
 3. Re-tokenize file
 4. Add new tokens to inverted index
-5. Update forward index
-6. If definition index is loaded: re-parse with tree-sitter, update definition entries
+5. If definition index is loaded: re-parse with tree-sitter, update definition entries
 
 **Bulk reindex path** (when changes > `bulk_threshold`, default 100):
 
