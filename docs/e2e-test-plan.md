@@ -2311,6 +2311,79 @@ cargo run -- def-index -d $TEST_DIR -e cs,ts,tsx
 
 ---
 
+### T61: `grep` — Default substring search via trigram index
+
+**Command:**
+
+```powershell
+cargo run -- grep "contentindex" -d $TEST_DIR -e $TEST_EXT
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr: `Substring 'contentindex' matched N tokens: ...` showing expanded tokens (e.g. `contentindexargs`, `contentindex`)
+- stdout: files containing tokens that have `contentindex` as a substring, ranked by TF-IDF
+- Mode shown as `SUBSTRING-OR`
+
+**Validates:** CLI grep uses substring search by default (same as MCP), finding compound identifiers automatically.
+
+---
+
+### T62: `grep --all` — Default substring AND mode
+
+**Command:**
+
+```powershell
+cargo run -- grep "contentindex,tokenize" -d $TEST_DIR -e $TEST_EXT --all
+```
+
+**Expected:**
+
+- Exit code: 0
+- Only files containing BOTH `contentindex` (or compound tokens) AND `tokenize` (or compound tokens) are returned
+- Mode shown as `SUBSTRING-AND`
+
+**Validates:** CLI default substring search with AND mode correctly requires all terms to match.
+
+---
+
+### T63: `grep --exact` — Exact token matching (opt-out of substring)
+
+**Command:**
+
+```powershell
+cargo run -- grep "contentindex" -d $TEST_DIR -e $TEST_EXT --exact
+```
+
+**Expected:**
+
+- Exit code: 0
+- Mode shown as `OR` (not SUBSTRING)
+- Only files containing the exact token `contentindex` are returned (no compound matches like `contentindexargs`)
+
+**Validates:** `--exact` flag disables default substring search and falls back to exact token matching.
+
+---
+
+### T64: `grep --regex` — Regex auto-disables substring
+
+**Command:**
+
+```powershell
+cargo run -- grep ".*stale.*" -d $TEST_DIR -e $TEST_EXT --regex
+```
+
+**Expected:**
+
+- Exit code: 0
+- Mode shown as `REGEX` (not SUBSTRING)
+- Results found via regex token matching
+
+**Validates:** `--regex` automatically disables substring mode (no error, no mutual exclusivity check needed).
+
+---
+
 ### T-LZ4: LZ4 index compression and backward compatibility
 
 **Background:** All index files (.idx, .cidx, .didx) are now saved with LZ4 frame compression, prefixed by magic bytes `LZ4S`. The loader auto-detects compressed vs legacy uncompressed formats for backward compatibility.

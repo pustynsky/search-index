@@ -44,6 +44,10 @@ pub enum SearchError {
     /// Phrase has no indexable tokens
     #[error("Phrase '{phrase}' has no indexable tokens (min length 2)")]
     EmptyPhrase { phrase: String },
+
+    /// Mutually exclusive flags or other argument validation error
+    #[error("{0}")]
+    InvalidArgs(String),
 }
 
 #[cfg(test)]

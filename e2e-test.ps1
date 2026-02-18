@@ -65,6 +65,12 @@ Run-Test "T17 grep-exclude"        "$Binary grep ContentIndex -d $TestDir -e $Te
 Run-Test "T18 grep-count"          "$Binary grep fn -d $TestDir -e $TestExt -c"
 Run-Test "T24 grep-before-after"   "$Binary grep is_stale -d $TestDir -e $TestExt --show-lines -B 1 -A 3"
 
+# T61-T64: grep substring (default) and --exact
+Run-Test "T61 grep-substring-default" "$Binary grep contentindex -d $TestDir -e $TestExt"
+Run-Test "T62 grep-substring-and"     "$Binary grep `"contentindex,tokenize`" -d $TestDir -e $TestExt --all"
+Run-Test "T63 grep-exact"             "$Binary grep contentindex -d $TestDir -e $TestExt --exact"
+Run-Test "T64 grep-regex-no-substr"   "$Binary grep `".*stale.*`" -d $TestDir -e $TestExt --regex"
+
 # T19: info
 Run-Test "T19 info"                "$Binary info"
 
