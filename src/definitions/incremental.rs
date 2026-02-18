@@ -4,6 +4,7 @@ use std::path::Path;
 
 use tracing::warn;
 
+use crate::read_file_lossy;
 use super::types::*;
 use super::parser_csharp::parse_csharp_definitions;
 use super::parser_typescript::parse_typescript_definitions;
@@ -13,10 +14,13 @@ use super::parser_typescript::parse_typescript_definitions;
 pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
     let path_str = path.to_string_lossy().to_string();
 
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
+    let (content, was_lossy) = match read_file_lossy(path) {
+        Ok(r) => r,
         Err(_) => return,
     };
+    if was_lossy {
+        warn!("File contains non-UTF8 bytes (lossy conversion applied): {}", path_str);
+    }
 
     let ext = path.extension()
         .and_then(|e| e.to_str())

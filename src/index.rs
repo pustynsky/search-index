@@ -9,7 +9,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 
 use crate::error::SearchError;
-use search::{clean_path, generate_trigrams, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex};
+use search::{clean_path, generate_trigrams, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex};
 
 use crate::{ContentIndexArgs, IndexArgs};
 
@@ -263,8 +263,11 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
                     return ignore::WalkState::Continue;
                 }
                 let path = clean_path(&entry.path().to_string_lossy());
-                if let Ok(content) = fs::read_to_string(entry.path()) {
-                    file_data.lock().unwrap_or_else(|e| e.into_inner()).push((path, content));
+                match read_file_lossy(entry.path()) {
+                    Ok((content, _was_lossy)) => {
+                        file_data.lock().unwrap_or_else(|e| e.into_inner()).push((path, content));
+                    }
+                    Err(_) => {}
                 }
             }
             ignore::WalkState::Continue

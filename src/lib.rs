@@ -46,6 +46,18 @@ pub fn clean_path(p: &str) -> String {
     p.strip_prefix(r"\\?\").unwrap_or(p).to_string()
 }
 
+/// Read a file as a String, using lossy UTF-8 conversion for non-UTF8 files.
+/// Returns `(content, was_lossy)` where `was_lossy` is true if replacement characters
+/// were inserted. This is critical for codebases with files containing Windows-1252
+/// encoded characters (e.g., smart quotes in comments).
+pub fn read_file_lossy(path: &std::path::Path) -> std::io::Result<(String, bool)> {
+    let raw = std::fs::read(path)?;
+    match String::from_utf8(raw) {
+        Ok(s) => Ok((s, false)),
+        Err(e) => Ok((String::from_utf8_lossy(e.as_bytes()).into_owned(), true)),
+    }
+}
+
 // ─── File index types ────────────────────────────────────────────────
 
 /// An entry in the file index — represents a single file or directory.

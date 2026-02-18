@@ -200,7 +200,7 @@ fn test_definition_index_serialization() {
         kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0]); m },
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m },
-        path_to_id: HashMap::new(), method_calls: HashMap::new(),
+        path_to_id: HashMap::new(), method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0,
     };
 
     let encoded = bincode::serialize(&index).unwrap();
@@ -223,7 +223,7 @@ fn test_incremental_update_new_file() {
         files: Vec::new(), definitions: Vec::new(), name_index: HashMap::new(),
         kind_index: HashMap::new(), attribute_index: HashMap::new(),
         base_type_index: HashMap::new(), file_index: HashMap::new(),
-        path_to_id: HashMap::new(), method_calls: HashMap::new(),
+        path_to_id: HashMap::new(), method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0,
     };
 
     let clean = PathBuf::from(crate::clean_path(&test_file.to_string_lossy()));
@@ -260,7 +260,7 @@ fn test_incremental_update_existing_file() {
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m },
         path_to_id: { let mut m = HashMap::new(); m.insert(clean.clone(), 0u32); m },
-        method_calls: HashMap::new(),
+        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0,
     };
 
     std::fs::write(&test_file, "public class UpdatedClass { public int Value { get; set; } }").unwrap();
@@ -287,7 +287,7 @@ fn test_remove_file_from_def_index() {
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m.insert(1, vec![1]); m },
         path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("file0.cs"), 0); m.insert(PathBuf::from("file1.cs"), 1); m },
-        method_calls: HashMap::new(),
+        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0,
     };
 
     remove_file_from_def_index(&mut index, &PathBuf::from("file0.cs"));
@@ -505,7 +505,7 @@ public class MyService {
         files: Vec::new(), definitions: Vec::new(), name_index: HashMap::new(),
         kind_index: HashMap::new(), attribute_index: HashMap::new(),
         base_type_index: HashMap::new(), file_index: HashMap::new(),
-        path_to_id: HashMap::new(), method_calls: HashMap::new(),
+        path_to_id: HashMap::new(), method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0,
     };
 
     let clean = PathBuf::from(crate::clean_path(&test_file.to_string_lossy()));
@@ -776,7 +776,7 @@ fn test_ts_incremental_update() {
         files: Vec::new(), definitions: Vec::new(), name_index: HashMap::new(),
         kind_index: HashMap::new(), attribute_index: HashMap::new(),
         base_type_index: HashMap::new(), file_index: HashMap::new(),
-        path_to_id: HashMap::new(), method_calls: HashMap::new(),
+        path_to_id: HashMap::new(), method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0,
     };
 
     let clean = PathBuf::from(crate::clean_path(&test_file.to_string_lossy()));
@@ -1255,4 +1255,95 @@ class AdminService extends BaseService implements IAdminService {
         "Expected base_types to contain 'IAdminService', got: {:?}",
         class_defs[0].base_types
     );
+}
+
+
+// ─── Non-UTF8 / Lossy Parsing Tests ──────────────────────────────────
+
+#[test]
+fn test_parse_csharp_with_non_utf8_byte_in_comment() {
+    // Simulate a file with a Windows-1252 right single quote (0x92) in a comment.
+    // After from_utf8_lossy, the byte becomes the replacement character U+FFFD.
+    // The parser should still extract all definitions successfully.
+    let raw_bytes: Vec<u8> = b"using System;
+
+namespace TestApp
+{
+    /// <summary>
+    /// Service for processing data. It\x92s important to handle edge cases.
+    /// </summary>
+    public class DataProcessor : BaseService
+    {
+        private readonly string _name;
+
+        public DataProcessor(string name)
+        {
+            _name = name;
+        }
+
+        public void Process(int count)
+        {
+            // do work
+        }
+    }
+}
+".to_vec();
+
+    // Verify the raw bytes are NOT valid UTF-8
+    assert!(String::from_utf8(raw_bytes.clone()).is_err(),
+        "Raw bytes should not be valid UTF-8 due to 0x92 byte");
+
+    // Apply lossy conversion (same as our fix)
+    let source = String::from_utf8_lossy(&raw_bytes).into_owned();
+    assert!(source.contains('\u{FFFD}'), "Lossy conversion should insert replacement character");
+
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, _calls) = parse_csharp_definitions(&mut parser, &source, 0);
+
+    // Should find: class DataProcessor, constructor, method Process, field _name
+    let class_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Class).collect();
+    assert_eq!(class_defs.len(), 1, "Should find DataProcessor class");
+    assert_eq!(class_defs[0].name, "DataProcessor");
+    assert!(class_defs[0].base_types.contains(&"BaseService".to_string()));
+
+    let method_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Method).collect();
+    assert_eq!(method_defs.len(), 1, "Should find Process method");
+    assert_eq!(method_defs[0].name, "Process");
+
+    let ctor_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Constructor).collect();
+    assert_eq!(ctor_defs.len(), 1, "Should find constructor");
+}
+
+#[test]
+fn test_read_file_lossy_with_valid_utf8() {
+    let dir = std::env::temp_dir().join("search_test_lossy_valid");
+    let _ = std::fs::create_dir_all(&dir);
+    let file_path = dir.join("valid.cs");
+    std::fs::write(&file_path, "public class ValidService {}").unwrap();
+
+    let (content, was_lossy) = search::read_file_lossy(&file_path).unwrap();
+    assert!(!was_lossy, "Valid UTF-8 file should not be lossy");
+    assert!(content.contains("ValidService"));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_read_file_lossy_with_non_utf8_byte() {
+    let dir = std::env::temp_dir().join("search_test_lossy_invalid");
+    let _ = std::fs::create_dir_all(&dir);
+    let file_path = dir.join("invalid.cs");
+
+    // Write a file with 0x92 byte (Windows-1252 right single quote)
+    let mut content = b"// Comment: you\x92re a dev\n".to_vec();
+    content.extend_from_slice(b"public class TestService {}\n");
+    std::fs::write(&file_path, &content).unwrap();
+
+    let (result, was_lossy) = search::read_file_lossy(&file_path).unwrap();
+    assert!(was_lossy, "Non-UTF8 file should be lossy");
+    assert!(result.contains("TestService"), "Should still read the file content");
+    assert!(result.contains('\u{FFFD}'), "Should contain replacement character");
+
+    let _ = std::fs::remove_dir_all(&dir);
 }

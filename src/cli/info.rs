@@ -133,7 +133,7 @@ pub fn cmd_info_json() -> serde_json::Value {
                             .saturating_sub(index.created_at);
                         let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
                         let call_sites: usize = index.method_calls.values().map(|v| v.len()).sum();
-                        indexes.push(serde_json::json!({
+                        let mut def_info = serde_json::json!({
                             "type": "definition",
                             "root": index.root,
                             "files": index.files.len(),
@@ -142,7 +142,14 @@ pub fn cmd_info_json() -> serde_json::Value {
                             "extensions": index.extensions,
                             "sizeMb": (size as f64 / 1_048_576.0 * 10.0).round() / 10.0,
                             "ageHours": (age_secs as f64 / 3600.0 * 10.0).round() / 10.0,
-                        }));
+                        });
+                        if index.parse_errors > 0 {
+                            def_info["readErrors"] = serde_json::json!(index.parse_errors);
+                        }
+                        if index.lossy_file_count > 0 {
+                            def_info["lossyUtf8Files"] = serde_json::json!(index.lossy_file_count);
+                        }
+                        indexes.push(def_info);
                     }
         }
     }
