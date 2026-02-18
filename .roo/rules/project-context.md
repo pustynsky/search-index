@@ -42,3 +42,10 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
 ## Git Rules
 
 - **Tracked files only** — when committing to branches (via `commit_and_push`, `git add`, or any other tool), always stage only tracked (modified) files. Never auto-add untracked files. Use `git add -u` / `includeUntrackedFiles: false`. Untracked files must be added explicitly by the user.
+
+## Lessons Learned
+
+- **Verify facts, don't assume** — always run `git status` / `git log` before stating whether a file is tracked, staged, or committed. Never claim a file's git state from memory — check it.
+- **UX consistency across interfaces** — when implementing a feature that exists in one interface (e.g., MCP), ensure the same defaults apply to other interfaces (e.g., CLI). Users expect consistent behavior. If MCP defaults to substring search, CLI should too.
+- **Follow the post-change checklist strictly** — do not skip steps or reorder them. The checklist exists to prevent regressions and ensure quality. When in doubt, re-read the checklist.
+- **Documentation is a contract** — if docs describe a flag/feature, the code MUST support it. If a doc says `--substring` exists as a CLI flag but the code doesn't have it, that's a bug — either fix the code or fix the docs. Never leave docs and code out of sync.
