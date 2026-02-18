@@ -104,7 +104,7 @@ Inverted view (actual storage):
 
 ### 3. Definition Index (AST Index)
 
-**Language-specific** structural code search using tree-sitter AST parsing (currently C# only). Six cross-referencing indexes over the same `Vec<DefinitionEntry>`, plus a pre-computed call graph:
+**Language-specific** structural code search using tree-sitter AST parsing (C# and TypeScript/TSX). Six cross-referencing indexes over the same `Vec<DefinitionEntry>`, plus a pre-computed call graph:
 
 ```mermaid
 graph LR

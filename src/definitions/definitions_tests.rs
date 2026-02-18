@@ -1347,3 +1347,76 @@ fn test_read_file_lossy_with_non_utf8_byte() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+
+// ─── Lazy Parser Init & Extension Filtering Tests ─────────────────────
+
+#[test]
+fn test_build_def_index_cs_only_no_ts_parsers() {
+    // When ext="cs" only, TS/TSX parsers should NOT be eagerly created
+    let dir = std::env::temp_dir().join("search_def_cs_only");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Create a .cs file and a .ts file
+    std::fs::write(dir.join("Service.cs"), "public class UserService { public void Process() {} }").unwrap();
+    std::fs::write(dir.join("util.ts"), "export function helper(): void {}").unwrap();
+
+    let idx = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "cs".to_string(), // only C#
+        threads: 1,
+    });
+
+    // Should find the C# class and method but NOT the TypeScript function
+    assert!(idx.name_index.contains_key("userservice"), "Should find C# class");
+    assert!(idx.name_index.contains_key("process"), "Should find C# method");
+    assert!(!idx.name_index.contains_key("helper"), "Should NOT find TS function when ext=cs");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_build_def_index_cs_and_ts() {
+    // When ext="cs,ts", both C# and TS files should be parsed
+    let dir = std::env::temp_dir().join("search_def_cs_ts");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(dir.join("Service.cs"), "public class UserService { }").unwrap();
+    std::fs::write(dir.join("util.ts"), "export function helper(): void {}").unwrap();
+
+    let idx = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "cs,ts".to_string(),
+        threads: 1,
+    });
+
+    assert!(idx.name_index.contains_key("userservice"), "Should find C# class");
+    assert!(idx.name_index.contains_key("helper"), "Should find TS function when ext=cs,ts");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_build_def_index_ts_only() {
+    // When ext="ts,tsx", only TS/TSX files should be parsed
+    let dir = std::env::temp_dir().join("search_def_ts_only");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    std::fs::write(dir.join("Service.cs"), "public class UserService { }").unwrap();
+    std::fs::write(dir.join("app.ts"), "export class AppController { run(): void {} }").unwrap();
+
+    let idx = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "ts".to_string(),
+        threads: 1,
+    });
+
+    assert!(!idx.name_index.contains_key("userservice"), "Should NOT find C# class when ext=ts");
+    assert!(idx.name_index.contains_key("appcontroller"), "Should find TS class");
+    assert!(idx.name_index.contains_key("run"), "Should find TS method");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

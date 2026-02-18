@@ -89,9 +89,18 @@ pub fn cmd_serve(args: ServeArgs) {
     // Load or build definition index if --definitions
     let def_index = if args.definitions {
         let def_start = Instant::now();
-        let def_exts = "cs,sql,ts,tsx";
+        // Supported definition languages (no SQL — currently unsupported)
+        let supported_def_langs: &[&str] = &["cs", "ts", "tsx"];
+        // Intersect with user-provided --ext so we only parse languages actually requested
+        let def_exts = supported_def_langs.iter()
+            .filter(|lang| extensions.iter().any(|e| e.eq_ignore_ascii_case(lang)))
+            .copied()
+            .collect::<Vec<&str>>()
+            .join(",");
+        // Fallback: if no intersection (e.g. user passed only xml,config), use "cs" as minimum
+        let def_exts = if def_exts.is_empty() { "cs".to_string() } else { def_exts };
 
-        let def_idx = match definitions::load_definition_index(&dir_str, def_exts, &idx_base) {
+        let def_idx = match definitions::load_definition_index(&dir_str, &def_exts, &idx_base) {
             Some(idx) => {
                 info!(definitions = idx.definitions.len(), files = idx.files.len(),
                     "Loaded definition index from disk");

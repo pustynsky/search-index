@@ -469,8 +469,9 @@ cargo run -- def-index -d $TEST_DIR -e $TEST_EXT
 
 **Validates:** Tree-sitter parsing, definition extraction, persistence.
 
-**Note:** For `.rs` files, 0 definitions is expected (parser supports C#/TypeScript/SQL only).
+**Note:** For `.rs` files, 0 definitions is expected (parser supports C# and TypeScript/TSX only).
 For C# or TypeScript projects, expect hundreds/thousands of definitions.
+SQL parsing is currently disabled.
 
 ---
 
@@ -2179,3 +2180,37 @@ search def-audit --dir C:\nonexistent --ext cs
 
 - stderr contains `No definition index found`
 - Exit code: 0
+
+
+---
+
+### T60: `def-index` — Extension filtering (no unnecessary parsers)
+
+**Purpose:** Verify that definition index only parses files matching requested extensions, and doesn't load TypeScript grammars for C#-only projects.
+
+**Command (C# only):**
+
+```powershell
+cargo run -- def-index -d $TEST_DIR -e cs
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr: `[def-index] Found N files to parse` — only `.cs` files counted
+- No TypeScript grammar loading errors
+- Only C# definitions extracted
+
+**Command (C# + TypeScript):**
+
+```powershell
+cargo run -- def-index -d $TEST_DIR -e cs,ts,tsx
+```
+
+**Expected:**
+
+- Exit code: 0
+- Both C# and TypeScript definitions extracted
+- TS/TSX parsers created lazily only in threads that encounter TS/TSX files
+
+**Validates:** Extension-based parser filtering prevents unnecessary grammar loading for single-language projects. Fixes performance regression where TypeScript parsers were eagerly loaded for C#-only repositories.
