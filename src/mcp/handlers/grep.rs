@@ -1,6 +1,6 @@
 //! search_grep handler: token search, substring search, phrase search.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Instant;
 
@@ -320,8 +320,10 @@ fn handle_substring_search(
     let mut all_matched_tokens: Vec<String> = Vec::new();
     let mut file_scores: HashMap<u32, FileScoreEntry> = HashMap::new();
     let term_count = raw_terms.len();
+    // Track which distinct term indices matched per file (for correct AND-mode filtering)
+    let mut file_matched_terms: HashMap<u32, HashSet<usize>> = HashMap::new();
 
-    for term in &raw_terms {
+    for (term_idx, term) in raw_terms.iter().enumerate() {
         // Find tokens that contain this term as a substring
         let matched_token_indices: Vec<u32> = if term.len() < 3 {
             // Linear scan for very short terms (no trigrams possible)
@@ -427,7 +429,8 @@ fn handle_substring_search(
                     entry.tf_idf += tf_idf;
                     entry.occurrences += occurrences;
                     entry.lines.extend_from_slice(&posting.lines);
-                    entry.terms_matched += 1;
+                    // Track distinct term index (not per-token) for correct AND filtering
+                    file_matched_terms.entry(posting.file_id).or_default().insert(term_idx);
                 }
             }
         }
@@ -436,6 +439,13 @@ fn handle_substring_search(
     // Dedup matched tokens
     all_matched_tokens.sort();
     all_matched_tokens.dedup();
+
+    // Set terms_matched from the distinct matched term indices
+    for (file_id, entry) in &mut file_scores {
+        if let Some(matched) = file_matched_terms.get(file_id) {
+            entry.terms_matched = matched.len();
+        }
+    }
 
     // Filter by AND mode
     let mut results: Vec<FileScoreEntry> = file_scores

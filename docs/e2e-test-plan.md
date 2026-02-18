@@ -1098,6 +1098,31 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 **Status:** ✅ Implemented (covered by `test_regex_auto_disables_substring` unit test + T29 in e2e-test.ps1)
 
 ---
+### T37c: `serve` — search_grep substring AND-mode correctness (no false positives from multi-token match)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"service,controller","substring":true,"mode":"and"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- Results only include files that contain tokens matching BOTH `service` AND `controller` as substrings
+- A file containing only `userservice`, `servicehelper`, `servicemanager` (3 tokens matching `service`) but NO token matching `controller` must NOT appear in results
+- Previously, `terms_matched` was incremented per matching token (not per search term), so a file with 3 `service`-matching tokens would get `terms_matched=3`, falsely passing the AND filter `terms_matched >= 2`
+
+**Validates:** Fix for AND-mode correctness bug in substring search. `terms_matched` now counts distinct search terms, not matching tokens.
+
+**Status:** ✅ Implemented (covered by `test_substring_and_mode_no_false_positive_from_multi_token_match` unit test)
+
+---
+
 
 ### T38: `serve` — search_reindex rebuilds trigram index
 
