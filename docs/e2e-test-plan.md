@@ -2430,3 +2430,51 @@ while indexes are built in the background.
 **Validates:** Fast path — no background thread spawned when index exists on disk.
 
 **Status:** ✅ Covered by existing unit tests + manual verification.
+
+---
+
+### T-SHUTDOWN: Save-on-shutdown — indexes persist after graceful server stop
+
+**Background:** The MCP server's file watcher applies incremental updates to the in-memory content and definition indexes, but prior to this fix these updates were never saved to disk (only bulk reindex saved). On graceful shutdown (stdin closed), the server now saves both indexes to disk so that incremental changes survive a restart.
+
+**Test — save-on-shutdown preserves incremental watcher updates:**
+
+```powershell
+# 1. Create a temp directory with a test file
+$dir = "$env:TEMP\search_shutdown_test"
+mkdir $dir -Force
+Set-Content "$dir\Test.cs" "class Original { }"
+
+# 2. Build initial content index
+cargo run -- content-index -d $dir -e cs
+
+# 3. Start server with --watch, pipe initialize request
+$initReq = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+$proc = Start-Process cargo -ArgumentList "run -- serve --dir $dir --ext cs --watch" `
+    -RedirectStandardInput "$dir\stdin.txt" -RedirectStandardOutput "$dir\stdout.txt" `
+    -RedirectStandardError "$dir\stderr.txt" -PassThru -NoNewWindow
+Set-Content "$dir\stdin.txt" $initReq
+Start-Sleep 3
+
+# 4. Modify the file (watcher picks up the change)
+Set-Content "$dir\Test.cs" "class Modified { void Execute() { } }"
+Start-Sleep 3  # wait for watcher debounce
+
+# 5. Stop the server (close stdin / kill)
+if (!$proc.HasExited) { $proc.Kill(); $proc.WaitForExit(5000) }
+
+# 6. Verify stderr contains save-on-shutdown log
+$stderr = Get-Content "$dir\stderr.txt" -Raw
+# Expected: "saving indexes before shutdown" and/or "Content index saved on shutdown"
+```
+
+**Expected:**
+- Server stderr contains `saving indexes before shutdown`
+- Server stderr contains `Content index saved on shutdown`
+- The `.cidx` file in `%LOCALAPPDATA%\search-index` has a recent modification timestamp
+
+**Validates:** Save-on-shutdown in [`server.rs`](../src/mcp/server.rs:107) persists incremental watcher changes.
+
+**Unit test:** `test_watch_index_survives_save_load_roundtrip` in [`watcher.rs`](../src/mcp/watcher.rs) verifies that watch-mode fields (`forward`, `path_to_id`) survive serialization roundtrip.
+
+**Automated:** Test T-SHUTDOWN in [`e2e-test.ps1`](../e2e-test.ps1) runs this scenario automatically.
