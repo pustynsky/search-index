@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -12,6 +13,80 @@ use crate::error::SearchError;
 use search::{clean_path, generate_trigrams, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex};
 
 use crate::{ContentIndexArgs, IndexArgs};
+
+// ─── LZ4 compression helpers ────────────────────────────────────────
+
+/// Magic bytes identifying LZ4-compressed index files.
+pub const LZ4_MAGIC: &[u8; 4] = b"LZ4S";
+
+/// Save a serializable value to a file with LZ4 frame compression.
+/// Writes magic bytes, then LZ4-compressed bincode data.
+/// Logs compression ratio and timing to stderr.
+pub fn save_compressed<T: serde::Serialize>(path: &std::path::Path, data: &T, label: &str) -> Result<(), SearchError> {
+    let start = Instant::now();
+
+    let file = std::fs::File::create(path)?;
+    let mut writer = BufWriter::new(file);
+    writer.write_all(LZ4_MAGIC)?;
+    let mut encoder = lz4_flex::frame::FrameEncoder::new(writer);
+    bincode::serialize_into(&mut encoder, data)?;
+    let mut writer = encoder.finish().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    writer.flush()?;
+
+    let compressed_size = std::fs::metadata(path)?.len();
+    let elapsed = start.elapsed();
+
+    // Estimate uncompressed size for logging
+    let uncompressed_size = bincode::serialized_size(data).unwrap_or(0);
+    if uncompressed_size > 0 {
+        let ratio = uncompressed_size as f64 / compressed_size as f64;
+        eprintln!("[{}] Saved {:.1} MB → {:.1} MB ({:.1}× compression) in {:.2}s",
+            label,
+            uncompressed_size as f64 / 1_048_576.0,
+            compressed_size as f64 / 1_048_576.0,
+            ratio,
+            elapsed.as_secs_f64());
+    }
+
+    Ok(())
+}
+
+/// Load a deserializable value from a file, supporting both LZ4-compressed
+/// and legacy uncompressed formats (backward compatibility).
+/// Returns None if the file doesn't exist or can't be deserialized.
+pub fn load_compressed<T: serde::de::DeserializeOwned>(path: &std::path::Path, label: &str) -> Option<T> {
+    let start = Instant::now();
+    let compressed_size = std::fs::metadata(path).ok()?.len();
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut reader = BufReader::new(file);
+
+    let mut magic = [0u8; 4];
+    reader.read_exact(&mut magic).ok()?;
+
+    let result = if &magic == LZ4_MAGIC {
+        // Compressed format
+        let decoder = lz4_flex::frame::FrameDecoder::new(reader);
+        bincode::deserialize_from(decoder).ok()?
+    } else {
+        // Legacy uncompressed format
+        reader.seek(SeekFrom::Start(0)).ok()?;
+        let data = {
+            let mut buf = Vec::new();
+            reader.read_to_end(&mut buf).ok()?;
+            buf
+        };
+        bincode::deserialize(&data).ok()?
+    };
+
+    let elapsed = start.elapsed();
+    eprintln!("[{}] Loaded {:.1} MB in {:.3}s",
+        label,
+        compressed_size as f64 / 1_048_576.0,
+        elapsed.as_secs_f64());
+
+    Some(result)
+}
 
 // ─── Index storage ───────────────────────────────────────────────────
 
@@ -31,15 +106,12 @@ pub fn index_path_for(dir: &str, index_base: &std::path::Path) -> PathBuf {
 pub fn save_index(index: &FileIndex, index_base: &std::path::Path) -> Result<(), SearchError> {
     fs::create_dir_all(index_base)?;
     let path = index_path_for(&index.root, index_base);
-    let encoded = bincode::serialize(index)?;
-    fs::write(&path, encoded)?;
-    Ok(())
+    save_compressed(&path, index, "file-index")
 }
 
 pub fn load_index(dir: &str, index_base: &std::path::Path) -> Option<FileIndex> {
     let path = index_path_for(dir, index_base);
-    let data = fs::read(&path).ok()?;
-    bincode::deserialize(&data).ok()
+    load_compressed(&path, "file-index")
 }
 
 pub fn content_index_path_for(dir: &str, exts: &str, index_base: &std::path::Path) -> PathBuf {
@@ -52,15 +124,12 @@ pub fn save_content_index(index: &ContentIndex, index_base: &std::path::Path) ->
     fs::create_dir_all(index_base)?;
     let exts_str = index.extensions.join(",");
     let path = content_index_path_for(&index.root, &exts_str, index_base);
-    let encoded = bincode::serialize(index)?;
-    fs::write(&path, encoded)?;
-    Ok(())
+    save_compressed(&path, index, "content-index")
 }
 
 pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Option<ContentIndex> {
     let path = content_index_path_for(dir, exts, index_base);
-    let data = fs::read(&path).ok()?;
-    bincode::deserialize(&data).ok()
+    load_compressed(&path, "content-index")
 }
 
 /// Try to find any content index (.cidx) file matching the given directory
@@ -73,31 +142,41 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path) -> Op
 
     for entry in fs::read_dir(index_base).ok()?.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("cidx")
-            && let Ok(data) = fs::read(&path)
-                && let Ok(index) = bincode::deserialize::<ContentIndex>(&data)
-                    && index.root == clean {
-                        return Some(index);
-                    }
+        if path.extension().is_some_and(|e| e == "cidx") {
+            if let Some(index) = load_compressed::<ContentIndex>(&path, "content-index") {
+                if index.root == clean {
+                    return Some(index);
+                }
+            }
+        }
     }
     None
 }
 
-/// Read the root field from a bincode-serialized index file without deserializing the whole file.
+/// Read the root field from an index file without deserializing the whole file.
+/// Handles both LZ4-compressed and legacy uncompressed formats.
 /// Bincode stores a String as: u64 (length) + bytes. Since `root` is the first field in
 /// FileIndex, ContentIndex, and DefinitionIndex, we can read just the first few bytes.
 fn read_root_from_index_file(path: &std::path::Path) -> Option<String> {
-    use std::io::Read;
     let mut file = std::fs::File::open(path).ok()?;
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic).ok()?;
+
+    let reader: Box<dyn Read> = if &magic == LZ4_MAGIC {
+        Box::new(lz4_flex::frame::FrameDecoder::new(BufReader::new(file)))
+    } else {
+        file.seek(SeekFrom::Start(0)).ok()?;
+        Box::new(BufReader::new(file))
+    };
+
+    // Read bincode-encoded string: 8-byte length prefix + UTF-8 bytes
     let mut len_buf = [0u8; 8];
-    file.read_exact(&mut len_buf).ok()?;
-    let str_len = u64::from_le_bytes(len_buf) as usize;
-    // Sanity check: root paths shouldn't be longer than 4KB
-    if str_len > 4096 {
-        return None;
-    }
-    let mut str_buf = vec![0u8; str_len];
-    file.read_exact(&mut str_buf).ok()?;
+    let mut reader = reader;
+    reader.read_exact(&mut len_buf).ok()?;
+    let len = u64::from_le_bytes(len_buf) as usize;
+    if len > 4096 { return None; }
+    let mut str_buf = vec![0u8; len];
+    reader.read_exact(&mut str_buf).ok()?;
     String::from_utf8(str_buf).ok()
 }
 
@@ -492,5 +571,74 @@ mod index_tests {
         deduped.sort();
         deduped.dedup();
         assert_eq!(abc_list.len(), deduped.len());
+    }
+
+    // ─── LZ4 compression tests ──────────────────────────────
+
+    #[test]
+    fn test_save_load_compressed_roundtrip() {
+        let tmp = std::env::temp_dir().join("search_test_compressed_roundtrip");
+        let _ = std::fs::create_dir_all(&tmp);
+        let path = tmp.join("test.bin");
+
+        let data = vec!["hello".to_string(), "world".to_string(), "compressed".to_string()];
+        crate::index::save_compressed(&path, &data, "test").unwrap();
+        let loaded: Vec<String> = crate::index::load_compressed(&path, "test").unwrap();
+        assert_eq!(data, loaded);
+
+        // Verify file starts with LZ4 magic bytes
+        let raw = std::fs::read(&path).unwrap();
+        assert_eq!(&raw[..4], crate::index::LZ4_MAGIC);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_load_compressed_legacy_uncompressed() {
+        let tmp = std::env::temp_dir().join("search_test_legacy_load");
+        let _ = std::fs::create_dir_all(&tmp);
+        let path = tmp.join("legacy.bin");
+
+        // Write uncompressed bincode (legacy format)
+        let data = vec!["legacy".to_string(), "format".to_string()];
+        let encoded = bincode::serialize(&data).unwrap();
+        std::fs::write(&path, &encoded).unwrap();
+
+        // load_compressed should still read it via backward compatibility
+        let loaded: Vec<String> = crate::index::load_compressed(&path, "test").unwrap();
+        assert_eq!(data, loaded);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn test_load_compressed_missing_file_returns_none() {
+        let path = std::path::Path::new("/nonexistent/path/to/file.bin");
+        let result: Option<Vec<String>> = crate::index::load_compressed(path, "test");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_compressed_file_smaller_than_uncompressed() {
+        let tmp = std::env::temp_dir().join("search_test_compression_ratio");
+        let _ = std::fs::create_dir_all(&tmp);
+        let compressed_path = tmp.join("compressed.bin");
+        let uncompressed_path = tmp.join("uncompressed.bin");
+
+        // Create data with repetitive content (compresses well)
+        let data: Vec<String> = (0..1000).map(|i| format!("repeated_token_{}", i % 10)).collect();
+
+        crate::index::save_compressed(&compressed_path, &data, "test").unwrap();
+        let uncompressed = bincode::serialize(&data).unwrap();
+        std::fs::write(&uncompressed_path, &uncompressed).unwrap();
+
+        let compressed_size = std::fs::metadata(&compressed_path).unwrap().len();
+        let uncompressed_size = std::fs::metadata(&uncompressed_path).unwrap().len();
+
+        assert!(compressed_size < uncompressed_size,
+            "Compressed ({}) should be smaller than uncompressed ({})",
+            compressed_size, uncompressed_size);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

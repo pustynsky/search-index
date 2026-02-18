@@ -46,16 +46,19 @@ let filename = format!("{:016x}.didx", hasher.finish());
 
 ## Serialization Format
 
-All indexes use [bincode](https://docs.rs/bincode/1/bincode/) v1 for serialization:
+All indexes use [bincode](https://docs.rs/bincode/1/bincode/) v1 for serialization, wrapped in [LZ4 frame compression](https://crates.io/crates/lz4_flex) for reduced disk usage and faster I/O:
 
 ```rust
-// Write
-let encoded: Vec<u8> = bincode::serialize(&index)?;
-fs::write(&path, encoded)?;
+// Write (LZ4-compressed)
+let file = File::create(path)?;
+let mut writer = BufWriter::new(file);
+writer.write_all(b"LZ4S")?;  // magic bytes
+let mut encoder = lz4_flex::frame::FrameEncoder::new(writer);
+bincode::serialize_into(&mut encoder, &index)?;
+encoder.finish()?.flush()?;
 
-// Read
-let data: Vec<u8> = fs::read(&path)?;
-let index: ContentIndex = bincode::deserialize(&data)?;
+// Read (auto-detects compressed vs legacy uncompressed)
+let result = load_compressed::<ContentIndex>(&path, "content-index");
 ```
 
 ### Bincode Properties
@@ -65,7 +68,7 @@ let index: ContentIndex = bincode::deserialize(&data)?;
 | Format      | Little-endian, variable-length integers                                                 |
 | Schema      | Implicit — derived from Rust struct layout                                              |
 | Versioning  | None — format changes require reindex                                                   |
-| Compression | None — raw serialized bytes                                                             |
+| Compression | LZ4 frame compression (`lz4_flex`); magic bytes `LZ4S` prefix; backward-compatible with legacy uncompressed files |
 | Atomicity   | Whole-file write (`fs::write`) — atomic on most FSes if < 4KB, otherwise not guaranteed |
 
 ### Sizes on Disk

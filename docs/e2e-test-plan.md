@@ -2214,3 +2214,47 @@ cargo run -- def-index -d $TEST_DIR -e cs,ts,tsx
 - TS/TSX parsers created lazily only in threads that encounter TS/TSX files
 
 **Validates:** Extension-based parser filtering prevents unnecessary grammar loading for single-language projects. Fixes performance regression where TypeScript parsers were eagerly loaded for C#-only repositories.
+
+---
+
+### T-LZ4: LZ4 index compression and backward compatibility
+
+**Background:** All index files (.idx, .cidx, .didx) are now saved with LZ4 frame compression, prefixed by magic bytes `LZ4S`. The loader auto-detects compressed vs legacy uncompressed formats for backward compatibility.
+
+**Test — compressed index roundtrip:**
+
+```powershell
+# Build a content index (will be LZ4-compressed)
+cargo run -- content-index -d $TEST_DIR -e $TEST_EXT
+
+# Verify the index file starts with LZ4 magic bytes
+$idxDir = "$env:LOCALAPPDATA\search-index"
+$cidxFile = Get-ChildItem $idxDir -Filter *.cidx | Select-Object -First 1
+$bytes = [System.IO.File]::ReadAllBytes($cidxFile.FullName)
+$magic = [System.Text.Encoding]::ASCII.GetString($bytes[0..3])
+if ($magic -ne "LZ4S") { throw "Expected LZ4S magic, got: $magic" }
+
+# Verify grep still works (index loads correctly)
+cargo run -- grep "fn" -d $TEST_DIR -e $TEST_EXT
+```
+
+**Expected:**
+- Index file starts with `LZ4S` magic bytes
+- stderr shows compression ratio log: `Saved X.X MB → Y.Y MB (Z.Z× compression)`
+- grep returns results (index deserializes correctly after compression)
+
+**Test — backward compatibility with legacy uncompressed index:**
+
+```powershell
+# Create a legacy uncompressed index manually (for testing)
+# This is covered by unit test `test_load_compressed_legacy_uncompressed`
+# which writes raw bincode and verifies load_compressed can read it
+```
+
+**Expected:**
+- `load_compressed` reads both LZ4-compressed and legacy uncompressed files
+- No data loss or deserialization errors
+
+**Validates:** LZ4 compression, magic byte detection, backward compatibility, compression ratio logging.
+
+**Status:** ✅ Covered by unit tests: `test_save_load_compressed_roundtrip`, `test_load_compressed_legacy_uncompressed`, `test_load_compressed_missing_file_returns_none`, `test_compressed_file_smaller_than_uncompressed`
