@@ -851,7 +851,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 - stdout: JSON-RPC response with call tree
 - Result includes `callTree` array, `query` object (method, direction, depth), `summary` object (totalNodes, searchTimeMs)
-- For Rust codebase: empty callTree (tree-sitter supports C#/SQL only)
+- For Rust codebase: empty callTree (tree-sitter supports C#/TypeScript/SQL only)
 
 **Validates:** search_callers handler end-to-end, call tree building, JSON output format.
 
@@ -1565,6 +1565,163 @@ echo $msgs | cargo run -- serve --dir . --ext rs --definitions --metrics 2>$null
 **Note:** Requires a large enough codebase with 500+ properties to trigger truncation. If the test codebase is small, increase `maxResults` or use `--max-response-kb 4` to lower the budget.
 
 ---
+
+## TypeScript Callers Tests
+
+### T53: `serve` — search_callers finds TypeScript class method callers
+
+**Command (TypeScript codebase):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","depth":2}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with call tree
+- `callTree` includes callers from TypeScript files where `this.service.method()` pattern is used
+- Caller entries have correct `class` (receiver type resolved from field type map)
+- `query.method` matches the requested method name
+
+**Validates:** TypeScript call-site extraction for class method calls via `this.field.method()` pattern. Receiver type is resolved through the field type map built from class fields and constructor parameter properties.
+
+**Note:** Replace `<MethodName>` and `<ClassName>` with a method/class that exists in the TypeScript project.
+
+---
+
+### T54: `serve` — search_callers finds TypeScript standalone function calls
+
+**Command (TypeScript codebase with standalone functions):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<functionName>","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with call tree
+- `callTree` includes callers that invoke the standalone function
+- Callers may include both `DefinitionKind::Function` and `DefinitionKind::Method` entries
+- Standalone function calls have no receiver type (bare `functionName()` calls)
+
+**Validates:** TypeScript standalone function call-site extraction. Functions are recognized as valid "containing method" entries in the caller tree (via `DefinitionKind::Function` support in `find_containing_method`).
+
+**Note:** Standalone function calls without a receiver may be ambiguous — the callers tool finds them by method name grep, not by import resolution.
+
+---
+
+### T55: `serve` — search_callers with `ext` parameter filters by language
+
+**Command (mixed C#/TypeScript codebase):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","ext":"ts","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,ts --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with call tree
+- All results are from `.ts` files only (no `.cs` files)
+- `ext` parameter filters both the grep search and the definition lookups
+
+**Validates:** `ext` parameter on `search_callers` can filter results to a specific language in a mixed-language project.
+
+**Note:** Server must be started with `--ext cs,ts` to index both languages. The `ext` parameter in the tool call narrows results to TypeScript only.
+
+---
+
+### T56: `serve` — search_callers finds callers in TypeScript arrow function class properties
+
+**Command (TypeScript codebase with arrow function class properties):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with call tree
+- `callTree` includes callers from arrow function class properties (e.g., `processItem = (item: Item): void => { this.validate(item); }`)
+- The arrow function property is treated as a method for call-site extraction purposes
+
+**Validates:** Arrow function class properties (`public_field_definition` with `arrow_function` initializer) are recognized as call-site sources. Call sites within arrow function bodies are extracted correctly.
+
+**Note:** Replace `<MethodName>` with a method that is called from within an arrow function class property.
+
+---
+
+### T57: `serve` — search_callers tracks TypeScript `new` expression constructor calls
+
+**Command (TypeScript codebase with constructor calls):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<ClassName>","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with call tree
+- `callTree` includes callers that use `new ClassName(...)` expressions
+- Constructor calls have `receiver_type` matching the class name
+
+**Validates:** TypeScript `new_expression` nodes are extracted as call sites. `new UserService(logger)` is tracked as a call to `UserService` with receiver type `UserService`.
+
+**Note:** Replace `<ClassName>` with a class that is instantiated via `new` in the TypeScript project.
+
+### T58: `serve` — search_callers resolves Angular `inject()` field types
+
+**Command (Angular/TypeScript codebase with `inject()` usage):**
+
+```powershell
+@(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","depth":1}}}'
+) -join "`n"
+```
+
+Replace `<MethodName>` with a method called on an `inject()`-resolved field (e.g., `dispatch` if `this.store = inject(Store)` and `this.store.dispatch()` is called).
+
+**Expected:**
+
+- stdout: JSON-RPC response with call tree
+- `callTree` includes callers where the receiver type is resolved from `inject(ClassName)` patterns
+- Two patterns are supported:
+  - **Field initializer**: `private store = inject(Store);` → `this.store.dispatch()` resolves receiver to `Store`
+  - **Constructor assignment**: `this.router = inject(Router);` → `this.router.navigate()` resolves receiver to `Router`
+- Generic type arguments are stripped: `inject(Store<AppState>)` → receiver type is `Store`
+
+**Validates:** Angular `inject()` function support for field type resolution. The TypeScript parser extracts `inject(ClassName)` calls from both field initializers and constructor assignments, adding them to the per-class field type map used by `resolve_ts_receiver_type()`.
+
+**Note:** Replace `<MethodName>` with a method that is called on an `inject()`-resolved field in the Angular/TypeScript project.
+
+---
+
 
 
 ## Automation Script

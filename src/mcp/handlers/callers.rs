@@ -66,7 +66,7 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         if let Some(name_indices) = def_idx.name_index.get(&method_lower) {
             let method_defs: Vec<&DefinitionEntry> = name_indices.iter()
                 .filter_map(|&di| def_idx.definitions.get(di as usize))
-                .filter(|d| d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor)
+                .filter(|d| d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor || d.kind == DefinitionKind::Function)
                 .collect();
 
             let unique_classes: HashSet<&str> = method_defs.iter()
@@ -207,7 +207,7 @@ pub(crate) fn find_containing_method(
     for &di in def_indices {
         if let Some(def) = def_idx.definitions.get(di as usize) {
             match def.kind {
-                DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Property => {}
+                DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Property | DefinitionKind::Function => {}
                 _ => continue,
             }
             if def.line_start <= line && def.line_end >= line {
@@ -372,7 +372,7 @@ fn build_caller_tree(
     if let Some(name_indices) = def_idx.name_index.get(&method_lower) {
         for &di in name_indices {
             if let Some(def) = def_idx.definitions.get(di as usize)
-                && (def.kind == DefinitionKind::Method || def.kind == DefinitionKind::Constructor) {
+                && (def.kind == DefinitionKind::Method || def.kind == DefinitionKind::Constructor || def.kind == DefinitionKind::Function) {
                     definition_locations.insert((def.file_id, def.line_start));
                 }
         }
@@ -562,7 +562,7 @@ fn build_callee_tree(
                 .filter(|&&di| {
                     def_idx.definitions.get(di as usize)
                         .is_some_and(|d| {
-                            let kind_ok = d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor;
+                            let kind_ok = d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor || d.kind == DefinitionKind::Function;
                             if !kind_ok { return false; }
 
                             // Apply class filter: only match methods whose parent matches
@@ -700,8 +700,8 @@ pub(crate) fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex) -> V
             None => continue,
         };
 
-        // Only match methods and constructors
-        if def.kind != DefinitionKind::Method && def.kind != DefinitionKind::Constructor {
+        // Only match methods, constructors, and functions
+        if def.kind != DefinitionKind::Method && def.kind != DefinitionKind::Constructor && def.kind != DefinitionKind::Function {
             continue;
         }
 

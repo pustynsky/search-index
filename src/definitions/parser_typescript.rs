@@ -1,4 +1,6 @@
-//! TypeScript AST parser using tree-sitter: extracts definitions.
+//! TypeScript AST parser using tree-sitter: extracts definitions and call sites.
+
+use std::collections::HashMap;
 
 use super::types::*;
 
@@ -15,20 +17,74 @@ pub(crate) fn parse_typescript_definitions(
     };
 
     let mut defs = Vec::new();
-    walk_typescript_node_collecting(tree.root_node(), source, file_id, None, &mut defs);
+    let mut method_nodes: Vec<(usize, tree_sitter::Node)> = Vec::new();
+    walk_typescript_node_collecting(tree.root_node(), source, file_id, None, &mut defs, &mut method_nodes);
 
-    // Call sites are deferred for TypeScript — always return empty
-    (defs, Vec::new())
+    // Build per-class field type maps from the collected defs
+    let mut class_field_types: HashMap<String, HashMap<String, String>> = HashMap::new();
+
+    for def in &defs {
+        if let Some(ref parent) = def.parent {
+            if def.kind == DefinitionKind::Field {
+                if let Some(ref sig) = def.signature {
+                    if let Some((name, type_name)) = parse_ts_field_type(sig) {
+                        class_field_types
+                            .entry(parent.clone())
+                            .or_default()
+                            .insert(name, type_name);
+                    }
+                }
+            }
+        }
+    }
+
+    // Extract constructor parameter types as field types (DI pattern)
+    for def in &defs {
+        if def.kind == DefinitionKind::Constructor {
+            if let Some(ref parent) = def.parent {
+                if let Some(ref sig) = def.signature {
+                    let param_types = extract_ts_constructor_param_types(sig);
+                    let field_map = class_field_types.entry(parent.clone()).or_default();
+                    for (param_name, param_type) in param_types {
+                        if !field_map.contains_key(&param_name) {
+                            field_map.insert(param_name, param_type);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Extract Angular inject() patterns as field types
+    extract_ts_inject_types(tree.root_node(), source, &mut class_field_types);
+
+    // Extract call sites from pre-collected method nodes
+    let mut call_sites: Vec<(usize, Vec<CallSite>)> = Vec::new();
+    for &(def_local_idx, method_node) in &method_nodes {
+        let def = &defs[def_local_idx];
+        let parent_name = def.parent.as_deref().unwrap_or("");
+        let field_types = class_field_types.get(parent_name)
+            .cloned()
+            .unwrap_or_default();
+
+        let calls = extract_ts_call_sites(method_node, source, parent_name, &field_types);
+        if !calls.is_empty() {
+            call_sites.push((def_local_idx, calls));
+        }
+    }
+
+    (defs, call_sites)
 }
 
 // ─── AST walking ────────────────────────────────────────────────────
 
-fn walk_typescript_node_collecting(
-    node: tree_sitter::Node,
+fn walk_typescript_node_collecting<'a>(
+    node: tree_sitter::Node<'a>,
     source: &str,
     file_id: u32,
     parent_name: Option<&str>,
     defs: &mut Vec<DefinitionEntry>,
+    method_nodes: &mut Vec<(usize, tree_sitter::Node<'a>)>,
 ) {
     let kind = node.kind();
 
@@ -41,7 +97,7 @@ fn walk_typescript_node_collecting(
                 if let Some(body) = find_child_by_kind(node, "class_body") {
                     for i in 0..body.child_count() {
                         if let Some(child) = body.child(i) {
-                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs);
+                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs, method_nodes);
                         }
                     }
                 }
@@ -58,7 +114,7 @@ fn walk_typescript_node_collecting(
                 {
                     for i in 0..body.child_count() {
                         if let Some(child) = body.child(i) {
-                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs);
+                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs, method_nodes);
                         }
                     }
                 }
@@ -73,7 +129,7 @@ fn walk_typescript_node_collecting(
                 if let Some(body) = find_child_by_kind(node, "enum_body") {
                     for i in 0..body.child_count() {
                         if let Some(child) = body.child(i) {
-                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs);
+                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs, method_nodes);
                         }
                     }
                 }
@@ -82,13 +138,17 @@ fn walk_typescript_node_collecting(
         }
         "function_declaration" => {
             if let Some(def) = extract_ts_function_def(node, source, file_id, parent_name) {
+                let idx = defs.len();
                 defs.push(def);
+                method_nodes.push((idx, node));
                 return;
             }
         }
         "method_definition" => {
             if let Some(def) = extract_ts_method_def(node, source, file_id, parent_name) {
+                let idx = defs.len();
                 defs.push(def);
+                method_nodes.push((idx, node));
                 return;
             }
         }
@@ -106,7 +166,12 @@ fn walk_typescript_node_collecting(
         }
         "public_field_definition" => {
             if let Some(def) = extract_ts_field_def(node, source, file_id, parent_name) {
+                let idx = defs.len();
                 defs.push(def);
+                // Collect arrow function fields for call-site extraction
+                if has_arrow_function_value(node) {
+                    method_nodes.push((idx, node));
+                }
                 return;
             }
         }
@@ -159,7 +224,7 @@ fn walk_typescript_node_collecting(
         "export_statement" => {
             for i in 0..node.child_count() {
                 if let Some(child) = node.child(i) {
-                    walk_typescript_node_collecting(child, source, file_id, parent_name, defs);
+                    walk_typescript_node_collecting(child, source, file_id, parent_name, defs, method_nodes);
                 }
             }
             return;
@@ -170,7 +235,7 @@ fn walk_typescript_node_collecting(
     // Default: recurse into children
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            walk_typescript_node_collecting(child, source, file_id, parent_name, defs);
+            walk_typescript_node_collecting(child, source, file_id, parent_name, defs, method_nodes);
         }
     }
 }
@@ -700,6 +765,14 @@ fn is_inside_enum_body(node: tree_sitter::Node) -> bool {
     false
 }
 
+/// Check if a public_field_definition has an arrow_function as its value.
+fn has_arrow_function_value(node: tree_sitter::Node) -> bool {
+    if let Some(value) = find_child_by_field(node, "value") {
+        return value.kind() == "arrow_function";
+    }
+    false
+}
+
 /// Extract an abstract method signature (e.g., `abstract handle(): void;`).
 fn extract_ts_abstract_method_sig(
     node: tree_sitter::Node,
@@ -756,5 +829,451 @@ fn extract_ts_method_signature(
         modifiers,
         attributes: Vec::new(),
         base_types: Vec::new(),
+    })
+}
+
+// ─── Angular inject() extraction ────────────────────────────────────
+
+/// Extract field types from Angular `inject()` patterns in class bodies.
+///
+/// Supports two patterns:
+/// - **Field initializer**: `private zone = inject(NgZone);`
+/// - **Constructor assignment**: `this.store = inject(Store);` inside constructor body
+///
+/// Handles generic type arguments: `inject(Store<AppState>)` → extracts `"Store"`.
+fn extract_ts_inject_types(
+    node: tree_sitter::Node,
+    source: &str,
+    class_field_types: &mut HashMap<String, HashMap<String, String>>,
+) {
+    let kind = node.kind();
+    match kind {
+        "class_declaration" | "abstract_class_declaration" => {
+            let class_name = find_child_by_field(node, "name")
+                .map(|n| node_text(n, source).to_string());
+            if let (Some(class_name), Some(body)) = (class_name, find_child_by_kind(node, "class_body")) {
+                extract_inject_from_class_body(body, source, &class_name, class_field_types);
+            }
+            // Don't recurse further for nested classes — they'll be handled by their own match
+        }
+        _ => {}
+    }
+
+    // Recurse into children to find all class declarations
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            extract_ts_inject_types(child, source, class_field_types);
+        }
+    }
+}
+
+/// Walk a class body looking for inject() patterns.
+fn extract_inject_from_class_body(
+    body: tree_sitter::Node,
+    source: &str,
+    class_name: &str,
+    class_field_types: &mut HashMap<String, HashMap<String, String>>,
+) {
+    for i in 0..body.child_count() {
+        if let Some(child) = body.child(i) {
+            match child.kind() {
+                // Pattern 1: Field initializer — `private zone = inject(NgZone);`
+                "public_field_definition" => {
+                    if let Some((field_name, type_name)) = extract_inject_from_field(child, source) {
+                        class_field_types
+                            .entry(class_name.to_string())
+                            .or_default()
+                            .insert(field_name, type_name);
+                    }
+                }
+                // Pattern 2: Constructor assignment — `this.store = inject(Store);`
+                "method_definition" => {
+                    let is_constructor = find_child_by_field(child, "name")
+                        .map(|n| node_text(n, source) == "constructor")
+                        .unwrap_or(false);
+                    if is_constructor {
+                        if let Some(stmt_block) = find_child_by_kind(child, "statement_block") {
+                            extract_inject_from_statement_block(stmt_block, source, class_name, class_field_types);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Extract inject() from a field initializer: `private zone = inject(NgZone);`
+fn extract_inject_from_field(node: tree_sitter::Node, source: &str) -> Option<(String, String)> {
+    // Get field name
+    let name_node = find_child_by_field(node, "name")
+        .or_else(|| find_child_by_kind(node, "property_identifier"))?;
+    let field_name = node_text(name_node, source).to_string();
+
+    // Get the value (initializer)
+    let value_node = find_child_by_field(node, "value")?;
+
+    // Check if it's a call_expression with function name "inject"
+    extract_inject_class_name(value_node, source)
+        .map(|type_name| (field_name, type_name))
+}
+
+/// Extract inject() assignments from a statement block (constructor body).
+/// Looks for: `this.fieldName = inject(ClassName);`
+fn extract_inject_from_statement_block(
+    block: tree_sitter::Node,
+    source: &str,
+    class_name: &str,
+    class_field_types: &mut HashMap<String, HashMap<String, String>>,
+) {
+    for i in 0..block.child_count() {
+        if let Some(child) = block.child(i) {
+            // expression_statement → assignment_expression
+            if child.kind() == "expression_statement" {
+                for j in 0..child.child_count() {
+                    if let Some(expr) = child.child(j) {
+                        if expr.kind() == "assignment_expression" {
+                            if let Some((field_name, type_name)) = extract_inject_from_assignment(expr, source) {
+                                class_field_types
+                                    .entry(class_name.to_string())
+                                    .or_default()
+                                    .insert(field_name, type_name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Extract inject() from an assignment expression: `this.store = inject(Store)`
+fn extract_inject_from_assignment(node: tree_sitter::Node, source: &str) -> Option<(String, String)> {
+    // Left side should be member_expression: this.fieldName
+    let left = find_child_by_field(node, "left")?;
+    if left.kind() != "member_expression" {
+        return None;
+    }
+    let obj = find_child_by_field(left, "object")?;
+    if node_text(obj, source).trim() != "this" && obj.kind() != "this" {
+        return None;
+    }
+    let prop = find_child_by_field(left, "property")?;
+    let field_name = node_text(prop, source).to_string();
+
+    // Right side should be inject(ClassName)
+    let right = find_child_by_field(node, "right")?;
+    let type_name = extract_inject_class_name(right, source)?;
+
+    Some((field_name, type_name))
+}
+
+/// Check if a node is a call_expression to `inject(ClassName)` and extract the class name.
+/// Handles generic type params: `inject(Store<AppState>)` → `"Store"`.
+fn extract_inject_class_name(node: tree_sitter::Node, source: &str) -> Option<String> {
+    if node.kind() != "call_expression" {
+        return None;
+    }
+
+    // Check function name is "inject"
+    let func = find_child_by_field(node, "function").or_else(|| node.child(0))?;
+    if node_text(func, source).trim() != "inject" {
+        return None;
+    }
+
+    // Get arguments
+    let args = find_child_by_kind(node, "arguments")?;
+
+    // Find the first real argument (skip parentheses and commas)
+    for k in 0..args.child_count() {
+        if let Some(arg) = args.child(k) {
+            if arg.is_named() {
+                let arg_text = node_text(arg, source).trim().to_string();
+                // Strip generic type params: Store<AppState> → Store
+                let base_name = arg_text
+                    .split('<')
+                    .next()
+                    .unwrap_or(&arg_text)
+                    .trim()
+                    .to_string();
+                if !base_name.is_empty() {
+                    return Some(base_name);
+                }
+            }
+        }
+    }
+    None
+}
+
+// ─── Call-site extraction ───────────────────────────────────────────
+
+/// Parse a TS field signature "name: Type" into (name, base_type).
+fn parse_ts_field_type(sig: &str) -> Option<(String, String)> {
+    let parts: Vec<&str> = sig.splitn(2, ':').collect();
+    if parts.len() == 2 {
+        let name = parts[0].trim().to_string();
+        let type_str = parts[1].trim();
+        let base_type = type_str
+            .split('<')
+            .next()
+            .unwrap_or(type_str)
+            .trim()
+            .to_string();
+        if !name.is_empty() && !base_type.is_empty() {
+            return Some((name, base_type));
+        }
+    }
+    None
+}
+
+/// Extract parameter names and types from a TS constructor signature.
+/// TS format: `constructor(private userService: UserService, logger: Logger)`
+fn extract_ts_constructor_param_types(sig: &str) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    let start = match sig.find('(') {
+        Some(i) => i + 1,
+        None => return result,
+    };
+    let end = match sig.rfind(')') {
+        Some(i) => i,
+        None => return result,
+    };
+    if start >= end {
+        return result;
+    }
+
+    let params_str = &sig[start..end];
+    for param in params_str.split(',') {
+        let param = param.trim();
+        if param.is_empty() {
+            continue;
+        }
+        // TS params: "private readonly name: Type" or "name: Type"
+        let parts: Vec<&str> = param.splitn(2, ':').collect();
+        if parts.len() == 2 {
+            let name_part = parts[0].trim();
+            let type_part = parts[1].trim();
+            // Last word of name_part is the param name (skip modifiers)
+            let name = name_part
+                .split_whitespace()
+                .last()
+                .unwrap_or("")
+                .to_string();
+            let base_type = type_part
+                .split('<')
+                .next()
+                .unwrap_or(type_part)
+                .trim()
+                .to_string();
+            if !name.is_empty() && !base_type.is_empty() {
+                result.push((name, base_type));
+            }
+        }
+    }
+    result
+}
+
+/// Extract call sites from a method/function body node.
+fn extract_ts_call_sites(
+    method_node: tree_sitter::Node,
+    source: &str,
+    class_name: &str,
+    field_types: &HashMap<String, String>,
+) -> Vec<CallSite> {
+    let mut calls = Vec::new();
+
+    // Find the body (statement_block for methods/functions, or walk the whole node)
+    let body = find_child_by_kind(method_node, "statement_block")
+        .or_else(|| find_child_by_kind(method_node, "arrow_function"))
+        .unwrap_or(method_node);
+
+    walk_ts_for_invocations(body, source, class_name, field_types, &mut calls);
+
+    calls.sort_by(|a, b| {
+        a.line
+            .cmp(&b.line)
+            .then_with(|| a.method_name.cmp(&b.method_name))
+            .then_with(|| a.receiver_type.cmp(&b.receiver_type))
+    });
+    calls.dedup_by(|a, b| {
+        a.line == b.line && a.method_name == b.method_name && a.receiver_type == b.receiver_type
+    });
+
+    calls
+}
+
+/// Recursively walk AST looking for call_expression and new_expression nodes.
+fn walk_ts_for_invocations(
+    node: tree_sitter::Node,
+    source: &str,
+    class_name: &str,
+    field_types: &HashMap<String, String>,
+    calls: &mut Vec<CallSite>,
+) {
+    match node.kind() {
+        "call_expression" => {
+            if let Some(call) = extract_ts_call(node, source, class_name, field_types) {
+                calls.push(call);
+            }
+            // Walk into arguments for nested calls
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i) {
+                    if child.kind() == "arguments" {
+                        walk_ts_for_invocations(child, source, class_name, field_types, calls);
+                    }
+                }
+            }
+            return;
+        }
+        "new_expression" => {
+            if let Some(call) = extract_ts_new_expression(node, source) {
+                calls.push(call);
+            }
+            // Walk into arguments for nested calls
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i) {
+                    if child.kind() == "arguments" {
+                        walk_ts_for_invocations(child, source, class_name, field_types, calls);
+                    }
+                }
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            walk_ts_for_invocations(child, source, class_name, field_types, calls);
+        }
+    }
+}
+
+/// Extract a call site from a call_expression node.
+fn extract_ts_call(
+    node: tree_sitter::Node,
+    source: &str,
+    class_name: &str,
+    field_types: &HashMap<String, String>,
+) -> Option<CallSite> {
+    let func_node = find_child_by_field(node, "function").or_else(|| node.child(0))?;
+    let line = node.start_position().row as u32 + 1;
+
+    match func_node.kind() {
+        "identifier" => {
+            let method_name = node_text(func_node, source).to_string();
+            Some(CallSite {
+                method_name,
+                receiver_type: None,
+                line,
+            })
+        }
+        "member_expression" => {
+            extract_ts_member_call(func_node, source, class_name, field_types, line)
+        }
+        _ => None,
+    }
+}
+
+/// Extract a call site from a member_expression (e.g., `this.method()`, `service.method()`).
+fn extract_ts_member_call(
+    member_node: tree_sitter::Node,
+    source: &str,
+    class_name: &str,
+    field_types: &HashMap<String, String>,
+    line: u32,
+) -> Option<CallSite> {
+    let property_node = find_child_by_field(member_node, "property")?;
+    let method_name = node_text(property_node, source).to_string();
+
+    let object_node =
+        find_child_by_field(member_node, "object").or_else(|| member_node.child(0))?;
+    let receiver_type = resolve_ts_receiver_type(object_node, source, class_name, field_types);
+
+    Some(CallSite {
+        method_name,
+        receiver_type,
+        line,
+    })
+}
+
+/// Resolve the type of a receiver expression.
+fn resolve_ts_receiver_type(
+    object_node: tree_sitter::Node,
+    source: &str,
+    class_name: &str,
+    field_types: &HashMap<String, String>,
+) -> Option<String> {
+    let text = node_text(object_node, source).trim();
+
+    match object_node.kind() {
+        "this" => {
+            if class_name.is_empty() {
+                None
+            } else {
+                Some(class_name.to_string())
+            }
+        }
+        "identifier" => {
+            if let Some(type_name) = field_types.get(text) {
+                Some(type_name.clone())
+            } else if text.chars().next().is_some_and(|c| c.is_uppercase()) {
+                Some(text.to_string())
+            } else {
+                None
+            }
+        }
+        "member_expression" => {
+            // Handle this.service.method() — object is this.service
+            let inner_object = find_child_by_field(object_node, "object")?;
+            let inner_property = find_child_by_field(object_node, "property")?;
+            let inner_obj_text = node_text(inner_object, source).trim();
+
+            if inner_obj_text == "this" || inner_object.kind() == "this" {
+                let prop_name = node_text(inner_property, source);
+                field_types.get(prop_name).cloned()
+            } else {
+                None
+            }
+        }
+        _ => {
+            if text == "this" {
+                if class_name.is_empty() {
+                    None
+                } else {
+                    Some(class_name.to_string())
+                }
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Extract a call site from a new_expression node (e.g., `new SomeClass()`).
+fn extract_ts_new_expression(node: tree_sitter::Node, source: &str) -> Option<CallSite> {
+    // new_expression: find the constructor identifier
+    let type_node = find_child_by_field(node, "constructor").or_else(|| {
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                if child.kind() == "identifier" {
+                    return Some(child);
+                }
+            }
+        }
+        None
+    })?;
+
+    let type_text = node_text(type_node, source);
+    let type_name = type_text.split('<').next().unwrap_or(type_text).trim();
+
+    if type_name.is_empty() {
+        return None;
+    }
+
+    Some(CallSite {
+        method_name: type_name.to_string(),
+        receiver_type: Some(type_name.to_string()),
+        line: node.start_position().row as u32 + 1,
     })
 }
