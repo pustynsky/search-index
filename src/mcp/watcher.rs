@@ -723,24 +723,27 @@ mod tests {
 
     #[test]
     fn test_watch_index_survives_save_load_roundtrip() {
-        // Verify that a ContentIndex with forward/path_to_id (watch-mode fields)
+        // Verify that a ContentIndex with path_to_id (watch-mode field)
         // can be saved to disk and loaded back with all data intact.
-        // This is critical for save-on-shutdown: if these fields don't serialize
+        // This is critical for save-on-shutdown: if path_to_id doesn't serialize
         // properly, the loaded index would lose incremental updates.
+        //
+        // Note: forward index was intentionally dropped in build_watch_index_from
+        // (memory optimization commit b43473c) to save ~1.5 GB RAM.
+        // Only path_to_id is preserved for watch-mode operation.
         let tmp = std::env::temp_dir().join(format!("search_roundtrip_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
 
-        // Build a watch-mode index with forward and path_to_id populated
+        // Build a watch-mode index with path_to_id populated (forward is None)
         let index = make_test_index();
         let watch_index = build_watch_index_from(index);
 
-        // Verify watch fields are populated before save
-        assert!(watch_index.forward.is_some(), "forward should be populated");
+        // Verify watch fields before save
+        assert!(watch_index.forward.is_none(), "forward should be None (dropped to save RAM)");
         assert!(watch_index.path_to_id.is_some(), "path_to_id should be populated");
         let orig_files = watch_index.files.len();
         let orig_tokens = watch_index.index.len();
-        let orig_forward_keys: Vec<u32> = watch_index.forward.as_ref().unwrap().keys().copied().collect();
         let orig_path_to_id_len = watch_index.path_to_id.as_ref().unwrap().len();
 
         // Save to disk
@@ -756,16 +759,10 @@ mod tests {
         assert_eq!(loaded.index.len(), orig_tokens, "token count mismatch");
         assert_eq!(loaded.total_tokens, watch_index.total_tokens, "total_tokens mismatch");
 
-        // Verify watch-mode fields survived serialization
-        // Note: forward/path_to_id are #[serde(default)] so they deserialize as None
-        // if not present. This test catches regressions where they silently drop.
-        assert!(loaded.forward.is_some(), "forward should survive roundtrip");
-        let loaded_forward = loaded.forward.as_ref().unwrap();
-        for key in &orig_forward_keys {
-            assert!(loaded_forward.contains_key(key),
-                "forward should contain file_id {} after roundtrip", key);
-        }
+        // forward should remain None after roundtrip (not used since memory optimization)
+        assert!(loaded.forward.is_none(), "forward should remain None after roundtrip");
 
+        // path_to_id should survive serialization
         assert!(loaded.path_to_id.is_some(), "path_to_id should survive roundtrip");
         assert_eq!(loaded.path_to_id.as_ref().unwrap().len(), orig_path_to_id_len,
             "path_to_id entry count mismatch after roundtrip");

@@ -212,6 +212,46 @@ pub fn cleanup_orphaned_indexes(index_base: &std::path::Path) -> usize {
     removed
 }
 
+/// Remove all index files (.idx, .cidx, .didx) whose root matches the given directory.
+/// Comparison is case-insensitive on the canonicalized paths (Windows-safe).
+/// Returns the number of files removed.
+pub fn cleanup_indexes_for_dir(dir: &str, index_base: &std::path::Path) -> usize {
+    if !index_base.exists() {
+        return 0;
+    }
+
+    let target = std::fs::canonicalize(dir)
+        .map(|p| clean_path(&p.to_string_lossy()))
+        .unwrap_or_else(|_| clean_path(dir));
+
+    let mut removed = 0;
+
+    if let Ok(entries) = std::fs::read_dir(index_base) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let ext = path.extension().and_then(|e| e.to_str());
+            if !matches!(ext, Some("idx") | Some("cidx") | Some("didx")) {
+                continue;
+            }
+
+            if let Some(root) = read_root_from_index_file(&path) {
+                let root_canonical = std::fs::canonicalize(&root)
+                    .map(|p| clean_path(&p.to_string_lossy()))
+                    .unwrap_or_else(|_| clean_path(&root));
+                if root_canonical.eq_ignore_ascii_case(&target) {
+                    if std::fs::remove_file(&path).is_ok() {
+                        removed += 1;
+                        eprintln!("  Removed index for dir '{}': {} ({})",
+                            dir, path.display(), ext.unwrap_or("?"));
+                    }
+                }
+            }
+        }
+    }
+
+    removed
+}
+
 // ─── Index building ──────────────────────────────────────────────────
 
 pub fn build_index(args: &IndexArgs) -> FileIndex {

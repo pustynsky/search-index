@@ -18,7 +18,7 @@ use ignore::WalkBuilder;
 use regex::Regex;
 
 use crate::{
-    build_content_index, build_index, cleanup_orphaned_indexes,
+    build_content_index, build_index, cleanup_indexes_for_dir, cleanup_orphaned_indexes,
     content_index_path_for, find_content_index_for_dir,
     index_dir, index_path_for, load_content_index, load_index,
     save_content_index, save_index, tokenize,
@@ -67,8 +67,8 @@ pub(crate) enum Commands {
     /// Audit definition index coverage (load from disk, no rebuild)
     DefAudit(definitions::DefAuditArgs),
 
-    /// Remove orphaned index files.
-    Cleanup,
+    /// Remove orphaned index files, or indexes for a specific directory.
+    Cleanup(CleanupArgs),
 
     /// Show best practices and tips.
     Tips,
@@ -89,14 +89,24 @@ pub fn run() {
         Commands::Serve(args) => { serve::cmd_serve(args); Ok(()) },
         Commands::DefIndex(args) => cmd_def_index(args),
         Commands::DefAudit(args) => cmd_def_audit(args),
-        Commands::Cleanup => {
+        Commands::Cleanup(args) => {
             let idx_base = index_dir();
-            eprintln!("Scanning for orphaned indexes in {}...", idx_base.display());
-            let removed = cleanup_orphaned_indexes(&idx_base);
-            if removed == 0 {
-                eprintln!("No orphaned indexes found.");
+            if let Some(ref dir) = args.dir {
+                eprintln!("Removing indexes for directory '{}' from {}...", dir, idx_base.display());
+                let removed = cleanup_indexes_for_dir(dir, &idx_base);
+                if removed == 0 {
+                    eprintln!("No indexes found for '{}'.", dir);
+                } else {
+                    eprintln!("Removed {} index file(s) for '{}'.", removed, dir);
+                }
             } else {
-                eprintln!("Removed {} orphaned index file(s).", removed);
+                eprintln!("Scanning for orphaned indexes in {}...", idx_base.display());
+                let removed = cleanup_orphaned_indexes(&idx_base);
+                if removed == 0 {
+                    eprintln!("No orphaned indexes found.");
+                } else {
+                    eprintln!("Removed {} orphaned index file(s).", removed);
+                }
             }
             Ok(())
         },

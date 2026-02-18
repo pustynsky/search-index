@@ -267,21 +267,44 @@ Index directory: C:\Users\you\AppData\Local\search-index
 
 ---
 
-## `search cleanup` — Remove Orphaned Indexes
+## `search cleanup` — Remove Orphaned or Directory-Specific Indexes
 
-Scans the index directory and removes `.idx`, `.cidx`, `.didx` files whose root directories no longer exist on disk.
+Without `--dir`: scans the index directory and removes `.idx`, `.cidx`, `.didx` files whose root directories no longer exist on disk.
+
+With `--dir`: removes all index files whose root matches the specified directory (case-insensitive). Indexes for other directories are preserved.
 
 ```bash
+# Remove orphaned indexes (root dirs that no longer exist)
 search cleanup
+
+# Remove all indexes for a specific directory
+search cleanup --dir C:\Projects\MyApp
+
+# Remove indexes for current directory (useful after E2E tests)
+search cleanup --dir .
 ```
 
-Example output:
+| Flag       | Description                                              |
+| ---------- | -------------------------------------------------------- |
+| `--dir`    | Remove indexes only for this directory (instead of orphaned cleanup) |
+
+Example output (orphaned):
 
 ```
 Scanning for orphaned indexes in C:\Users\you\AppData\Local\search-index...
   Removed orphaned index: abc123.idx (root: C:\Deleted\OldProject)
   Removed orphaned index: def456.cidx (root: C:\Temp\test_dir_12345)
 Removed 2 orphaned index file(s).
+```
+
+Example output (`--dir`):
+
+```
+Removing indexes for directory '.' from C:\Users\you\AppData\Local\search-index...
+  Removed index for dir '.': abc123.idx (idx)
+  Removed index for dir '.': def456.cidx (cidx)
+  Removed index for dir '.': ghi789.didx (didx)
+Removed 3 index file(s) for '.'.
 ```
 
 ---

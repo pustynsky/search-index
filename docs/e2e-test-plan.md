@@ -452,6 +452,39 @@ cargo run -- cleanup
 
 ---
 
+### T19b: `cleanup --dir` — Remove indexes for a specific directory
+
+**Setup:**
+
+```powershell
+# Create a temp directory and build indexes for it
+$tmp = New-Item -ItemType Directory -Path "$env:TEMP\search_cleanup_dir_test_$(Get-Random)"
+Set-Content -Path "$tmp\hello.cs" -Value "class Hello {}"
+cargo run -- index -d $tmp
+cargo run -- content-index -d $tmp -e cs
+```
+
+**Command:**
+
+```powershell
+cargo run -- cleanup --dir $tmp
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr: `Removing indexes for directory '...' from ...`
+- stderr: `Removed index for dir '...' ...` (one line per removed file)
+- stderr: `Removed N index file(s) for '...'.`
+- After cleanup, `search info` should NOT list the temp directory
+- Indexes for other directories remain untouched
+
+**Validates:** Targeted index cleanup by directory, case-insensitive path comparison, preservation of unrelated indexes.
+
+**Note:** The E2E test script (`e2e-test.ps1`) automatically runs `cleanup --dir $TestDir` at the end of the test run to remove indexes created during testing.
+
+---
+
 ### T20: `def-index` — Build definition index
 
 **Command:**

@@ -149,6 +149,13 @@ pub struct ContentIndexArgs {
 }
 
 #[derive(Parser, Debug)]
+pub struct CleanupArgs {
+    /// Remove indexes only for this directory (instead of removing orphaned indexes)
+    #[arg(short, long)]
+    pub dir: Option<String>,
+}
+
+#[derive(Parser, Debug)]
 #[command(after_long_help = r#"WHAT IS MCP:
   Model Context Protocol (MCP) is a JSON-RPC 2.0 protocol over stdio that
   allows AI agents (VS Code Copilot, Roo/Cline, Claude) to call tools natively.
