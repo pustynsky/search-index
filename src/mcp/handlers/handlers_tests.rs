@@ -1140,6 +1140,54 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
     assert_eq!(output["summary"]["totalFiles"], 1);
 }
 
+#[test] fn test_substring_and_mode_no_false_positive_from_multi_token_match() {
+    // Regression test: term "service" matches multiple tokens ["userservice", "servicehelper",
+    // "servicemanager"], but term "handler" matches zero tokens. In AND mode, file should NOT
+    // pass because only 1 of 2 terms matched. Before the fix, terms_matched was incremented
+    // per-token (3 times for "service"), causing it to exceed term_count (2) and producing
+    // a false positive.
+    let ctx = make_substring_ctx(
+        vec![
+            ("userservice", 0, vec![10]),
+            ("servicehelper", 0, vec![20]),
+            ("servicemanager", 0, vec![30]),
+        ],
+        vec!["C:\\test\\ServiceFile.cs"],
+    );
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "service,handler",
+        "substring": true,
+        "mode": "and"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    // File only matches "service" (via 3 tokens), NOT "handler" — AND should filter it out
+    assert_eq!(output["summary"]["totalFiles"], 0,
+        "AND mode should require ALL terms to match, not count per-token. Got: {}", output);
+}
+
+#[test] fn test_substring_and_mode_correct_when_both_terms_match() {
+    // Both terms match different tokens in the same file — AND should pass
+    let ctx = make_substring_ctx(
+        vec![
+            ("userservice", 0, vec![10]),
+            ("servicehelper", 0, vec![20]),
+            ("requesthandler", 0, vec![30]),
+        ],
+        vec!["C:\\test\\ServiceFile.cs"],
+    );
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "service,handler",
+        "substring": true,
+        "mode": "and"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    // File matches both "service" (2 tokens) and "handler" (1 token) — AND should pass
+    assert_eq!(output["summary"]["totalFiles"], 1,
+        "AND mode should pass when all terms match. Got: {}", output);
+}
+
 #[test] fn test_substring_search_count_only() {
     let ctx = make_substring_ctx(vec![("httpclient", 0, vec![5, 12]), ("httphandler", 1, vec![3])], vec!["C:\\test\\Client.cs", "C:\\test\\Handler.cs"]);
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "http", "substring": true, "countOnly": true}));

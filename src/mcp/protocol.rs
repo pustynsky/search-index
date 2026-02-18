@@ -153,7 +153,7 @@ impl InitializeResult {
             },
             server_info: ServerInfo {
                 name: "search-index".to_string(),
-                version: "0.3.0".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
             },
             instructions: Some(crate::tips::render_instructions()),
         }
@@ -210,7 +210,7 @@ mod tests {
         assert_eq!(json["protocolVersion"], "2025-03-26");
         assert_eq!(json["capabilities"]["tools"]["listChanged"], false);
         assert_eq!(json["serverInfo"]["name"], "search-index");
-        assert_eq!(json["serverInfo"]["version"], "0.3.0");
+        assert_eq!(json["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

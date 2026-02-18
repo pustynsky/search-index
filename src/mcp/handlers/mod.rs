@@ -487,9 +487,9 @@ fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> Tool
     let def_count = new_index.definitions.len();
     let call_site_count: usize = new_index.method_calls.values().map(|v| v.len()).sum();
 
-    // Compute index size on disk
-    let size_mb = bincode::serialize(&new_index)
-        .map(|data| data.len() as f64 / 1_048_576.0)
+    // Compute index size without allocating (uses bincode::serialized_size)
+    let size_mb = bincode::serialized_size(&new_index)
+        .map(|size| size as f64 / 1_048_576.0)
         .unwrap_or(0.0);
 
     // Update in-memory cache
