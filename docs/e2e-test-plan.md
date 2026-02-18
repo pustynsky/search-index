@@ -2027,3 +2027,61 @@ $msgs | cargo run -- serve -d . -e rs 2>$null
 **Validates:** `search_find` directory validation parity with `search_grep`, preventing filesystem enumeration outside allowed scope.
 
 **Status:** ✅ Implemented (covered by `test_validate_search_dir_subdirectory` and `test_validate_search_dir_outside_rejects` unit tests)
+
+
+---
+
+### T-LOSSY: Non-UTF8 file indexing (lossy UTF-8 conversion)
+
+**Background:** Files with Windows-1252 encoded characters (e.g., smart quotes `'` = byte `0x92` in comments) were previously silently skipped during definition indexing because `std::fs::read_to_string()` requires valid UTF-8. This test verifies that such files are now indexed via lossy UTF-8 conversion.
+
+**Setup:**
+
+```powershell
+# Create a temp directory with a .cs file containing a non-UTF8 byte
+$testDir = "$env:TEMP\search_e2e_lossy"
+New-Item -ItemType Directory -Force -Path $testDir | Out-Null
+$bytes = [System.Text.Encoding]::UTF8.GetBytes(@"
+using System;
+namespace TestApp
+{
+    // Comment: you
+"@)
+$bytes += [byte]0x92  # Windows-1252 right single quote
+$bytes += [System.Text.Encoding]::UTF8.GetBytes(@"re a dev
+    public class DataProcessor
+    {
+        public void Process() { }
+    }
+}
+"@)
+[System.IO.File]::WriteAllBytes("$testDir\Program.cs", $bytes)
+```
+
+**Command:**
+
+```powershell
+cargo run -- def-index --dir $testDir --ext cs
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr contains: `WARNING: file contains non-UTF8 bytes (lossy conversion applied)`
+- stderr contains: `1 lossy-utf8 files`
+- stderr contains: `extracted` with a non-zero definition count
+
+**Verify definitions are indexed:**
+
+```powershell
+# Start MCP server and query
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | cargo run -- serve --dir $testDir --ext cs --definitions 2>$null
+```
+
+Then send `search_definitions` with `file: "Program.cs"` — should return `DataProcessor` class and `Process` method.
+
+**Cleanup:**
+
+```powershell
+Remove-Item -Recurse -Force $testDir
+```

@@ -13,7 +13,10 @@ pub(crate) fn parse_csharp_definitions(
 ) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>) {
     let tree = match parser.parse(source, None) {
         Some(t) => t,
-        None => return (Vec::new(), Vec::new()),
+        None => {
+            eprintln!("[def-index] WARNING: tree-sitter C# parse returned None for file_id={}", file_id);
+            return (Vec::new(), Vec::new());
+        }
     };
 
     let mut defs = Vec::new();

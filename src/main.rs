@@ -3,7 +3,7 @@
 //! Binary crate entry point. All CLI logic is in the `cli` module.
 
 // Re-export core types from library crate
-pub use search::{clean_path, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex, DEFAULT_MIN_TOKEN_LEN};
+pub use search::{clean_path, read_file_lossy, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex, DEFAULT_MIN_TOKEN_LEN};
 
 mod cli;
 mod definitions;

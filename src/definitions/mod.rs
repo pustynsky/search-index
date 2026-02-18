@@ -19,7 +19,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ignore::WalkBuilder;
 
-use crate::clean_path;
+use crate::{clean_path, read_file_lossy};
 
 // ─── Index Build ─────────────────────────────────────────────────────
 
@@ -114,12 +114,16 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 
                 let mut chunk_defs: Vec<(u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>)> = Vec::new();
                 let mut errors = 0usize;
+                let mut lossy_files: Vec<String> = Vec::new();
 
                 for (file_id, file_path) in &chunk {
-                    let content = match std::fs::read_to_string(file_path) {
-                        Ok(c) => c,
+                    let (content, was_lossy) = match read_file_lossy(Path::new(file_path)) {
+                        Ok(r) => r,
                         Err(_) => { errors += 1; continue; }
                     };
+                    if was_lossy {
+                        lossy_files.push(file_path.clone());
+                    }
 
                     let ext = Path::new(file_path.as_str())
                         .extension()
@@ -139,7 +143,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                     }
                 }
 
-                (chunk_defs, errors)
+                (chunk_defs, errors, lossy_files)
             })
         }).collect();
 
@@ -163,8 +167,13 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         path_to_id.insert(PathBuf::from(file_path), file_id as u32);
     }
 
-    for (chunk_defs, errors) in thread_results {
+    let mut lossy_file_count = 0usize;
+    for (chunk_defs, errors, lossy_files) in thread_results {
         parse_errors += errors;
+        for f in &lossy_files {
+            eprintln!("[def-index] WARNING: file contains non-UTF8 bytes (lossy conversion applied): {}", f);
+        }
+        lossy_file_count += lossy_files.len();
         for (file_id, file_defs, file_calls) in chunk_defs {
             let base_def_idx = definitions.len() as u32;
 
@@ -217,12 +226,13 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 
     let elapsed = start.elapsed();
     eprintln!(
-        "[def-index] Parsed {} files in {:.1}s, extracted {} definitions, {} call sites ({} parse errors, {} threads)",
+        "[def-index] Parsed {} files in {:.1}s, extracted {} definitions, {} call sites ({} read errors, {} lossy-utf8 files, {} threads)",
         total_files,
         elapsed.as_secs_f64(),
         definitions.len(),
         total_call_sites,
         parse_errors,
+        lossy_file_count,
         num_threads
     );
 
@@ -244,6 +254,8 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         file_index,
         path_to_id,
         method_calls,
+        parse_errors,
+        lossy_file_count,
     }
 }
 

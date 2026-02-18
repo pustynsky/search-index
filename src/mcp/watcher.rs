@@ -190,9 +190,9 @@ pub fn build_watch_index_from(mut index: ContentIndex) -> ContentIndex {
 fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
     let path_str = path.to_string_lossy().to_string();
 
-    // Read the file
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
+    // Read the file (lossy UTF-8 for non-UTF8 files like Windows-1252)
+    let (content, _was_lossy) = match crate::read_file_lossy(path) {
+        Ok(r) => r,
         Err(_) => return, // File might have been deleted between event and processing
     };
 

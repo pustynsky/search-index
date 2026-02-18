@@ -318,6 +318,12 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
         "indexFiles": index.files.len(),
         "totalDefinitions": index.definitions.len(),
     });
+    if index.parse_errors > 0 {
+        summary["readErrors"] = json!(index.parse_errors);
+    }
+    if index.lossy_file_count > 0 {
+        summary["lossyUtf8Files"] = json!(index.lossy_file_count);
+    }
     if include_body {
         summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
     }

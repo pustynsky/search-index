@@ -158,6 +158,12 @@ pub struct DefinitionIndex {
     /// Only populated for Method and Constructor kinds.
     #[serde(default)]
     pub method_calls: HashMap<u32, Vec<CallSite>>,
+    /// Number of files that could not be read (IO errors) during index build.
+    #[serde(default)]
+    pub parse_errors: usize,
+    /// Number of files that contained non-UTF8 bytes and were read with lossy conversion.
+    #[serde(default)]
+    pub lossy_file_count: usize,
 }
 
 // ─── CLI Args ────────────────────────────────────────────────────────
