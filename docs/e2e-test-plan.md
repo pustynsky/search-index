@@ -1123,6 +1123,31 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
+### T37d: `serve` — search_grep phrase post-filter for raw content matching
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"</Property> </Property>","phrase":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext xml
+```
+
+**Expected:**
+
+- Only files containing the **literal** string `</Property> </Property>` are returned
+- Files that contain `property property` as tokenized matches (but not the literal XML) are filtered out
+- `searchMode` is `"phrase"`
+
+**Validates:** Phrase raw content matching. When the original phrase contains non-alphanumeric characters (XML tags, angle brackets, etc.), the search uses direct case-insensitive substring matching against raw file content instead of the tokenized phrase regex. This eliminates false positives from tokenizer stripping punctuation.
+
+**Status:** ✅ Implemented (covered by `test_phrase_postfilter_xml_literal_match`, `test_phrase_postfilter_no_punctuation_no_filter`, `test_phrase_postfilter_angle_brackets` unit tests)
+
+---
+
 
 ### T38: `serve` — search_reindex rebuilds trigram index
 

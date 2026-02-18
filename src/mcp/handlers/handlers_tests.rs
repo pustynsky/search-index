@@ -1486,6 +1486,120 @@ fn cleanup_tmp(tmp_dir: &std::path::Path) { let _ = std::fs::remove_dir_all(tmp_
     assert!(!result.is_error, "phrase=true should auto-disable substring, not error");
 }
 
+// --- Phrase post-filter tests (raw content matching) ---
+
+/// Helper: create a temp dir with test files for phrase post-filter tests.
+/// Returns (HandlerContext, temp_dir_path).
+fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
+    use std::io::Write;
+    static PHRASE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = PHRASE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_phrase_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // File 1: has "</Property> </Property>" literally on one line (true match for XML phrase)
+    { let mut f = std::fs::File::create(tmp_dir.join("manifest.xml")).unwrap();
+      writeln!(f, "<Root>").unwrap();
+      writeln!(f, "  <Property Name=\"A\">value</Property> </Property>").unwrap();
+      writeln!(f, "  <Other>text</Other>").unwrap();
+      writeln!(f, "</Root>").unwrap(); }
+
+    // File 2: has "property" tokens on separate lines (candidate via AND search, but no literal match)
+    { let mut f = std::fs::File::create(tmp_dir.join("Service.xml")).unwrap();
+      writeln!(f, "<Root>").unwrap();
+      writeln!(f, "  <Property Name=\"X\">").unwrap();
+      writeln!(f, "    <Property Name=\"Y\">inner</Property>").unwrap();
+      writeln!(f, "  </Property>").unwrap();
+      writeln!(f, "</Root>").unwrap(); }
+
+    // File 3: has "ILogger<string>" literally on one line
+    { let mut f = std::fs::File::create(tmp_dir.join("Logger.xml")).unwrap();
+      writeln!(f, "<Config>").unwrap();
+      writeln!(f, "  <Type>ILogger<string></Type>").unwrap();
+      writeln!(f, "</Config>").unwrap(); }
+
+    // File 4: has ILogger and string tokens on same line but NOT as "ILogger<string>"
+    { let mut f = std::fs::File::create(tmp_dir.join("Other.xml")).unwrap();
+      writeln!(f, "<Config>").unwrap();
+      writeln!(f, "  <Type>ILogger string adapter</Type>").unwrap();
+      writeln!(f, "</Config>").unwrap(); }
+
+    // File 5: has "pub fn" as plain text (no punctuation phrase test)
+    { let mut f = std::fs::File::create(tmp_dir.join("Code.xml")).unwrap();
+      writeln!(f, "<Code>").unwrap();
+      writeln!(f, "  pub fn main() {{}}").unwrap();
+      writeln!(f, "  pub fn helper() {{}}").unwrap();
+      writeln!(f, "</Code>").unwrap(); }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(), ext: "xml".to_string(),
+        max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
+    });
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)), def_index: None,
+        server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "xml".to_string(),
+        metrics: false, index_base: tmp_dir.join(".index"),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    };
+    (ctx, tmp_dir)
+}
+
+#[test] fn test_phrase_postfilter_xml_literal_match() {
+    // Phrase "</Property> </Property>" contains punctuation → uses raw substring matching.
+    // Only manifest.xml has the literal text on a single line.
+    let (ctx, tmp) = make_phrase_postfilter_ctx();
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "</Property> </Property>",
+        "phrase": true
+    }));
+    assert!(!result.is_error, "Phrase search should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert_eq!(total, 1, "Should find exactly 1 file with literal '</Property> </Property>', got {}", total);
+    let files = output["files"].as_array().unwrap();
+    let path = files[0]["path"].as_str().unwrap();
+    assert!(path.contains("manifest.xml"), "Should match manifest.xml, got {}", path);
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_phrase_postfilter_no_punctuation_uses_regex() {
+    // Phrase "pub fn" has no punctuation → uses tokenized regex matching (existing behavior).
+    // Code.xml has "pub fn" on two lines and the regex `pub\s+fn` should match.
+    let (ctx, tmp) = make_phrase_postfilter_ctx();
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "pub fn",
+        "phrase": true
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert!(total >= 1, "Should find at least 1 file for 'pub fn' phrase (regex mode)");
+    let files = output["files"].as_array().unwrap();
+    let path = files[0]["path"].as_str().unwrap();
+    assert!(path.contains("Code.xml"), "Should match Code.xml, got {}", path);
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_phrase_postfilter_angle_brackets() {
+    // Phrase "ILogger<string>" contains punctuation → uses raw substring matching.
+    // Only Logger.xml has the literal text. Other.xml has "ILogger string" (no angle brackets).
+    let (ctx, tmp) = make_phrase_postfilter_ctx();
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "ILogger<string>",
+        "phrase": true
+    }));
+    assert!(!result.is_error, "Phrase search should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert_eq!(total, 1, "Should find exactly 1 file with literal 'ILogger<string>', got {}", total);
+    let files = output["files"].as_array().unwrap();
+    let path = files[0]["path"].as_str().unwrap();
+    assert!(path.contains("Logger.xml"), "Should match Logger.xml, got {}", path);
+    cleanup_tmp(&tmp);
+}
+
 #[test] fn test_explicit_substring_true_with_regex_errors() {
     // Explicit substring=true + regex=true should still error (user conflict)
     let ctx = make_substring_ctx(
