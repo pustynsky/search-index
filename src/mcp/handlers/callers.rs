@@ -74,11 +74,22 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
                 .collect();
 
             if unique_classes.len() > 1 {
-                let class_list: Vec<&str> = unique_classes.into_iter().collect();
-                ambiguity_warning = Some(format!(
-                    "Method '{}' found in {} classes: {}. Results may mix callers from different classes. Use 'class' parameter to scope the search.",
-                    method_name, class_list.len(), class_list.join(", ")
-                ));
+                let total = unique_classes.len();
+                let mut class_list: Vec<&str> = unique_classes.into_iter().collect();
+                class_list.sort_unstable();
+                const MAX_LISTED: usize = 10;
+                if total <= MAX_LISTED {
+                    ambiguity_warning = Some(format!(
+                        "Method '{}' found in {} classes: {}. Results may mix callers from different classes. Use 'class' parameter to scope the search.",
+                        method_name, total, class_list.join(", ")
+                    ));
+                } else {
+                    let shown: Vec<&str> = class_list.into_iter().take(MAX_LISTED).collect();
+                    ambiguity_warning = Some(format!(
+                        "Method '{}' found in {} classes (showing first {}): {}… Use 'class' parameter to scope the search.",
+                        method_name, total, MAX_LISTED, shown.join(", ")
+                    ));
+                }
             }
         }
     }

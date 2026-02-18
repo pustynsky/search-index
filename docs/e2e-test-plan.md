@@ -1722,7 +1722,31 @@ Replace `<MethodName>` with a method called on an `inject()`-resolved field (e.g
 
 ---
 
+### T59: `serve` — search_callers ambiguity warning truncated for common methods
 
+**Command (codebase with many classes implementing the same method, e.g., Angular `ngOnInit`):**
+
+```powershell
+@(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"ngOnInit"}}}'
+) -join "`n"
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with call tree and a `"warning"` field
+- Warning mentions total number of classes (e.g., "found in 1899 classes")
+- Warning lists at most 10 class names followed by "…" (truncated)
+- Warning does NOT list all classes — total warning length stays under ~500 bytes regardless of how many classes contain the method
+- Warning advises using the `class` parameter to scope the search
+
+**Validates:** Ambiguity warning is truncated when a method name (without `class` filter) matches many classes. Previously, the warning listed all class names, producing ~56KB responses (~14K tokens) for common methods like `ngOnInit`.
+
+**Status:** ✅ Implemented (covered by `test_search_callers_ambiguity_warning_truncated` unit test)
+
+---
 
 ## Automation Script
 

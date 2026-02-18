@@ -946,6 +946,100 @@ fn test_search_callers_down_class_filter() {
     assert!(output3.get("warning").is_some());
 }
 
+#[test]
+fn test_search_callers_ambiguity_warning_truncated() {
+    use crate::definitions::*;
+
+    // Create 15 classes each with a method named "OnInit" — exceeds MAX_LISTED (10)
+    let num_classes = 15;
+    let mut content_idx: HashMap<String, Vec<Posting>> = HashMap::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut definitions: Vec<DefinitionEntry> = Vec::new();
+
+    for i in 0..num_classes {
+        let class_name = format!("Component{}", i);
+        let file_name = format!("C:\\src\\{}.ts", class_name);
+        files.push(file_name.clone());
+
+        // Class definition
+        definitions.push(DefinitionEntry {
+            file_id: i as u32, name: class_name.clone(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        });
+        // Method definition
+        definitions.push(DefinitionEntry {
+            file_id: i as u32, name: "OnInit".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some(class_name.clone()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        });
+
+        content_idx.entry("oninit".to_string()).or_default().push(
+            Posting { file_id: i as u32, lines: vec![10] }
+        );
+    }
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    for (i, f) in files.iter().enumerate() {
+        path_to_id.insert(PathBuf::from(f), i as u32);
+    }
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: files.clone(),
+        index: content_idx, total_tokens: 500,
+        extensions: vec!["ts".to_string()],
+        file_token_counts: vec![50; num_classes],
+        trigram: TrigramIndex::default(), trigram_dirty: false,
+        forward: None, path_to_id: None,
+    };
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["ts".to_string()],
+        files,
+        definitions,
+        name_index, kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index, path_to_id,
+        method_calls: HashMap::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(),
+        server_ext: "ts".to_string(),
+        metrics: false,
+        index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+    };
+
+    let result = dispatch_tool(&ctx, "search_callers", &json!({ "method": "OnInit" }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let warning = output["warning"].as_str().expect("should have warning");
+
+    // Warning should mention total count (15)
+    assert!(warning.contains("15 classes"), "Warning should mention 15 classes, got: {}", warning);
+    // Warning should be truncated (showing first 10)
+    assert!(warning.contains("showing first 10"), "Warning should say 'showing first 10', got: {}", warning);
+    // Warning should NOT list all 15 classes — check total length is reasonable
+    assert!(warning.len() < 500, "Warning should be truncated, but was {} bytes", warning.len());
+}
+
 // --- Substring search handler integration tests ---
 
 fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&str>) -> HandlerContext {
