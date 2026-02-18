@@ -278,29 +278,69 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
     let file_count = file_data.len();
     let min_len = args.min_token_len;
 
+    // ─── Parallel tokenization ──────────────────────────────────
+    let num_tok_threads = thread_count.max(1);
+    let tok_chunk_size = file_count.div_ceil(num_tok_threads).max(1);
+
+    let chunk_results: Vec<_> = std::thread::scope(|s| {
+        let handles: Vec<_> = file_data
+            .chunks(tok_chunk_size)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| {
+                let base_file_id = (chunk_idx * tok_chunk_size) as u32;
+                s.spawn(move || {
+                    let mut local_files: Vec<String> = Vec::with_capacity(chunk.len());
+                    let mut local_counts: Vec<u32> = Vec::with_capacity(chunk.len());
+                    let mut local_index: HashMap<String, Vec<Posting>> = HashMap::new();
+                    let mut local_total: u64 = 0;
+
+                    for (i, (path, content)) in chunk.iter().enumerate() {
+                        let file_id = base_file_id + i as u32;
+                        local_files.push(path.clone());
+                        let mut file_tokens: HashMap<String, Vec<u32>> = HashMap::new();
+                        let mut file_total: u32 = 0;
+
+                        for (line_num, line) in content.lines().enumerate() {
+                            for token in tokenize(line, min_len) {
+                                local_total += 1;
+                                file_total += 1;
+                                file_tokens
+                                    .entry(token)
+                                    .or_default()
+                                    .push((line_num + 1) as u32);
+                            }
+                        }
+
+                        local_counts.push(file_total);
+
+                        for (token, lines) in file_tokens {
+                            local_index
+                                .entry(token)
+                                .or_default()
+                                .push(Posting { file_id, lines });
+                        }
+                    }
+
+                    (local_files, local_counts, local_index, local_total)
+                })
+            })
+            .collect();
+
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+
+    // ─── Merge per-thread results ───────────────────────────────
     let mut files: Vec<String> = Vec::with_capacity(file_count);
     let mut file_token_counts: Vec<u32> = Vec::with_capacity(file_count);
     let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
     let mut total_tokens: u64 = 0;
 
-    for (path, content) in &file_data {
-        let file_id = files.len() as u32;
-        files.push(path.clone());
-        let mut file_tokens: HashMap<String, Vec<u32>> = HashMap::new();
-        let mut file_total: u32 = 0;
-
-        for (line_num, line) in content.lines().enumerate() {
-            for token in tokenize(line, min_len) {
-                total_tokens += 1;
-                file_total += 1;
-                file_tokens.entry(token).or_default().push((line_num + 1) as u32);
-            }
-        }
-
-        file_token_counts.push(file_total);
-
-        for (token, lines) in file_tokens {
-            index.entry(token).or_default().push(Posting { file_id, lines });
+    for (local_files, local_counts, local_index, local_total) in chunk_results {
+        files.extend(local_files);
+        file_token_counts.extend(local_counts);
+        total_tokens += local_total;
+        for (token, postings) in local_index {
+            index.entry(token).or_default().extend(postings);
         }
     }
 

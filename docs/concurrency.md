@@ -19,6 +19,13 @@ graph TB
         W1 --> M1["Mutex<Vec<FileEntry>>"]
         W2 --> M1
         WN --> M1
+        M1 --> CHUNK[Chunk files across N threads]
+        CHUNK --> T1[Tokenizer Thread 1<br/>local HashMap]
+        CHUNK --> T2[Tokenizer Thread 2<br/>local HashMap]
+        CHUNK --> TN[Tokenizer Thread N<br/>local HashMap]
+        T1 --> MERGE[Sequential Merge]
+        T2 --> MERGE
+        TN --> MERGE
     end
 
     subgraph "Server Phase"
@@ -52,18 +59,42 @@ builder.build_parallel().run(|| {
 
 ### Content Index Build
 
-Files are read in parallel (walk phase), but tokenization and index construction are single-threaded:
+Both file walk and tokenization are parallelized. After the parallel walk collects `Vec<(path, content)>`, the files are chunked and tokenized in parallel using `std::thread::scope`:
 
 ```
-[Parallel Walk] → Mutex<Vec<(path, content)>> → [Single Thread: tokenize + build HashMap]
+[Parallel Walk] → Vec<(path, content)> → [Parallel Tokenize: chunk files across N threads]
+                                           → per-thread local HashMap
+                                           → [Sequential Merge: combine local indexes]
 ```
 
-**Why not parallel tokenization?** The inverted index (`HashMap<String, Vec<Posting>>`) is the bottleneck for merging. Parallel tokenization would require either:
+```rust
+let num_tok_threads = thread_count.max(1);
+let tok_chunk_size = file_count.div_ceil(num_tok_threads).max(1);
 
-1. Per-thread local indexes + merge step (complex, memory doubling)
-2. Concurrent HashMap (crossbeam/dashmap dependency)
+let chunk_results: Vec<_> = std::thread::scope(|s| {
+    let handles: Vec<_> = file_data.chunks(tok_chunk_size)
+        .enumerate()
+        .map(|(chunk_idx, chunk)| {
+            let base_file_id = (chunk_idx * tok_chunk_size) as u32;
+            s.spawn(move || {
+                let mut local_index: HashMap<String, Vec<Posting>> = HashMap::new();
+                // tokenize each file in chunk into local_index
+            })
+        }).collect();
+    handles.into_iter().map(|h| h.join().unwrap()).collect()
+});
 
-For our workload (~49K files, 7s total build measured), the walk phase is parallelized but tokenization + index insertion is sequential. The sequential phase is a fraction of total — not worth the complexity of parallel merge.
+// Sequential merge: ~50ms for 57M tokens
+for (local_files, local_counts, local_index, local_total) in chunk_results {
+    for (token, postings) in local_index {
+        index.entry(token).or_default().extend(postings);
+    }
+}
+```
+
+**Design:** Each thread builds a completely independent local `HashMap<String, Vec<Posting>>` — no shared mutable state, no locks during tokenization. The merge step is sequential but fast (~50ms) because it only moves pre-built `Vec<Posting>` entries. Memory overhead is bounded: each thread's local index is a subset of the global index, and the merge transfers ownership rather than cloning.
+
+**Benchmark (65K files, 57M tokens, 24-core CPU):** Parallel tokenization reduced content index build from 44s to 22s (2× speedup). The merge step is <1% of total time.
 
 ### Definition Index Build
 
@@ -75,11 +106,23 @@ let chunks: Vec<Vec<(u32, String)>> = files.chunks(chunk_size).collect();
 std::thread::scope(|s| {
     for chunk in chunks {
         s.spawn(move || {
-            let mut parser = tree_sitter::Parser::new();
-            // Each thread gets its own parser instance
+            let mut cs_parser = tree_sitter::Parser::new();
+            // TS/TSX parsers are lazy-initialized only when needed
+            let mut ts_parser: Option<Parser> = None;
+            let mut tsx_parser: Option<Parser> = None;
+
             for (file_id, path) in chunk {
-                let (defs, calls) = parse_csharp_definitions(&mut parser, &content, file_id);
-                    chunk_defs.push((file_id, defs, calls));
+                match extension {
+                    "cs" => parse_csharp(&mut cs_parser, ...),
+                    "ts" => {
+                        let p = ts_parser.get_or_insert_with(|| make_ts_parser());
+                        parse_typescript(p, ...);
+                    }
+                    "tsx" => {
+                        let p = tsx_parser.get_or_insert_with(|| make_tsx_parser());
+                        parse_typescript(p, ...);
+                    }
+                }
             }
         });
     }
@@ -87,7 +130,10 @@ std::thread::scope(|s| {
 // Merge: sequential, ~50ms for ~846K definitions + ~2.4M call sites
 ```
 
-**Key detail:** tree-sitter `Parser` is `!Send` (contains internal mutable state). Each thread creates its own parser instance. This is intentional — tree-sitter parsers reuse internal memory allocations across parse calls, making per-thread parsers more efficient than a shared pool.
+**Key details:**
+
+- tree-sitter `Parser` is `!Send` (contains internal mutable state). Each thread creates its own parser instance. This is intentional — tree-sitter parsers reuse internal memory allocations across parse calls, making per-thread parsers more efficient than a shared pool.
+- **Lazy parser initialization:** TS/TSX parsers are created via `Option<Parser>` + `get_or_insert_with()` only when a thread encounters a file with that extension. For C#-only projects (the common case), TypeScript grammars are never loaded, saving ~2s per parser per thread. The `def_exts` parameter in `serve.rs` filters to the intersection of `--ext` and supported languages (`cs`, `ts`, `tsx`), so unnecessary grammars are never even considered.
 
 ## Phase 2: MCP Server Event Loop
 

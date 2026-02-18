@@ -3,6 +3,7 @@
 mod types;
 mod parser_csharp;
 mod parser_typescript;
+#[allow(dead_code)]
 mod parser_sql;
 mod storage;
 mod incremental;
@@ -72,9 +73,6 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     let total_files = files.len();
     eprintln!("[def-index] Found {} files to parse", total_files);
 
-    // SQL grammar is currently disabled
-    let sql_available = false;
-
     // ─── Parallel parsing ─────────────────────────────────────
     let num_threads = if args.threads > 0 {
         args.threads
@@ -93,7 +91,9 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 
     eprintln!("[def-index] Parsing with {} threads ({} files/chunk)", chunks.len(), chunk_size);
 
-    let sql_avail = sql_available;
+    let need_ts = extensions.iter().any(|e| e == "ts");
+    let need_tsx = extensions.iter().any(|e| e == "tsx");
+
     let thread_results: Vec<_> = std::thread::scope(|s| {
         let handles: Vec<_> = chunks.into_iter().map(|chunk| {
             s.spawn(move || {
@@ -101,16 +101,9 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                 cs_parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into())
                     .expect("Error loading C# grammar");
 
-                let mut ts_parser = tree_sitter::Parser::new();
-                ts_parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-                    .expect("Error loading TypeScript grammar");
-
-                let mut tsx_parser = tree_sitter::Parser::new();
-                tsx_parser.set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
-                    .expect("Error loading TSX grammar");
-
-                let mut sql_parser = tree_sitter::Parser::new();
-                let _ = &sql_parser; // suppress unused warning
+                // Lazy-init: only create TS/TSX parsers when files with those extensions exist
+                let mut ts_parser: Option<tree_sitter::Parser> = None;
+                let mut tsx_parser: Option<tree_sitter::Parser> = None;
 
                 let mut chunk_defs: Vec<(u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>)> = Vec::new();
                 let mut errors = 0usize;
@@ -135,9 +128,24 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 
                     let (file_defs, file_calls) = match ext.to_lowercase().as_str() {
                         "cs" => parser_csharp::parse_csharp_definitions(&mut cs_parser, &content, *file_id),
-                        "ts" => parser_typescript::parse_typescript_definitions(&mut ts_parser, &content, *file_id),
-                        "tsx" => parser_typescript::parse_typescript_definitions(&mut tsx_parser, &content, *file_id),
-                        "sql" if sql_avail => (parser_sql::parse_sql_definitions(&mut sql_parser, &content, *file_id), Vec::new()),
+                        "ts" if need_ts => {
+                            let parser = ts_parser.get_or_insert_with(|| {
+                                let mut p = tree_sitter::Parser::new();
+                                p.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+                                    .expect("Error loading TypeScript grammar");
+                                p
+                            });
+                            parser_typescript::parse_typescript_definitions(parser, &content, *file_id)
+                        }
+                        "tsx" if need_tsx => {
+                            let parser = tsx_parser.get_or_insert_with(|| {
+                                let mut p = tree_sitter::Parser::new();
+                                p.set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
+                                    .expect("Error loading TSX grammar");
+                                p
+                            });
+                            parser_typescript::parse_typescript_definitions(parser, &content, *file_id)
+                        }
                         _ => (Vec::new(), Vec::new()),
                     };
 

@@ -39,7 +39,8 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Extension filtering** — limit search to specific file types
 - **MCP Server** — native Model Context Protocol server for AI agents (VS Code Roo, Copilot, Claude)
 - **Code definition index** — tree-sitter AST parsing for structural code search *(C# and TypeScript/TSX; SQL parser retained but disabled — see [Supported Languages](docs/architecture.md#supported-languages))*
-- **Parallel parsing** — multi-threaded tree-sitter parsing across all CPU cores (~16-32s for 48K files, varies by CPU)
+- **Parallel tokenization** — content index tokenization parallelized across all CPU cores via thread-local hash maps + merge
+- **Parallel parsing** — multi-threaded tree-sitter parsing with lazy grammar loading (~16-32s for 48K files, varies by CPU)
 - **File watcher** — incremental index updates on file changes (<1s per file for content + definition indexes)
 - **Substring search** — trigram-indexed substring matching within tokens (e.g., `DatabaseConnection` finds `databaseconnectionfactory`) — ~0.07ms vs ~44ms for regex
 
