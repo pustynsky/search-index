@@ -149,10 +149,13 @@ pub struct ContentIndex {
     /// Whether the trigram index needs rebuilding before next substring search
     #[serde(default)]
     pub trigram_dirty: bool,
-    /// Forward index: file_id → Vec<token> (only populated with --watch)
+    /// Forward index: DEPRECATED — always None. Kept for backward-compatible deserialization
+    /// of older index files. Previously stored file_id → Vec<token> for watch mode,
+    /// but consumed ~1.5 GB of RAM due to string duplication. Replaced by brute-force
+    /// scan of the inverted index on file change (~50-100ms, acceptable for watcher).
     #[serde(default)]
     pub forward: Option<HashMap<u32, Vec<String>>>,
-    /// Path → file_id lookup (only populated with --watch)
+    /// Path → file_id lookup (populated with --watch)
     #[serde(default)]
     pub path_to_id: Option<HashMap<PathBuf, u32>>,
 }

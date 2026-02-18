@@ -57,7 +57,7 @@ pub fn cmd_serve(args: ServeArgs) {
         file_token_counts: Vec::new(),
         trigram: TrigramIndex::default(),
         trigram_dirty: false,
-        forward: if args.watch { Some(HashMap::new()) } else { None },
+        forward: None,  // forward index eliminated — saves ~1.5 GB RAM
         path_to_id: if args.watch { Some(HashMap::new()) } else { None },
     };
     let index = Arc::new(RwLock::new(empty_index));
@@ -95,8 +95,8 @@ pub fn cmd_serve(args: ServeArgs) {
             info!("Building content index in background...");
             let build_start = Instant::now();
             let new_idx = build_content_index(&ContentIndexArgs {
-                dir: bg_dir,
-                ext: bg_ext,
+                dir: bg_dir.clone(),
+                ext: bg_ext.clone(),
                 max_age_hours: 24,
                 hidden: false,
                 no_ignore: false,
@@ -106,6 +106,23 @@ pub fn cmd_serve(args: ServeArgs) {
             if let Err(e) = save_content_index(&new_idx, &bg_idx_base) {
                 warn!(error = %e, "Failed to save content index to disk");
             }
+
+            // Drop build-time index and reload from disk to eliminate allocator
+            // fragmentation (~1.5 GB savings). Build creates many temporary allocs
+            // that fragment the heap; reloading gives compact contiguous memory.
+            let file_count = new_idx.files.len();
+            let token_count = new_idx.index.len();
+            drop(new_idx);
+            let new_idx = load_content_index(&bg_dir, &bg_ext, &bg_idx_base)
+                .unwrap_or_else(|| {
+                    warn!("Failed to reload content index from disk, rebuilding");
+                    build_content_index(&ContentIndexArgs {
+                        dir: bg_dir, ext: bg_ext,
+                        max_age_hours: 24, hidden: false, no_ignore: false,
+                        threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+                    })
+                });
+
             let new_idx = if bg_watch {
                 mcp::watcher::build_watch_index_from(new_idx)
             } else {
@@ -114,8 +131,8 @@ pub fn cmd_serve(args: ServeArgs) {
             let elapsed = build_start.elapsed();
             info!(
                 elapsed_ms = format_args!("{:.1}", elapsed.as_secs_f64() * 1000.0),
-                files = new_idx.files.len(),
-                tokens = new_idx.index.len(),
+                files = file_count,
+                tokens = token_count,
                 "Content index ready (background build complete)"
             );
             *bg_index.write().unwrap() = new_idx;
@@ -181,18 +198,31 @@ pub fn cmd_serve(args: ServeArgs) {
                 info!("Building definition index in background...");
                 let build_start = Instant::now();
                 let new_idx = definitions::build_definition_index(&definitions::DefIndexArgs {
-                    dir: bg_dir,
-                    ext: bg_def_exts,
+                    dir: bg_dir.clone(),
+                    ext: bg_def_exts.clone(),
                     threads: 0,
                 });
                 if let Err(e) = definitions::save_definition_index(&new_idx, &bg_idx_base) {
                     warn!(error = %e, "Failed to save definition index to disk");
                 }
+
+                // Drop + reload to eliminate allocator fragmentation (same pattern)
+                let def_count = new_idx.definitions.len();
+                let file_count = new_idx.files.len();
+                drop(new_idx);
+                let new_idx = definitions::load_definition_index(&bg_dir, &bg_def_exts, &bg_idx_base)
+                    .unwrap_or_else(|| {
+                        warn!("Failed to reload definition index from disk, rebuilding");
+                        definitions::build_definition_index(&definitions::DefIndexArgs {
+                            dir: bg_dir, ext: bg_def_exts, threads: 0,
+                        })
+                    });
+
                 let elapsed = build_start.elapsed();
                 info!(
                     elapsed_ms = format_args!("{:.1}", elapsed.as_secs_f64() * 1000.0),
-                    definitions = new_idx.definitions.len(),
-                    files = new_idx.files.len(),
+                    definitions = def_count,
+                    files = file_count,
                     "Definition index ready (background build complete)"
                 );
                 *bg_def.write().unwrap() = new_idx;

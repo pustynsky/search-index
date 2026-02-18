@@ -81,7 +81,7 @@ pub fn start_watcher(
                         if let Err(e) = save_content_index(&new_index, &index_base) {
                             warn!(error = %e, "Failed to save reindexed content to disk");
                         }
-                        // Rebuild forward index for watch mode
+                        // Build path_to_id for watch mode (no forward index — saves ~1.5 GB RAM)
                         let new_index = build_watch_index_from(new_index);
                         match index.write() {
                             Ok(mut idx) => *idx = new_index,
@@ -157,36 +157,29 @@ fn matches_extensions(path: &Path, extensions: &[String]) -> bool {
         .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)))
 }
 
-/// Build a ContentIndex with forward index populated (for watch mode)
+/// Build a ContentIndex with path_to_id populated (for watch mode).
+///
+/// Previously also built a forward index (file_id → Vec<token>) which consumed
+/// ~1.5 GB of RAM due to cloning every token string for every file it appears in.
+/// Now we only build path_to_id; on file change we scan the inverted index directly
+/// to remove stale postings (~50-100ms per file, acceptable for watcher debounce).
 pub fn build_watch_index_from(mut index: ContentIndex) -> ContentIndex {
-    // Build forward index and path_to_id from existing inverted index
-    let mut forward: std::collections::HashMap<u32, Vec<String>> = std::collections::HashMap::new();
     let mut path_to_id: std::collections::HashMap<PathBuf, u32> = std::collections::HashMap::new();
 
     for (i, path) in index.files.iter().enumerate() {
         path_to_id.insert(PathBuf::from(path), i as u32);
     }
 
-    for (token, postings) in &index.index {
-        for posting in postings {
-            forward.entry(posting.file_id)
-                .or_default()
-                .push(token.clone());
-        }
-    }
-
-    // Deduplicate forward index entries
-    for tokens in forward.values_mut() {
-        tokens.sort();
-        tokens.dedup();
-    }
-
-    index.forward = Some(forward);
+    // Drop any legacy forward index loaded from disk
+    index.forward = None;
     index.path_to_id = Some(path_to_id);
     index
 }
 
-/// Update a single file in the index (incremental)
+/// Update a single file in the index (incremental).
+///
+/// Uses brute-force scan of the inverted index to remove old postings for the file,
+/// avoiding the need for a forward index (which consumed ~1.5 GB of RAM).
 fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
     let path_str = path.to_string_lossy().to_string();
 
@@ -207,17 +200,9 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
             };
             index.total_tokens = index.total_tokens.saturating_sub(old_count);
 
-            if let Some(ref mut forward) = index.forward
-                && let Some(old_tokens) = forward.remove(&file_id) {
-                    for token in &old_tokens {
-                        if let Some(postings) = index.index.get_mut(token) {
-                            postings.retain(|p| p.file_id != file_id);
-                            if postings.is_empty() {
-                                index.index.remove(token);
-                            }
-                        }
-                    }
-                }
+            // Remove all postings for this file_id from the inverted index (brute-force scan).
+            // This replaces the forward index lookup — O(total_tokens) but saves ~1.5 GB RAM.
+            purge_file_from_inverted_index(&mut index.index, file_id);
 
             // Re-tokenize file
             let mut file_tokens: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
@@ -235,11 +220,6 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
                 index.index.entry(token.clone())
                     .or_default()
                     .push(Posting { file_id, lines: lines.clone() });
-            }
-
-            // Update forward index
-            if let Some(ref mut forward) = index.forward {
-                forward.insert(file_id, file_tokens.keys().cloned().collect());
             }
 
             // Update file token count
@@ -270,16 +250,28 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
                     .push(Posting { file_id, lines: lines.clone() });
             }
 
-            if let Some(ref mut forward) = index.forward {
-                forward.insert(file_id, file_tokens.keys().cloned().collect());
-            }
-
             index.file_token_counts.push(file_total);
         }
     }
 }
 
-/// Remove a file from the index
+/// Remove all postings for a given file_id from the inverted index.
+/// This is a brute-force O(total_tokens) scan that replaces the forward index lookup.
+/// Typically takes ~50-100ms for 400K tokens, which is acceptable for watcher events.
+fn purge_file_from_inverted_index(
+    inverted: &mut std::collections::HashMap<String, Vec<Posting>>,
+    file_id: u32,
+) {
+    inverted.retain(|_token, postings| {
+        postings.retain(|p| p.file_id != file_id);
+        !postings.is_empty()
+    });
+}
+
+/// Remove a file from the index.
+///
+/// Uses brute-force scan of the inverted index instead of forward index lookup,
+/// saving ~1.5 GB of RAM at the cost of ~50-100ms per file removal.
 fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
     if let Some(ref mut path_to_id) = index.path_to_id
         && let Some(&file_id) = path_to_id.get(path) {
@@ -295,18 +287,9 @@ fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
                 index.file_token_counts[file_id as usize] = 0;
             }
 
-            // Remove all tokens for this file from inverted index
-            if let Some(ref mut forward) = index.forward
-                && let Some(old_tokens) = forward.remove(&file_id) {
-                    for token in &old_tokens {
-                        if let Some(postings) = index.index.get_mut(token) {
-                            postings.retain(|p| p.file_id != file_id);
-                            if postings.is_empty() {
-                                index.index.remove(token);
-                            }
-                        }
-                    }
-                }
+            // Remove all postings for this file from inverted index (brute-force scan)
+            purge_file_from_inverted_index(&mut index.index, file_id);
+
             path_to_id.remove(path);
             // Don't remove from files vec to preserve file_id stability
         }
@@ -349,23 +332,13 @@ mod tests {
     }
 
     #[test]
-    fn test_build_watch_index_populates_forward() {
+    fn test_build_watch_index_no_forward_but_has_path_to_id() {
         let index = make_test_index();
         let watch_index = build_watch_index_from(index);
 
-        assert!(watch_index.forward.is_some());
+        // Forward index is no longer built (saves ~1.5 GB RAM)
+        assert!(watch_index.forward.is_none());
         assert!(watch_index.path_to_id.is_some());
-
-        let forward = watch_index.forward.as_ref().unwrap();
-        // file_id 0 has httpclient and ilogger
-        let tokens_0 = forward.get(&0).unwrap();
-        assert!(tokens_0.contains(&"httpclient".to_string()));
-        assert!(tokens_0.contains(&"ilogger".to_string()));
-
-        // file_id 1 has ilogger
-        let tokens_1 = forward.get(&1).unwrap();
-        assert!(tokens_1.contains(&"ilogger".to_string()));
-        assert!(!tokens_1.contains(&"httpclient".to_string()));
     }
 
     #[test]
@@ -388,7 +361,6 @@ mod tests {
         std::fs::write(&new_file, "class NewClass { HttpClient client; }").unwrap();
 
         let mut index = make_test_index();
-        index.forward = Some(HashMap::new());
         index.path_to_id = Some(HashMap::new());
         // Populate path_to_id for existing files
         for (i, path) in index.files.iter().enumerate() {
@@ -432,11 +404,7 @@ mod tests {
             file_token_counts: vec![5],
             trigram: TrigramIndex::default(),
             trigram_dirty: false,
-            forward: Some({
-                let mut m = HashMap::new();
-                m.insert(0u32, vec!["original".to_string(), "oldtoken".to_string()]);
-                m
-            }),
+            forward: None,
             path_to_id: Some({
                 let mut m = HashMap::new();
                 m.insert(PathBuf::from(&clean), 0u32);
@@ -460,7 +428,7 @@ mod tests {
     #[test]
     fn test_remove_file() {
         let mut index = make_test_index();
-        // Build forward/path_to_id
+        // Build path_to_id (no forward index needed)
         index = build_watch_index_from(index);
 
         // Remove file0.cs
@@ -488,6 +456,145 @@ mod tests {
         assert!(matches_extensions(Path::new("bar.RS"), &exts));
         assert!(!matches_extensions(Path::new("baz.txt"), &exts));
         assert!(!matches_extensions(Path::new("no_ext"), &exts));
+    }
+
+    #[test]
+    fn test_purge_file_from_inverted_index_removes_single_file() {
+        let mut inverted = HashMap::new();
+        inverted.insert("token_a".to_string(), vec![
+            Posting { file_id: 0, lines: vec![1, 5] },
+            Posting { file_id: 1, lines: vec![3] },
+        ]);
+        inverted.insert("token_b".to_string(), vec![
+            Posting { file_id: 0, lines: vec![2] },
+        ]);
+        inverted.insert("token_c".to_string(), vec![
+            Posting { file_id: 1, lines: vec![10] },
+        ]);
+
+        purge_file_from_inverted_index(&mut inverted, 0);
+
+        // token_a should still exist but only for file_id 1
+        let token_a = inverted.get("token_a").unwrap();
+        assert_eq!(token_a.len(), 1);
+        assert_eq!(token_a[0].file_id, 1);
+
+        // token_b was only in file_id 0 → should be removed entirely
+        assert!(!inverted.contains_key("token_b"), "token_b should be removed when its only file is purged");
+
+        // token_c should be untouched
+        assert!(inverted.contains_key("token_c"));
+        assert_eq!(inverted["token_c"][0].file_id, 1);
+    }
+
+    #[test]
+    fn test_purge_file_from_inverted_index_nonexistent_file() {
+        let mut inverted = HashMap::new();
+        inverted.insert("token".to_string(), vec![
+            Posting { file_id: 0, lines: vec![1] },
+        ]);
+
+        // Purging a file_id that doesn't exist should be a no-op
+        purge_file_from_inverted_index(&mut inverted, 99);
+
+        assert_eq!(inverted.len(), 1);
+        assert_eq!(inverted["token"][0].file_id, 0);
+    }
+
+    #[test]
+    fn test_purge_file_from_inverted_index_empty_index() {
+        let mut inverted: HashMap<String, Vec<Posting>> = HashMap::new();
+        purge_file_from_inverted_index(&mut inverted, 0);
+        assert!(inverted.is_empty());
+    }
+
+    #[test]
+    fn test_build_watch_drops_legacy_forward_index() {
+        let mut index = make_test_index();
+        // Simulate a legacy index loaded from disk with a forward index populated
+        index.forward = Some({
+            let mut m = HashMap::new();
+            m.insert(0u32, vec!["httpclient".to_string(), "ilogger".to_string()]);
+            m.insert(1u32, vec!["ilogger".to_string()]);
+            m
+        });
+
+        let watch_index = build_watch_index_from(index);
+
+        // Forward index should be dropped (saves ~1.5 GB RAM)
+        assert!(watch_index.forward.is_none(), "forward index should be None after build_watch_index_from");
+        // path_to_id should still be populated
+        assert!(watch_index.path_to_id.is_some());
+        assert_eq!(watch_index.path_to_id.as_ref().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_remove_file_without_forward_index() {
+        // Verify that remove works via brute-force scan (no forward index)
+        let mut index = make_test_index();
+        index.forward = None; // explicitly no forward index
+        index.path_to_id = Some({
+            let mut m = HashMap::new();
+            m.insert(PathBuf::from("file0.cs"), 0u32);
+            m.insert(PathBuf::from("file1.cs"), 1u32);
+            m
+        });
+
+        remove_file_from_index(&mut index, &PathBuf::from("file0.cs"));
+
+        // httpclient was only in file0 — should be gone
+        assert!(!index.index.contains_key("httpclient"));
+        // ilogger was in both files — should still exist for file1
+        let ilogger = index.index.get("ilogger").unwrap();
+        assert_eq!(ilogger.len(), 1);
+        assert_eq!(ilogger[0].file_id, 1);
+    }
+
+    #[test]
+    fn test_update_existing_file_without_forward_index() {
+        let dir = std::env::temp_dir().join("search_watcher_test_no_fwd");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let test_file = dir.join("test.cs");
+        std::fs::write(&test_file, "class Original { OldToken stuff; }").unwrap();
+
+        let clean = crate::clean_path(&test_file.to_string_lossy());
+        let mut index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![clean.clone()],
+            index: {
+                let mut m = HashMap::new();
+                m.insert("original".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+                m.insert("oldtoken".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+                m
+            },
+            total_tokens: 10,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![5],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None, // no forward index!
+            path_to_id: Some({
+                let mut m = HashMap::new();
+                m.insert(PathBuf::from(&clean), 0u32);
+                m
+            }),
+        };
+
+        // Update file content
+        std::fs::write(&test_file, "class Updated { NewToken stuff; }").unwrap();
+        update_file_in_index(&mut index, &PathBuf::from(&clean));
+
+        // Old tokens removed via brute-force scan, new tokens added
+        assert!(!index.index.contains_key("original"), "old token should be removed");
+        assert!(!index.index.contains_key("oldtoken"), "old token should be removed");
+        assert!(index.index.contains_key("updated"), "new token should be present");
+        assert!(index.index.contains_key("newtoken"), "new token should be present");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -529,11 +636,7 @@ mod tests {
             file_token_counts: vec![4],
             trigram: TrigramIndex::default(),
             trigram_dirty: false,
-            forward: Some({
-                let mut m = HashMap::new();
-                m.insert(0u32, vec!["class".to_string(), "original".to_string(), "oldtoken".to_string(), "stuff".to_string()]);
-                m
-            }),
+            forward: None,
             path_to_id: Some({
                 let mut m = HashMap::new();
                 m.insert(PathBuf::from(&clean), 0u32);
@@ -590,7 +693,7 @@ mod tests {
             file_token_counts: vec![],
             trigram: TrigramIndex::default(),
             trigram_dirty: false,
-            forward: Some(HashMap::new()),
+            forward: None,
             path_to_id: Some(HashMap::new()),
         };
 

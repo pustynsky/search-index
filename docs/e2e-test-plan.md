@@ -1527,6 +1527,50 @@ echo $msgs | & $server.Path
 
 ---
 
+### T50b: `serve` — Incremental content index update without forward index
+
+**Scenario:** Start the MCP server with `--watch`. Create a new file, wait for watcher debounce, then query for the new token via `search_grep`. Then modify the file (replacing a token), wait again, and verify the old token is gone and the new one is found. This validates the brute-force inverted index purge that replaced the forward index (memory optimization saving ~1.5 GB RAM).
+
+**Command:**
+
+```powershell
+# Create temp directory with a test file
+$tmpDir = New-TemporaryFile | ForEach-Object { Remove-Item $_; New-Item -ItemType Directory -Path $_ }
+Set-Content "$tmpDir\initial.cs" "class OriginalClass { OriginalToken field; }"
+
+# Start server with --watch
+$server = Start-Process -PassThru -NoNewWindow search -ArgumentList "serve --dir $tmpDir --ext cs --watch"
+
+# Wait for server to initialize and index
+Start-Sleep -Seconds 3
+
+# Query for OriginalToken — should find it
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
+{"jsonrpc":"2.0","method":"notifications/initialized"}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"OriginalToken"}}}' | & search serve --dir $tmpDir --ext cs --watch
+
+# Modify the file — replace OriginalToken with UpdatedToken
+Set-Content "$tmpDir\initial.cs" "class OriginalClass { UpdatedToken field; }"
+
+# Wait for watcher debounce
+Start-Sleep -Seconds 2
+
+# Query for UpdatedToken — should find it
+# Query for OriginalToken — should NOT find it (purged via brute-force scan)
+```
+
+**Expected:**
+
+- First query: `search_grep` for `OriginalToken` returns 1 file match
+- After modification and debounce: `search_grep` for `UpdatedToken` returns 1 match
+- After modification: `search_grep` for `OriginalToken` returns 0 matches (old postings purged)
+
+**Validates:** Incremental content index update via brute-force inverted index purge (no forward index). Ensures the memory optimization (~1.5 GB savings) doesn't break incremental watcher updates.
+
+**Note:** This is a manual test requiring a running server. The behavior is also covered by unit tests: `test_purge_file_from_inverted_index_*`, `test_remove_file_without_forward_index`, `test_update_existing_file_without_forward_index`.
+
+---
+
 ### T51: `serve` — TypeScript-specific definition kinds (typeAlias, variable)
 
 **Command:**
