@@ -105,6 +105,10 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                 ts_parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
                     .expect("Error loading TypeScript grammar");
 
+                let mut tsx_parser = tree_sitter::Parser::new();
+                tsx_parser.set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
+                    .expect("Error loading TSX grammar");
+
                 let mut sql_parser = tree_sitter::Parser::new();
                 let _ = &sql_parser; // suppress unused warning
 
@@ -124,7 +128,8 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 
                     let (file_defs, file_calls) = match ext.to_lowercase().as_str() {
                         "cs" => parser_csharp::parse_csharp_definitions(&mut cs_parser, &content, *file_id),
-                        "ts" | "tsx" => parser_typescript::parse_typescript_definitions(&mut ts_parser, &content, *file_id),
+                        "ts" => parser_typescript::parse_typescript_definitions(&mut ts_parser, &content, *file_id),
+                        "tsx" => parser_typescript::parse_typescript_definitions(&mut tsx_parser, &content, *file_id),
                         "sql" if sql_avail => (parser_sql::parse_sql_definitions(&mut sql_parser, &content, *file_id), Vec::new()),
                         _ => (Vec::new(), Vec::new()),
                     };

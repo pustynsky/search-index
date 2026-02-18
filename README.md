@@ -402,6 +402,11 @@ search def-index --dir C:\Projects --ext cs --threads 8
 
 Each definition includes: name, kind, file path, line range, full signature, modifiers (public/static/async/etc.), attributes/decorators (`[ServiceProvider]`, `@Injectable()`, etc.), base types/interfaces, and parent class.
 
+**TypeScript field type resolution** for call-site analysis supports three patterns:
+- Constructor DI parameters: `constructor(private service: UserService)`
+- Typed class fields: `private cache: CacheService;`
+- Angular `inject()` function: `private store = inject(Store)` and `this.router = inject(Router)` (generic type params like `Store<AppState>` are stripped to base name)
+
 **Performance:**
 
 | Metric | Value |
@@ -473,7 +478,7 @@ search serve --dir C:\Projects --ext cs --watch --definitions --metrics
 | --------------------- | ---------------------------------------------------------------- |
 | `search_grep`         | Search content index with TF-IDF ranking, regex, phrase, AND/OR  |
 | `search_definitions`  | Search code definitions: classes, methods, interfaces, enums, functions, type aliases, SPs. Supports `containsLine` to find which method/class contains a given line number. Supports `includeBody` to return source code inline. (requires `--definitions`) |
-| `search_callers`      | Find all callers of a method and build a recursive call tree (up or down). Combines grep index + AST definition index to trace call chains in a single request. (requires `--definitions`) |
+| `search_callers`      | Find all callers of a method and build a recursive call tree (up or down). Supports C# and TypeScript/TSX. Combines grep index + AST definition index to trace call chains in a single request. (requires `--definitions`) |
 | `search_find`         | Live filesystem walk (⚠️ slow for large dirs)                    |
 | `search_fast`         | Search pre-built file name index (instant). Supports comma-separated patterns for multi-file lookup (OR logic). |
 | `search_info`         | Show all indexes with status, sizes, age                         |

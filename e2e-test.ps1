@@ -84,5 +84,8 @@ Run-Test "T42b tips-query-budget"    "$Binary tips | Select-String 'Query budget
 # T25-T52: serve (MCP)
 Write-Host "  T25-T52: MCP serve tests - run manually (see e2e-test-plan.md)"
 
+# T53-T58: TypeScript callers (MCP)
+Write-Host "  T53-T58: TypeScript callers MCP tests - run manually (see e2e-test-plan.md)"
+
 Write-Host "`n=== Results: $passed passed, $failed failed, $total total ===`n"
 if ($failed -gt 0) { exit 1 }
