@@ -3697,7 +3697,7 @@ The following internal optimizations are covered by unit tests in `src/mcp/watch
 
 **Validates:** Local variable type extraction in TypeScript parser, `receiver_type` resolution for call sites using local variables. Unresolved local variables preserve their name to prevent false positive caller matches.
 
-**Status:** ✅ Covered by unit tests: `test_ts_local_var_explicit_type_annotation`, `test_ts_local_var_new_expression`, `test_ts_local_var_new_expression_with_generics`, `test_ts_local_var_no_type_annotation`, `test_ts_local_var_field_types_take_precedence`
+**Status:** ✅ Covered by unit tests: `test_ts_local_var_explicit_type_annotation`, `test_ts_local_var_new_expression`, `test_ts_local_var_new_expression_with_generics`, `test_ts_local_var_no_type_annotation`, `test_ts_local_var_field_types_take_precedence`, `test_ts_local_var_let_declaration_without_initializer`
 
 ---
 
@@ -3715,6 +3715,46 @@ The following internal optimizations are covered by unit tests in `src/mcp/watch
 **Validates:** Local variable type extraction in C# parser, `receiver_type` resolution for call sites using local variables, `var = new X()` inference. Unresolved local variables preserve their name to prevent false positive caller matches.
 
 **Status:** ✅ Covered by unit tests: `test_csharp_local_var_explicit_type`, `test_csharp_local_var_new_expression`, `test_csharp_local_var_var_without_new`, `test_csharp_local_var_generic_type`, `test_csharp_using_var_receiver_preserved`
+
+---
+
+### T-TYPED-LOCAL-DOWN: Explicit type annotations — direction=down resolves callees through typed locals
+
+**Background:** When `direction=down` traces callees of a method, local variables with explicit type annotations (`const x: Foo = ...`) are used to resolve the receiver type of method calls. This ensures that `x.method()` is correctly attributed to class `Foo` rather than being unresolved.
+
+**Setup:** Create TypeScript files:
+- `DataProcessor.ts`: `export class DataProcessor { transform(data: string): string { return data.toUpperCase(); } }`
+- `Orchestrator.ts`:
+  ```typescript
+  export class Orchestrator {
+      run() {
+          const proc: DataProcessor = this.getProcessor();
+          proc.transform("hello");
+      }
+      getProcessor(): DataProcessor { return new DataProcessor(); }
+  }
+  ```
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"run","class":"Orchestrator","direction":"down","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
+```
+
+**Expected:**
+
+- `callTree` includes `DataProcessor.transform()` as a callee
+- The callee is found because `proc` has explicit type annotation `: DataProcessor`
+- `summary.totalNodes` ≥ 1
+
+**Validates:** Explicit type annotations on local variables are used during direction=down callee resolution. The TypeScript parser extracts type info from `const x: Foo = ...` via `extract_ts_local_var_types()`, which feeds into `extract_ts_call_sites()` to set `receiver_type` on call sites.
+
+**Status:** ✅ Covered by unit test `test_ts_direction_down_with_typed_local_variable` in `handlers_tests_typescript.rs`
 
 
 ---
@@ -4159,6 +4199,85 @@ with the same method name do not cause false positive callers.
 
 **Status:** ✅ Covered by unit test `test_search_callers_same_name_different_receiver_interface_resolution` in `handlers_tests_csharp.rs`
 
+
+---
+
+### T-BUILTIN-BLOCKLIST: Built-in type blocklist prevents false positives in direction=down
+
+**Background:** When `direction=down` finds a call to `Promise.resolve()`, `Array.map()`, or other
+built-in type methods, the `resolve_call_site()` function previously searched for user-defined classes
+with the same method name (e.g., `Deferred.resolve()`) and returned them as false positives. The
+built-in type blocklist (`BUILTIN_RECEIVER_TYPES`) prevents this by skipping candidate matching when
+the receiver type is a known built-in JavaScript/TypeScript or C# type.
+
+**Setup:** Create TypeScript files:
+- `deferred.ts`: `export class Deferred { resolve(): void { } }`
+- `worker.ts`: `export class Worker { doWork(): void { Promise.resolve(42); } }`
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"doWork","class":"Worker","direction":"down","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
+```
+
+**Expected:**
+
+- `callTree` does NOT include `Deferred.resolve()` (receiver type `Promise` is on blocklist)
+- Built-in types like `Promise`, `Array`, `Map`, `Set`, `console`, `Math`, `JSON`, `Task`, `List`, etc. are all blocked
+- Non-built-in types (e.g., `MyService.process()`) still resolve normally
+
+**Validates:** `BUILTIN_RECEIVER_TYPES` blocklist in `resolve_call_site()` prevents false positive
+callee resolution for built-in type method calls.
+
+**Status:** ✅ Covered by unit tests: `test_builtin_promise_resolve_not_matched`, `test_builtin_array_map_not_matched`, `test_non_builtin_type_still_matches`
+
+---
+
+### T-FUZZY-DI: Fuzzy DI interface matching — search_callers direction=up finds callers through non-standard interface naming
+
+**Background:** DI resolution only works with the exact convention `IFooService` → `FooService`
+(strip `I` prefix). If the interface is `IDataModelService` but the implementation is
+`DataModelWebService`, the link is NOT established because stripping `I` gives `DataModelService`,
+which does NOT equal `DataModelWebService`. The fuzzy DI matching fix uses suffix-tolerant
+matching: the stem `DataModelService` (from `IDataModelService`) is checked as a substring of
+the implementation class name `DataModelWebService`.
+
+**Setup:** Create TypeScript files:
+- `interface.ts`: `export interface IDataModelService { loadModel(): void; }`
+- `impl.ts`: `export class DataModelWebService implements IDataModelService { loadModel() { } }`
+- `caller.ts`: A method with parameter `svc: IDataModelService` that calls `svc.loadModel()`
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"loadModel","class":"DataModelWebService","direction":"up","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
+```
+
+**Expected:**
+
+- `callTree` includes the caller from `caller.ts` (fuzzy match: `IDataModelService` → `DataModelWebService`)
+- The match works because the stem `DataModelService` (from `IDataModelService`) is contained in `DataModelWebService`
+- `summary.totalNodes` ≥ 1
+
+**Negative test — no false positive for unrelated class:**
+
+- A class named `UnrelatedRunner` with method `run()` should NOT match `IService.run()` callers
+  because `UnrelatedRunner` does not contain the stem `Service`
+
+**Validates:** Fuzzy DI interface matching via `is_implementation_of()` in `verify_call_site_target()`.
+Stem must be ≥ 4 characters to avoid overly broad matches.
+
+**Status:** ✅ Covered by unit tests: `test_verify_call_site_target_fuzzy_interface_match`, `test_fuzzy_di_no_false_positive`, `test_is_implementation_of_exact_prefix`, `test_is_implementation_of_suffix_tolerant`, `test_is_implementation_of_short_stem_no_match`, `test_is_implementation_of_no_false_positive`
 
 ---
 

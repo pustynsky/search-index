@@ -912,6 +912,35 @@ fn test_ts_local_var_field_types_take_precedence() {
     );
 }
 
+// ─── TypeScript Local Variable Type — let Declaration Without Initializer ─────
+
+#[test]
+fn test_ts_local_var_let_declaration_without_initializer() {
+    let source = r#"class TestClass {
+    process(): void {
+        let task: DependencyTask;
+        task = this.createTask();
+        task.resolve();
+    }
+    createTask(): any { return null; }
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "process").unwrap();
+    let pc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'process'");
+
+    let resolve = pc[0].1.iter().find(|c| c.method_name == "resolve");
+    assert!(resolve.is_some(), "Expected call to 'resolve'");
+    assert_eq!(
+        resolve.unwrap().receiver_type.as_deref(),
+        Some("DependencyTask"),
+        "Local var 'task' declared as 'let task: DependencyTask' (no initializer) should resolve receiver_type to 'DependencyTask'"
+    );
+}
+
 // ─── Lambda / Arrow Function Parsing Tests ───────────────────────────
 
 #[test]
