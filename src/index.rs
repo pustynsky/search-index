@@ -53,30 +53,54 @@ pub fn save_compressed<T: serde::Serialize>(path: &std::path::Path, data: &T, la
 
 /// Load a deserializable value from a file, supporting both LZ4-compressed
 /// and legacy uncompressed formats (backward compatibility).
-/// Returns None if the file doesn't exist or can't be deserialized.
-pub fn load_compressed<T: serde::de::DeserializeOwned>(path: &std::path::Path, label: &str) -> Option<T> {
+/// Returns `Err(SearchError::IndexLoad)` with a descriptive message on failure.
+pub fn load_compressed<T: serde::de::DeserializeOwned>(path: &std::path::Path, label: &str) -> Result<T, SearchError> {
+    let path_str = path.display().to_string();
     let start = Instant::now();
-    let compressed_size = std::fs::metadata(path).ok()?.len();
+    let compressed_size = std::fs::metadata(path)
+        .map_err(|e| SearchError::IndexLoad {
+            path: path_str.clone(),
+            message: format!("file not found or inaccessible: {}", e),
+        })?
+        .len();
 
-    let file = std::fs::File::open(path).ok()?;
+    let file = std::fs::File::open(path).map_err(|e| SearchError::IndexLoad {
+        path: path_str.clone(),
+        message: format!("cannot open file: {}", e),
+    })?;
     let mut reader = BufReader::new(file);
 
     let mut magic = [0u8; 4];
-    reader.read_exact(&mut magic).ok()?;
+    reader.read_exact(&mut magic).map_err(|e| SearchError::IndexLoad {
+        path: path_str.clone(),
+        message: format!("read error (magic bytes): {}", e),
+    })?;
 
     let result = if &magic == LZ4_MAGIC {
         // Compressed format
         let decoder = lz4_flex::frame::FrameDecoder::new(reader);
-        bincode::deserialize_from(decoder).ok()?
+        bincode::deserialize_from(decoder).map_err(|e| SearchError::IndexLoad {
+            path: path_str.clone(),
+            message: format!("LZ4 deserialization failed: {}", e),
+        })?
     } else {
         // Legacy uncompressed format
-        reader.seek(SeekFrom::Start(0)).ok()?;
+        reader.seek(SeekFrom::Start(0)).map_err(|e| SearchError::IndexLoad {
+            path: path_str.clone(),
+            message: format!("seek error: {}", e),
+        })?;
         let data = {
             let mut buf = Vec::new();
-            reader.read_to_end(&mut buf).ok()?;
+            reader.read_to_end(&mut buf).map_err(|e| SearchError::IndexLoad {
+                path: path_str.clone(),
+                message: format!("read error: {}", e),
+            })?;
             buf
         };
-        bincode::deserialize(&data).ok()?
+        bincode::deserialize(&data).map_err(|e| SearchError::IndexLoad {
+            path: path_str.clone(),
+            message: format!("deserialization failed: {}", e),
+        })?
     };
 
     let elapsed = start.elapsed();
@@ -85,7 +109,7 @@ pub fn load_compressed<T: serde::de::DeserializeOwned>(path: &std::path::Path, l
         compressed_size as f64 / 1_048_576.0,
         elapsed.as_secs_f64());
 
-    Some(result)
+    Ok(result)
 }
 
 // ─── Index storage ───────────────────────────────────────────────────
@@ -109,7 +133,7 @@ pub fn save_index(index: &FileIndex, index_base: &std::path::Path) -> Result<(),
     save_compressed(&path, index, "file-index")
 }
 
-pub fn load_index(dir: &str, index_base: &std::path::Path) -> Option<FileIndex> {
+pub fn load_index(dir: &str, index_base: &std::path::Path) -> Result<FileIndex, SearchError> {
     let path = index_path_for(dir, index_base);
     load_compressed(&path, "file-index")
 }
@@ -127,7 +151,7 @@ pub fn save_content_index(index: &ContentIndex, index_base: &std::path::Path) ->
     save_compressed(&path, index, "content-index")
 }
 
-pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Option<ContentIndex> {
+pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Result<ContentIndex, SearchError> {
     let path = content_index_path_for(dir, exts, index_base);
     load_compressed(&path, "content-index")
 }
@@ -143,9 +167,14 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path) -> Op
     for entry in fs::read_dir(index_base).ok()?.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "cidx") {
-            if let Some(index) = load_compressed::<ContentIndex>(&path, "content-index") {
-                if index.root == clean {
-                    return Some(index);
+            match load_compressed::<ContentIndex>(&path, "content-index") {
+                Ok(index) => {
+                    if index.root == clean {
+                        return Some(index);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[find_content_index] Skipping {}: {}", path.display(), e);
                 }
             }
         }
@@ -629,8 +658,9 @@ mod index_tests {
 
         let data = vec!["hello".to_string(), "world".to_string(), "compressed".to_string()];
         crate::index::save_compressed(&path, &data, "test").unwrap();
-        let loaded: Vec<String> = crate::index::load_compressed(&path, "test").unwrap();
-        assert_eq!(data, loaded);
+        let loaded: Result<Vec<String>, _> = crate::index::load_compressed(&path, "test");
+        assert!(loaded.is_ok());
+        assert_eq!(data, loaded.unwrap());
 
         // Verify file starts with LZ4 magic bytes
         let raw = std::fs::read(&path).unwrap();
@@ -651,17 +681,37 @@ mod index_tests {
         std::fs::write(&path, &encoded).unwrap();
 
         // load_compressed should still read it via backward compatibility
-        let loaded: Vec<String> = crate::index::load_compressed(&path, "test").unwrap();
-        assert_eq!(data, loaded);
+        let loaded: Result<Vec<String>, _> = crate::index::load_compressed(&path, "test");
+        assert!(loaded.is_ok());
+        assert_eq!(data, loaded.unwrap());
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn test_load_compressed_missing_file_returns_none() {
+    fn test_load_compressed_missing_file_returns_err() {
         let path = std::path::Path::new("/nonexistent/path/to/file.bin");
-        let result: Option<Vec<String>> = crate::index::load_compressed(path, "test");
-        assert!(result.is_none());
+        let result: Result<Vec<String>, _> = crate::index::load_compressed(path, "test");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("Failed to load index"), "Error should contain 'Failed to load index', got: {}", err_msg);
+    }
+
+    #[test]
+    fn test_load_compressed_corrupt_data() {
+        let tmp = std::env::temp_dir().join("search_test_corrupt_data");
+        let _ = std::fs::create_dir_all(&tmp);
+        let path = tmp.join("corrupt.bin");
+
+        // Write random bytes that look like neither valid LZ4 nor valid bincode
+        std::fs::write(&path, b"this is not valid data at all!!!!!").unwrap();
+        let result: Result<Vec<String>, _> = crate::index::load_compressed(&path, "test");
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("deserialization failed"), "Error should mention deserialization, got: {}", err_msg);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]

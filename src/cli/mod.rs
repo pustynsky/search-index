@@ -164,8 +164,8 @@ fn cmd_def_audit(args: definitions::DefAuditArgs) -> Result<(), SearchError> {
     let exts = args.ext.split(',').map(|s| s.trim().to_lowercase()).collect::<Vec<_>>().join(",");
 
     let index = match definitions::load_definition_index(&args.dir, &exts, &idx_base) {
-        Some(idx) => idx,
-        None => {
+        Ok(idx) => idx,
+        Err(_) => {
             eprintln!("[def-audit] No definition index found for dir='{}' ext='{}'. Run 'search def-index' first.", args.dir, args.ext);
             return Ok(());
         }
@@ -374,7 +374,7 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
     let idx_base = index_dir();
 
     let index = match load_index(&args.dir, &idx_base) {
-        Some(idx) => {
+        Ok(idx) => {
             if idx.is_stale() && args.auto_reindex {
                 eprintln!("Index is stale, rebuilding...");
                 let new_index = build_index(&IndexArgs {
@@ -392,7 +392,7 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
                 idx
             }
         }
-        None => {
+        Err(_) => {
             eprintln!("No index found for '{}'. Building one now...", args.dir);
             let new_index = build_index(&IndexArgs {
                 dir: args.dir.clone(), max_age_hours: 24,
@@ -463,7 +463,7 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     let exts_for_load = args.ext.clone().unwrap_or_default();
 
     let index = match load_content_index(&args.dir, &exts_for_load, &idx_base) {
-        Some(idx) => {
+        Ok(idx) => {
             if idx.is_stale() && args.auto_reindex {
                 eprintln!("Content index is stale, rebuilding...");
                 let ext_str = idx.extensions.join(",");
@@ -478,7 +478,7 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
                 idx
             }
         }
-        None => {
+        Err(_) => {
             match find_content_index_for_dir(&args.dir, &idx_base) {
                 Some(idx) => idx,
                 None => return Err(SearchError::IndexNotFound { dir: args.dir.clone() }),

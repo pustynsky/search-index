@@ -29,39 +29,49 @@ pub fn cmd_info() {
         let ext = path.extension().and_then(|e| e.to_str());
 
         if ext == Some("idx") {
-            if let Some(index) = load_compressed::<FileIndex>(&path, "file-index") {
-                found = true;
-                let age_secs = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or(Duration::ZERO)
-                    .as_secs()
-                    .saturating_sub(index.created_at);
-                let age_hours = age_secs as f64 / 3600.0;
-                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                let stale = if index.is_stale() { " [STALE]" } else { "" };
-                println!(
-                    "  [FILE] {} -- {} entries, {:.1} MB, {:.1}h ago{}",
-                    index.root, index.entries.len(),
-                    size as f64 / 1_048_576.0, age_hours, stale
-                );
+            match load_compressed::<FileIndex>(&path, "file-index") {
+                Ok(index) => {
+                    found = true;
+                    let age_secs = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or(Duration::ZERO)
+                        .as_secs()
+                        .saturating_sub(index.created_at);
+                    let age_hours = age_secs as f64 / 3600.0;
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    let stale = if index.is_stale() { " [STALE]" } else { "" };
+                    println!(
+                        "  [FILE] {} -- {} entries, {:.1} MB, {:.1}h ago{}",
+                        index.root, index.entries.len(),
+                        size as f64 / 1_048_576.0, age_hours, stale
+                    );
+                }
+                Err(e) => {
+                    eprintln!("  Warning: failed to load {}: {}", path.display(), e);
+                }
             }
         } else if ext == Some("cidx") {
-            if let Some(index) = load_compressed::<ContentIndex>(&path, "content-index") {
-                found = true;
-                let age_secs = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap_or(Duration::ZERO)
-                    .as_secs()
-                    .saturating_sub(index.created_at);
-                let age_hours = age_secs as f64 / 3600.0;
-                let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
-                let stale = if index.is_stale() { " [STALE]" } else { "" };
-                println!(
-                    "  [CONTENT] {} -- {} files, {} tokens, exts: [{}], {:.1} MB, {:.1}h ago{}",
-                    index.root, index.files.len(), index.total_tokens,
-                    index.extensions.join(", "),
-                    size as f64 / 1_048_576.0, age_hours, stale
-                );
+            match load_compressed::<ContentIndex>(&path, "content-index") {
+                Ok(index) => {
+                    found = true;
+                    let age_secs = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or(Duration::ZERO)
+                        .as_secs()
+                        .saturating_sub(index.created_at);
+                    let age_hours = age_secs as f64 / 3600.0;
+                    let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                    let stale = if index.is_stale() { " [STALE]" } else { "" };
+                    println!(
+                        "  [CONTENT] {} -- {} files, {} tokens, exts: [{}], {:.1} MB, {:.1}h ago{}",
+                        index.root, index.files.len(), index.total_tokens,
+                        index.extensions.join(", "),
+                        size as f64 / 1_048_576.0, age_hours, stale
+                    );
+                }
+                Err(e) => {
+                    eprintln!("  Warning: failed to load {}: {}", path.display(), e);
+                }
             }
         }
     }
@@ -85,7 +95,7 @@ pub fn cmd_info_json() -> serde_json::Value {
             let ext = path.extension().and_then(|e| e.to_str());
 
             if ext == Some("idx") {
-                if let Some(index) = load_compressed::<FileIndex>(&path, "file-index") {
+                if let Ok(index) = load_compressed::<FileIndex>(&path, "file-index") {
                     let age_secs = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or(Duration::ZERO)
@@ -102,7 +112,7 @@ pub fn cmd_info_json() -> serde_json::Value {
                     }));
                 }
             } else if ext == Some("cidx") {
-                if let Some(index) = load_compressed::<ContentIndex>(&path, "content-index") {
+                if let Ok(index) = load_compressed::<ContentIndex>(&path, "content-index") {
                     let age_secs = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or(Duration::ZERO)
@@ -121,7 +131,7 @@ pub fn cmd_info_json() -> serde_json::Value {
                     }));
                 }
             } else if ext == Some("didx") {
-                if let Some(index) = load_compressed::<crate::definitions::DefinitionIndex>(&path, "definition-index") {
+                if let Ok(index) = load_compressed::<crate::definitions::DefinitionIndex>(&path, "definition-index") {
                     let age_secs = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .unwrap_or(Duration::ZERO)
