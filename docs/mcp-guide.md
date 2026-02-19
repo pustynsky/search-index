@@ -139,6 +139,10 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 | `resolveInterfaces`  | Auto-resolve interface → implementation (default: true)                                                                                             |
 | `ext`                | File extension filter (default: server's `--ext`)                                                                                                   |
 
+### Limitations
+
+- **Local variable calls not tracked** — calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may not be detected because the tool uses AST parsing without type inference. DI-injected fields, `this`/`base` calls, and direct receiver calls are fully supported.
+
 ---
 
 ## `search_definitions` — Code Definitions

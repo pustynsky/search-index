@@ -2309,3 +2309,491 @@ fn test_search_callers_ext_filter_comma_split() {
     assert!(has_cs, "ext=cs,txt should include .cs callers. Got: {:?}", caller_files);
     assert!(has_txt_both, "ext=cs,txt should include .txt callers. Got: {:?}", caller_files);
 }
+
+// ─── Overload dedup tests ────────────────────────────────────────────
+
+#[test]
+fn test_search_callers_overloads_not_collapsed_up() {
+    // Two overloads of Process (same class, different lines) both call Validate.
+    // Both should appear as callers (direction=up) — they must NOT be collapsed.
+    let mut content_idx = HashMap::new();
+    content_idx.insert("validate".to_string(), vec![
+        Posting { file_id: 0, lines: vec![10] },       // definition in Validator
+        Posting { file_id: 1, lines: vec![25, 45] },    // calls in both Process overloads
+    ]);
+    content_idx.insert("validator".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![25, 45] },
+    ]);
+    content_idx.insert("processor".to_string(), vec![
+        Posting { file_id: 1, lines: vec![1] },
+    ]);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec![
+            "C:\\src\\Validator.cs".to_string(),
+            "C:\\src\\Processor.cs".to_string(),
+        ],
+        index: content_idx, total_tokens: 200,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50, 80],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        // file 0: Validator class with Validate method
+        DefinitionEntry {
+            file_id: 0, name: "Validator".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 30,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "Validate".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("Validator".to_string()), signature: Some("void Validate()".to_string()),
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        // file 1: Processor class with two Process overloads
+        DefinitionEntry {
+            file_id: 1, name: "Processor".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 60,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "Process".to_string(),
+            kind: DefinitionKind::Method, line_start: 20, line_end: 35,
+            parent: Some("Processor".to_string()), signature: Some("void Process(int x)".to_string()),
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "Process".to_string(),
+            kind: DefinitionKind::Method, line_start: 40, line_end: 55,
+            parent: Some("Processor".to_string()), signature: Some("void Process(string s)".to_string()),
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\Validator.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\Processor.cs"), 1);
+
+    // Process(int) at di=3 calls Validate at line 25; Process(string) at di=4 calls Validate at line 45
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(3, vec![CallSite {
+        method_name: "Validate".to_string(),
+        receiver_type: Some("Validator".to_string()),
+        line: 25,
+        receiver_is_generic: false,
+    }]);
+    method_calls.insert(4, vec![CallSite {
+        method_name: "Validate".to_string(),
+        receiver_type: Some("Validator".to_string()),
+        line: 45,
+        receiver_is_generic: false,
+    }]);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["C:\\src\\Validator.cs".to_string(), "C:\\src\\Processor.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls,
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "Validate",
+        "class": "Validator",
+        "depth": 1
+    }));
+    assert!(!result.is_error, "search_callers should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+
+    // Both Process overloads should appear as callers (not collapsed into one)
+    let process_callers: Vec<&Value> = tree.iter()
+        .filter(|n| n["method"].as_str() == Some("Process"))
+        .collect();
+    assert_eq!(process_callers.len(), 2,
+        "Both Process overloads should appear as callers. Got {} Process callers: {}",
+        process_callers.len(), serde_json::to_string_pretty(&tree).unwrap());
+
+    // They should have different line numbers (line_start of each overload)
+    let lines: Vec<u64> = process_callers.iter()
+        .filter_map(|n| n["line"].as_u64())
+        .collect();
+    assert_eq!(lines.len(), 2, "Both callers should have line numbers");
+    assert_ne!(lines[0], lines[1],
+        "The two Process overloads should have different line numbers, got {:?}", lines);
+}
+
+#[test]
+fn test_search_callers_overloads_not_collapsed_down() {
+    // A method (RunAll) calls two overloads of Execute in the same class.
+    // Direction=down: both Execute overloads should appear as callees.
+    let definitions = vec![
+        // file 0: Orchestrator class with RunAll method
+        DefinitionEntry {
+            file_id: 0, name: "Orchestrator".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "RunAll".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 30,
+            parent: Some("Orchestrator".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        // file 1: Executor class with two Execute overloads
+        DefinitionEntry {
+            file_id: 1, name: "Executor".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 80,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "Execute".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 25,
+            parent: Some("Executor".to_string()), signature: Some("void Execute(int id)".to_string()),
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "Execute".to_string(),
+            kind: DefinitionKind::Method, line_start: 30, line_end: 45,
+            parent: Some("Executor".to_string()), signature: Some("void Execute(string name)".to_string()),
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\Orchestrator.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\Executor.cs"), 1);
+
+    // RunAll (di=1) calls both Execute overloads
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(1, vec![
+        CallSite {
+            method_name: "Execute".to_string(),
+            receiver_type: Some("Executor".to_string()),
+            line: 15,
+            receiver_is_generic: false,
+        },
+        CallSite {
+            method_name: "Execute".to_string(),
+            receiver_type: Some("Executor".to_string()),
+            line: 20,
+            receiver_is_generic: false,
+        },
+    ]);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["C:\\src\\Orchestrator.cs".to_string(), "C:\\src\\Executor.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls,
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec!["C:\\src\\Orchestrator.cs".to_string(), "C:\\src\\Executor.cs".to_string()],
+        index: HashMap::new(), total_tokens: 0,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50, 80],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "RunAll",
+        "class": "Orchestrator",
+        "direction": "down",
+        "depth": 1
+    }));
+    assert!(!result.is_error, "search_callers down should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+
+    // Both Execute overloads should appear as callees (not collapsed into one)
+    let execute_callees: Vec<&Value> = tree.iter()
+        .filter(|n| n["method"].as_str() == Some("Execute"))
+        .collect();
+    assert_eq!(execute_callees.len(), 2,
+        "Both Execute overloads should appear as callees. Got {} Execute callees: {}",
+        execute_callees.len(), serde_json::to_string_pretty(&tree).unwrap());
+
+    // They should have different line numbers (line_start of each overload)
+    let lines: Vec<u64> = execute_callees.iter()
+        .filter_map(|n| n["line"].as_u64())
+        .collect();
+    assert_eq!(lines.len(), 2, "Both callees should have line numbers");
+    assert_ne!(lines[0], lines[1],
+        "The two Execute overloads should have different line numbers, got {:?}", lines);
+}
+
+// ─── SAME_NAME_DIFFERENT_RECEIVER: interface resolution scoping ──────
+
+#[test]
+fn test_search_callers_same_name_different_receiver_interface_resolution() {
+    // Regression test: When two UNRELATED interfaces both define the same method
+    // name (e.g. Execute()), searching for callers of ServiceA.Execute() should
+    // NOT find callers that use IServiceB.Execute() — even though the interface
+    // resolution block expands interface implementations.
+    //
+    // Setup:
+    //   IServiceA (interface) has Execute()
+    //   IServiceB (interface) has Execute()
+    //   ServiceA (class, implements IServiceA) has Execute()
+    //   ServiceB (class, implements IServiceB) has Execute()
+    //   Consumer (class) has DoWork() which calls this._serviceB.Execute()
+    //     where _serviceB has type IServiceB
+    //
+    // Expected:
+    //   callers of ServiceA.Execute() → should NOT include Consumer.DoWork()
+    //   callers of ServiceB.Execute() → SHOULD include Consumer.DoWork()
+
+    let mut content_idx = HashMap::new();
+    // "execute" token appears in all files
+    content_idx.insert("execute".to_string(), vec![
+        Posting { file_id: 0, lines: vec![10] },  // IServiceA.Execute definition
+        Posting { file_id: 1, lines: vec![10] },  // IServiceB.Execute definition
+        Posting { file_id: 2, lines: vec![10] },  // ServiceA.Execute definition
+        Posting { file_id: 3, lines: vec![10] },  // ServiceB.Execute definition
+        Posting { file_id: 4, lines: vec![20] },  // Consumer.DoWork calls Execute
+    ]);
+    // Class/interface name tokens for parent_file_ids pre-filter
+    content_idx.insert("iservicea".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 2, lines: vec![1] },   // ServiceA implements IServiceA
+    ]);
+    content_idx.insert("iserviceb".to_string(), vec![
+        Posting { file_id: 1, lines: vec![1] },
+        Posting { file_id: 3, lines: vec![1] },   // ServiceB implements IServiceB
+        Posting { file_id: 4, lines: vec![5, 20] }, // Consumer has _serviceB field of type IServiceB
+    ]);
+    content_idx.insert("servicea".to_string(), vec![
+        Posting { file_id: 2, lines: vec![1] },
+    ]);
+    content_idx.insert("serviceb".to_string(), vec![
+        Posting { file_id: 3, lines: vec![1] },
+    ]);
+    content_idx.insert("consumer".to_string(), vec![
+        Posting { file_id: 4, lines: vec![1] },
+    ]);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec![
+            "C:\\src\\IServiceA.cs".to_string(),
+            "C:\\src\\IServiceB.cs".to_string(),
+            "C:\\src\\ServiceA.cs".to_string(),
+            "C:\\src\\ServiceB.cs".to_string(),
+            "C:\\src\\Consumer.cs".to_string(),
+        ],
+        index: content_idx, total_tokens: 500,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50, 50, 50, 50, 50],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        // 0: IServiceA interface
+        DefinitionEntry {
+            file_id: 0, name: "IServiceA".to_string(),
+            kind: DefinitionKind::Interface, line_start: 1, line_end: 20,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        // 1: IServiceA.Execute method
+        DefinitionEntry {
+            file_id: 0, name: "Execute".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 12,
+            parent: Some("IServiceA".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        // 2: IServiceB interface
+        DefinitionEntry {
+            file_id: 1, name: "IServiceB".to_string(),
+            kind: DefinitionKind::Interface, line_start: 1, line_end: 20,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        // 3: IServiceB.Execute method
+        DefinitionEntry {
+            file_id: 1, name: "Execute".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 12,
+            parent: Some("IServiceB".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        // 4: ServiceA class (implements IServiceA)
+        DefinitionEntry {
+            file_id: 2, name: "ServiceA".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 30,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![],
+            base_types: vec!["IServiceA".to_string()],
+        },
+        // 5: ServiceA.Execute method
+        DefinitionEntry {
+            file_id: 2, name: "Execute".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("ServiceA".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        // 6: ServiceB class (implements IServiceB)
+        DefinitionEntry {
+            file_id: 3, name: "ServiceB".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 30,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![],
+            base_types: vec!["IServiceB".to_string()],
+        },
+        // 7: ServiceB.Execute method
+        DefinitionEntry {
+            file_id: 3, name: "Execute".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("ServiceB".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        // 8: Consumer class
+        DefinitionEntry {
+            file_id: 4, name: "Consumer".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 40,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        // 9: Consumer.DoWork method
+        DefinitionEntry {
+            file_id: 4, name: "DoWork".to_string(),
+            kind: DefinitionKind::Method, line_start: 15, line_end: 30,
+            parent: Some("Consumer".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    let mut base_type_index: HashMap<String, Vec<u32>> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+        for bt in &def.base_types {
+            base_type_index.entry(bt.to_lowercase()).or_default().push(idx);
+        }
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\IServiceA.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\IServiceB.cs"), 1);
+    path_to_id.insert(PathBuf::from("C:\\src\\ServiceA.cs"), 2);
+    path_to_id.insert(PathBuf::from("C:\\src\\ServiceB.cs"), 3);
+    path_to_id.insert(PathBuf::from("C:\\src\\Consumer.cs"), 4);
+
+    // Consumer.DoWork (di=9) calls Execute with receiver_type = IServiceB
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(9, vec![CallSite {
+        method_name: "Execute".to_string(),
+        receiver_type: Some("IServiceB".to_string()),
+        line: 20,
+        receiver_is_generic: false,
+    }]);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![
+            "C:\\src\\IServiceA.cs".to_string(),
+            "C:\\src\\IServiceB.cs".to_string(),
+            "C:\\src\\ServiceA.cs".to_string(),
+            "C:\\src\\ServiceB.cs".to_string(),
+            "C:\\src\\Consumer.cs".to_string(),
+        ],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index,
+        file_index, path_to_id, method_calls,
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // ── Test 1: callers of ServiceA.Execute() should NOT find Consumer.DoWork()
+    let result_a = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "Execute",
+        "class": "ServiceA",
+        "depth": 2
+    }));
+    assert!(!result_a.is_error, "search_callers for ServiceA.Execute should not error: {}", result_a.content[0].text);
+    let output_a: Value = serde_json::from_str(&result_a.content[0].text).unwrap();
+    let tree_a = output_a["callTree"].as_array().unwrap();
+
+    // Consumer.DoWork should NOT appear — it calls via IServiceB, not IServiceA
+    let has_consumer_a = tree_a.iter().any(|n| {
+        n["class"].as_str() == Some("Consumer") && n["method"].as_str() == Some("DoWork")
+    });
+    assert!(!has_consumer_a,
+        "Callers of ServiceA.Execute() should NOT include Consumer.DoWork() (which calls via IServiceB). Got tree: {}",
+        serde_json::to_string_pretty(&tree_a).unwrap());
+
+    // ── Test 2: callers of ServiceB.Execute() SHOULD find Consumer.DoWork()
+    let result_b = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "Execute",
+        "class": "ServiceB",
+        "depth": 2
+    }));
+    assert!(!result_b.is_error, "search_callers for ServiceB.Execute should not error: {}", result_b.content[0].text);
+    let output_b: Value = serde_json::from_str(&result_b.content[0].text).unwrap();
+    let tree_b = output_b["callTree"].as_array().unwrap();
+
+    // Consumer.DoWork SHOULD appear — it calls via IServiceB which ServiceB implements
+    let has_consumer_b = tree_b.iter().any(|n| {
+        n["class"].as_str() == Some("Consumer") && n["method"].as_str() == Some("DoWork")
+    });
+    assert!(has_consumer_b,
+        "Callers of ServiceB.Execute() SHOULD include Consumer.DoWork() (which calls via IServiceB). Got tree: {}",
+        serde_json::to_string_pretty(&tree_b).unwrap());
+}

@@ -189,6 +189,8 @@ AVAILABLE TOOLS (exposed via MCP):
   search_callers     -- Find all callers of a method and build a call tree (up/down).
                        Combines grep index + AST index. Replaces 7+ manual queries with 1.
                        Supports C# and TypeScript/TSX (DI-aware, inject() support).
+                       Note: calls through local variables (var x = ...; x.Method())
+                       may not be detected (AST parsing without type inference).
                        (requires --definitions flag)
   search_find        -- Live filesystem search (no index, slow for large dirs)
   search_fast        -- Search file name index (instant)

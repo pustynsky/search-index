@@ -191,10 +191,11 @@ fn dedup_caller_tree(tree: Vec<Value>) -> Vec<Value> {
     tree.into_iter()
         .filter(|node| {
             let key = format!(
-                "{}.{}.{}",
+                "{}.{}.{}.{}",
                 node.get("class").and_then(|v| v.as_str()).unwrap_or("?"),
                 node.get("method").and_then(|v| v.as_str()).unwrap_or("?"),
                 node.get("file").and_then(|v| v.as_str()).unwrap_or("?"),
+                node.get("line").and_then(|v| v.as_u64()).unwrap_or(0),
             );
             seen.insert(key)
         })
@@ -460,11 +461,28 @@ fn build_caller_tree(
 
     let method_lower = method_name.to_lowercase();
 
-    // Use class.method as visited key to avoid conflicts between same-named methods
+    // Find line_start of first matching method definition for overload disambiguation
+    let target_line = def_idx.name_index.get(&method_lower)
+        .and_then(|indices| indices.iter().find_map(|&di| {
+            def_idx.definitions.get(di as usize).and_then(|d| {
+                if matches!(d.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function) {
+                    if let Some(cls) = parent_class {
+                        if d.parent.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(cls)) {
+                            return Some(d.line_start);
+                        }
+                    } else {
+                        return Some(d.line_start);
+                    }
+                }
+                None
+            })
+        }));
+
+    // Use class.method.line as visited key to distinguish overloads
     let visited_key = if let Some(cls) = parent_class {
-        format!("{}.{}", cls.to_lowercase(), method_lower)
+        format!("{}.{}.{}", cls.to_lowercase(), method_lower, target_line.unwrap_or(0))
     } else {
-        method_lower.clone()
+        format!("{}.{}", method_lower, target_line.unwrap_or(0))
     };
     if !visited.insert(visited_key) {
         return Vec::new();
@@ -582,9 +600,10 @@ fn build_caller_tree(
                     }
                 }
 
-                let caller_key = format!("{}.{}",
+                let caller_key = format!("{}.{}.{}",
                     caller_parent.as_deref().unwrap_or("?"),
-                    &caller_name
+                    &caller_name,
+                    caller_line
                 );
 
                 if seen_callers.contains(&caller_key) {
@@ -634,14 +653,55 @@ fn build_caller_tree(
         }
     }
 
-    // Interface resolution
+    // Interface resolution: expand to find callers via interface implementations.
+    // IMPORTANT: Only expand interfaces that are related to the target class.
+    // Without this filter, if two unrelated interfaces (e.g. IWorkspaceUpgrader and
+    // IPowerBIDatabaseSession) both define the same method name, we would incorrectly
+    // find callers of the wrong interface's implementations.
     if resolve_interfaces && current_depth == 0
         && let Some(name_indices) = def_idx.name_index.get(&method_lower) {
+            // Pre-compute which interfaces are related to the target class:
+            // 1. The interface variant "I{ClassName}" of the target class
+            // 2. Interfaces listed in the target class's base_types
+            let related_interfaces: HashSet<String> = if let Some(pc) = parent_class {
+                let pc_lower = pc.to_lowercase();
+                let mut related = HashSet::new();
+                // I-prefix variant: Foo → IFoo
+                related.insert(format!("i{}", pc_lower));
+                // Reverse: if target is IFoo, also consider Foo-related interfaces
+                if pc_lower.starts_with('i') && pc_lower.len() > 1 {
+                    related.insert(pc_lower[1..].to_string());
+                }
+                // Target class's own base_types (interfaces it implements)
+                if let Some(indices) = def_idx.name_index.get(&pc_lower) {
+                    for &idx in indices {
+                        if let Some(d) = def_idx.definitions.get(idx as usize) {
+                            if matches!(d.kind, DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record) {
+                                for bt in &d.base_types {
+                                    related.insert(bt.to_lowercase());
+                                }
+                            }
+                        }
+                    }
+                }
+                // Also include the target class itself (it could be an interface)
+                related.insert(pc_lower);
+                related
+            } else {
+                HashSet::new() // no filter when no parent_class
+            };
+
             for &di in name_indices {
                 if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes { break; }
                 if let Some(def) = def_idx.definitions.get(di as usize)
                     && let Some(ref parent_class_name) = def.parent {
                         let parent_lower = parent_class_name.to_lowercase();
+
+                        // Skip interfaces that are NOT related to the target class
+                        if parent_class.is_some() && !related_interfaces.contains(&parent_lower) {
+                            continue;
+                        }
+
                         if let Some(parent_indices) = def_idx.name_index.get(&parent_lower) {
                             for &pi in parent_indices {
                                 if let Some(parent_def) = def_idx.definitions.get(pi as usize)
@@ -701,10 +761,29 @@ fn build_callee_tree(
     }
 
     let method_lower = method_name.to_lowercase();
+
+    // Find line_start of first matching method definition for overload disambiguation
+    let target_line = def_idx.name_index.get(&method_lower)
+        .and_then(|indices| indices.iter().find_map(|&di| {
+            def_idx.definitions.get(di as usize).and_then(|d| {
+                if matches!(d.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function) {
+                    if let Some(cls) = class_filter {
+                        if d.parent.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(cls)) {
+                            return Some(d.line_start);
+                        }
+                    } else {
+                        return Some(d.line_start);
+                    }
+                }
+                None
+            })
+        }));
+
+    // Use class.method.line as visit key to distinguish overloads
     let visit_key = if let Some(cls) = class_filter {
-        format!("{}.{}", cls.to_lowercase(), method_lower)
+        format!("{}.{}.{}", cls.to_lowercase(), method_lower, target_line.unwrap_or(0))
     } else {
-        method_lower.clone()
+        format!("{}.{}", method_lower, target_line.unwrap_or(0))
     };
     if !visited.insert(visit_key) {
         return Vec::new();
@@ -791,9 +870,10 @@ fn build_callee_tree(
                 if exclude_dir.iter().any(|excl| path_lower.contains(&excl.to_lowercase())) { continue; }
                 if exclude_file.iter().any(|excl| path_lower.contains(&excl.to_lowercase())) { continue; }
 
-                let callee_key = format!("{}.{}",
+                let callee_key = format!("{}.{}.{}",
                     callee_def.parent.as_deref().unwrap_or("?"),
-                    &callee_def.name
+                    &callee_def.name,
+                    callee_def.line_start
                 );
 
                 if seen_callees.contains(&callee_key) { continue; }

@@ -3692,10 +3692,10 @@ The following internal optimizations are covered by unit tests in `src/mcp/watch
 1. Explicit type annotations: `const result: UserResult = ...` → `result.validate()` has `receiver_type = "UserResult"`
 2. `new` expressions: `const v = new OrderValidator()` → `v.check()` has `receiver_type = "OrderValidator"`
 3. Generic `new` expressions: `const c = new DataCache<string>()` → `c.get()` has `receiver_type = "DataCache"` (generics stripped)
-4. No type info: `const r = this.calculate()` → `r.process()` has `receiver_type = None`
+4. No type info (preserved): `const r = this.calculate()` → `r.process()` has `receiver_type = Some("r")` — the variable name is preserved so that `verify_call_site_target` can correctly reject it as a non-matching receiver (prevents false positives where `r.process()` would otherwise be treated as `this.process()`)
 5. Field types take precedence: `this.result.fieldMethod()` resolves to field type, not local var with same name
 
-**Validates:** Local variable type extraction in TypeScript parser, `receiver_type` resolution for call sites using local variables.
+**Validates:** Local variable type extraction in TypeScript parser, `receiver_type` resolution for call sites using local variables. Unresolved local variables preserve their name to prevent false positive caller matches.
 
 **Status:** ✅ Covered by unit tests: `test_ts_local_var_explicit_type_annotation`, `test_ts_local_var_new_expression`, `test_ts_local_var_new_expression_with_generics`, `test_ts_local_var_no_type_annotation`, `test_ts_local_var_field_types_take_precedence`
 
@@ -3706,14 +3706,15 @@ The following internal optimizations are covered by unit tests in `src/mcp/watch
 **Background:** The C# parser extracts type information from local variable declarations to resolve `receiver_type` on call sites. This covers:
 1. Explicit type: `UserResult result = ...` → `result.Validate()` has `receiver_type = "UserResult"`
 2. `var = new`: `var v = new OrderValidator()` → `v.Check()` has `receiver_type = "OrderValidator"`
-3. `var` without `new`: `var r = Calculate()` → `r.Process()` has `receiver_type = None`
+3. `var` without `new` (preserved): `var r = Calculate()` → `r.Process()` has `receiver_type = Some("r")` — the variable name is preserved so that `verify_call_site_target` can correctly reject it as a non-matching receiver (prevents false positives where `r.Process()` would otherwise be treated as `this.Process()`)
 4. Generic types: `List<User> users = ...` → `users.Add()` has `receiver_type = "List"` (generics stripped)
+5. `using var` pattern: `using (var session = OpenSession()) { session.Execute(); }` has `receiver_type = Some("session")` — unresolved receiver name preserved
 
 **Parser fix:** tree-sitter C# 0.23 places `object_creation_expression` as a direct child of `variable_declarator` (not wrapped in `equals_value_clause`). The parser now checks both locations.
 
-**Validates:** Local variable type extraction in C# parser, `receiver_type` resolution for call sites using local variables, `var = new X()` inference.
+**Validates:** Local variable type extraction in C# parser, `receiver_type` resolution for call sites using local variables, `var = new X()` inference. Unresolved local variables preserve their name to prevent false positive caller matches.
 
-**Status:** ✅ Covered by unit tests: `test_csharp_local_var_explicit_type`, `test_csharp_local_var_new_expression`, `test_csharp_local_var_var_without_new`, `test_csharp_local_var_generic_type`
+**Status:** ✅ Covered by unit tests: `test_csharp_local_var_explicit_type`, `test_csharp_local_var_new_expression`, `test_csharp_local_var_var_without_new`, `test_csharp_local_var_generic_type`, `test_csharp_using_var_receiver_preserved`
 
 
 ---
@@ -3999,3 +4000,161 @@ redundant lookup and the bypass where verification was skipped.
 
 **Status:** ✅ Internal refactor — covered by all existing caller unit tests which exercise the
 full verification pipeline. No separate test needed.
+
+
+---
+
+### T-OVERLOAD-DEDUP-UP: Overloaded callers not collapsed (direction=up)
+
+**Background:** When multiple overloads of the same method (e.g., `Process(int)` and `Process(string)`)
+both call a target method, the caller tree should show BOTH overloads as separate entries. Previously,
+the dedup key used `(file_id, method_name)` which collapsed all overloads into one entry. The fix
+adds `line_start` to the dedup key: `(file_id, method_name, line_start)`.
+
+**Setup:** Create C# files:
+- `Validator.cs`: `public class Validator { public bool Validate() => true; }`
+- `Processor.cs`: Contains two overloads of `Process` that both call `Validate()`:
+  ```csharp
+  public class Processor {
+      private Validator _validator;
+      public void Process(int x) { _validator.Validate(); }
+      public void Process(string s) { _validator.Validate(); }
+  }
+  ```
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Validate","class":"Validator","direction":"up","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
+```
+
+**Expected:**
+
+- `callTree` includes TWO entries for `Process` (one per overload), each with different `lines` values
+- `summary.totalNodes` = 2
+- Previously, only ONE `Process` entry appeared (the other was deduped away)
+
+**Validates:** Overloaded methods are not collapsed in the caller tree. The dedup key includes
+`line_start` so overloads at different line positions are treated as distinct callers.
+
+**Status:** ✅ Covered by unit test `test_search_callers_overloads_not_collapsed_up` in `handlers_tests_csharp.rs`
+
+---
+
+### T-OVERLOAD-DEDUP-DOWN: Overloaded callees not collapsed (direction=down)
+
+**Background:** When a method calls two overloads of the same target method (e.g., `Execute(int)`
+and `Execute(string)` in the same class), the callee tree should show BOTH overloads as separate
+entries. The same dedup fix applies to direction=down.
+
+**Setup:** Create C# files:
+- `TaskRunner.cs`: Contains two overloads of `Execute`:
+  ```csharp
+  public class TaskRunner {
+      public void Execute(int id) { }
+      public void Execute(string name) { }
+  }
+  ```
+- `Orchestrator.cs`: Contains `RunAll()` that calls both overloads:
+  ```csharp
+  public class Orchestrator {
+      private TaskRunner _runner;
+      public void RunAll() {
+          _runner.Execute(1);
+          _runner.Execute("task");
+      }
+  }
+  ```
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"RunAll","class":"Orchestrator","direction":"down","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
+```
+
+**Expected:**
+
+- `callTree` includes TWO entries for `Execute` (one per overload), each with different `lines` values
+- `summary.totalNodes` = 2
+- Previously, only ONE `Execute` entry appeared
+
+**Validates:** Overloaded callees are not collapsed in the callee tree (direction=down).
+Same dedup key fix as T-OVERLOAD-DEDUP-UP.
+
+**Status:** ✅ Covered by unit test `test_search_callers_overloads_not_collapsed_down` in `handlers_tests_csharp.rs`
+
+---
+
+### T-SAME-NAME-IFACE: Same method name on unrelated interfaces — no cross-contamination
+
+**Background:** When two UNRELATED interfaces define methods with the same name (e.g.,
+`IServiceA.Execute()` and `IServiceB.Execute()`), searching for callers of `ServiceA.Execute()`
+should NOT include callers that use `IServiceB.Execute()`. Previously, the interface resolution
+block expanded ALL interfaces implementing the same method name, causing cross-contamination
+between unrelated class hierarchies.
+
+The fix filters the interface resolution to only include interfaces that are actually related
+to the target class (i.e., interfaces listed in the class's `base_types`).
+
+**Setup:** Create C# files:
+- `IServiceA.cs`: `public interface IServiceA { void Execute(); }`
+- `IServiceB.cs`: `public interface IServiceB { void Execute(); }`
+- `ServiceA.cs`: `public class ServiceA : IServiceA { public void Execute() { } }`
+- `ServiceB.cs`: `public class ServiceB : IServiceB { public void Execute() { } }`
+- `Consumer.cs`: Uses `IServiceB.Execute()` only:
+  ```csharp
+  public class Consumer {
+      private IServiceB _serviceB;
+      public void DoWork() { _serviceB.Execute(); }
+  }
+  ```
+
+**Command (MCP) — query ServiceA callers:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Execute","class":"ServiceA","direction":"up","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
+```
+
+**Expected:**
+
+- `callTree` is EMPTY (ServiceA.Execute has no callers)
+- `Consumer.DoWork()` does NOT appear (it calls IServiceB.Execute, not IServiceA.Execute)
+- Previously, Consumer.DoWork() falsely appeared because BOTH `IServiceA` and `IServiceB`
+  were included in the interface resolution, and `Consumer` mentions `IServiceB` which
+  was incorrectly treated as related to `ServiceA`
+
+**Command (MCP) — query ServiceB callers (cross-validation):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Execute","class":"ServiceB","direction":"up","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
+```
+
+**Expected:**
+
+- `callTree` includes `Consumer.DoWork()` (correct — it calls IServiceB.Execute)
+- `summary.totalNodes` = 1
+
+**Validates:** Interface resolution is scoped to related interfaces only. Unrelated interfaces
+with the same method name do not cause false positive callers.
+
+**Status:** ✅ Covered by unit test `test_search_callers_same_name_different_receiver_interface_resolution` in `handlers_tests_csharp.rs`

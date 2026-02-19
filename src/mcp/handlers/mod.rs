@@ -257,7 +257,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_callers".to_string(),
-            description: "RECOMMENDED for call chain analysis -- find all callers of a method and build a call tree (up or down) in a SINGLE sub-millisecond request. Supports C# and TypeScript/TSX. DI-aware. Returns a hierarchical call tree with method signatures, file paths, and line numbers. Always specify the 'class' parameter to avoid mixing callers from unrelated classes. Requires server started with --definitions flag.".to_string(),
+            description: "RECOMMENDED for call chain analysis -- find all callers of a method and build a call tree (up or down) in a SINGLE sub-millisecond request. Supports C# and TypeScript/TSX. DI-aware. Returns a hierarchical call tree with method signatures, file paths, and line numbers. Always specify the 'class' parameter to avoid mixing callers from unrelated classes. Requires server started with --definitions flag. Limitation: calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may not be detected because the tool uses AST parsing without type inference. DI-injected fields, `this`/`base` calls, and direct receiver calls are fully supported.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
