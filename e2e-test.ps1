@@ -88,6 +88,26 @@ Run-Test "T22 nonexistent-dir"     "$Binary find test -d /nonexistent/path/xyz" 
 Run-Test "T42 tips-strategy-recipes" "$Binary tips | Select-String 'STRATEGY RECIPES'"
 Run-Test "T42b tips-query-budget"    "$Binary tips | Select-String 'Query budget'"
 
+# T54, T65, T76, T80, T82: error handling and edge cases
+# NOTE: "search definitions" and "search reindex" are MCP-only tools (no CLI subcommand).
+#       Tests are adapted to use equivalent CLI commands (grep, fast, content-index).
+#       T61 number is already used by grep-substring-default, so invalid regex test uses T65.
+
+# T54: grep with non-existent term should return 0 matches gracefully (not crash)
+Run-Test "T54 grep-nonexistent-term" "$Binary grep ZZZNonExistentXYZ123 -d $TestDir -e $TestExt"
+
+# T65: fast with invalid regex should return error (exit 1)
+Run-Test "T65 fast-invalid-regex"    "$Binary fast `"[invalid`" -d $TestDir --regex" -ExpectedExit 1
+
+# T76: fast with empty pattern — clap rejects it gracefully (exit 2 = usage error, not crash)
+Run-Test "T76 fast-empty-pattern"    "$Binary fast `"`" -d $TestDir -e $TestExt" -ExpectedExit 2
+
+# T80: grep with non-existent directory should return error (no index found)
+Run-Test "T80 grep-nonexistent-dir"  "$Binary grep fn -d C:\nonexistent\fakepath123 -e $TestExt" -ExpectedExit 1
+
+# T82: grep with --max-results 0 should work (0 means unlimited)
+Run-Test "T82 grep-max-results-zero" "$Binary grep fn -d $TestDir -e $TestExt --max-results 0"
+
 # T-SHUTDOWN: save-on-shutdown — verify incremental watcher updates survive server restart
 Write-Host -NoNewline "  T-SHUTDOWN save-on-shutdown ... "
 $total++
