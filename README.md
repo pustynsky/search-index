@@ -133,7 +133,7 @@ Test files are split by language module for maintainability:
 
 | Category | Tests |
 |---|---|
-| Unit tests | `clean_path`, `tokenize`, staleness, serialization roundtrips, TF-IDF ranking |
+| Unit tests | `clean_path` (path separator normalization), `tokenize`, staleness, serialization roundtrips, TF-IDF ranking |
 | Integration | Build + search ContentIndex, build FileIndex, MCP server end-to-end |
 | MCP Protocol | JSON-RPC parsing, initialize, tools/list, tools/call, notifications, errors |
 | Substring/Trigram | Trigram generation, index build, substring search, 13 e2e integration tests |
