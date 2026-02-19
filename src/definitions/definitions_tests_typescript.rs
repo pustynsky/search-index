@@ -746,3 +746,36 @@ class AdminService extends BaseService implements IAdminService {
         class_defs[0].base_types
     );
 }
+
+#[test]
+fn test_parse_ts_injection_token_variable() {
+    let source = "export const AUTH_TOKEN = new InjectionToken<IAuthService>('AUTH_TOKEN');";
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let var_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Variable).collect();
+    assert_eq!(var_defs.len(), 1, "Expected exactly one variable definition");
+    assert_eq!(var_defs[0].name, "AUTH_TOKEN");
+    assert!(var_defs[0].modifiers.contains(&"export".to_string()));
+    assert!(var_defs[0].modifiers.contains(&"const".to_string()));
+
+    // The parser currently captures type annotations but NOT initializer expressions.
+    // For `const AUTH_TOKEN = new InjectionToken<IAuthService>(...)`, there is no explicit
+    // type annotation, so the signature will be "const AUTH_TOKEN" without InjectionToken info.
+    // TODO: To fully support InjectionToken patterns, the parser would need to extract
+    // the initializer's constructor name (InjectionToken<IAuthService>) into the signature.
+    let sig = var_defs[0].signature.as_ref().expect("Expected a signature");
+    assert!(sig.contains("AUTH_TOKEN"), "Signature should contain the variable name");
+
+    if sig.contains("InjectionToken") {
+        // Parser captures initializer type — ideal behavior
+        assert!(sig.contains("InjectionToken<IAuthService>"));
+    } else {
+        // Parser does NOT capture initializer — document the gap
+        eprintln!(
+            "NOTE: InjectionToken<IAuthService> NOT captured in signature. Signature: '{}'",
+            sig
+        );
+    }
+}

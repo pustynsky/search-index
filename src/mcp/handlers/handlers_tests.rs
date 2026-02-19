@@ -2032,3 +2032,211 @@ fn test_validate_search_dir_windows_absolute_outside_rejected() {
     assert!(result.is_err(),
         "Absolute path outside server dir should be rejected");
 }
+
+// ─── search_find contents=true tests ─────────────────────────────────
+
+#[test]
+fn test_search_find_contents_mode() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_find_contents_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create files with distinct content
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("alpha.txt")).unwrap();
+        writeln!(f, "This file contains the magic_searchable_token here.").unwrap();
+        writeln!(f, "And a second line with more content.").unwrap();
+    }
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("beta.txt")).unwrap();
+        writeln!(f, "This file has completely different content.").unwrap();
+        writeln!(f, "No special tokens at all.").unwrap();
+    }
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("gamma.txt")).unwrap();
+        writeln!(f, "Another file that also has magic_searchable_token inside.").unwrap();
+    }
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("delta.cs")).unwrap();
+        writeln!(f, "// A C# file without the search term").unwrap();
+    }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let content_index = ContentIndex {
+        root: dir_str.clone(), created_at: 0, max_age_secs: 3600,
+        files: vec![], index: HashMap::new(), total_tokens: 0,
+        extensions: vec!["txt".to_string()], file_token_counts: vec![],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: None,
+        server_dir: dir_str.clone(),
+        server_ext: "txt".to_string(),
+        metrics: false,
+        index_base: tmp_dir.join(".index"),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // Search file contents for "magic_searchable_token" in .txt files
+    let result = dispatch_tool(&ctx, "search_find", &json!({
+        "pattern": "magic_searchable_token",
+        "contents": true,
+        "ext": "txt",
+        "dir": dir_str
+    }));
+    assert!(!result.is_error, "search_find contents=true should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Should find exactly 2 files (alpha.txt and gamma.txt)
+    let total_matches = output["summary"]["totalMatches"].as_u64().unwrap();
+    assert_eq!(total_matches, 2, "Should find exactly 2 files containing the token, got {}", total_matches);
+
+    // Verify the files array has 2 entries with match details
+    let files = output["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2, "files array should have 2 entries");
+
+    // Each matched file should have a "matches" array with line-level details
+    for file_entry in files {
+        assert!(file_entry["path"].is_string(), "Each result should have a path");
+        let matches = file_entry["matches"].as_array().unwrap();
+        assert!(!matches.is_empty(), "Each matched file should have at least one matching line");
+        for m in matches {
+            assert!(m["line"].is_u64(), "Each match should have a line number");
+            assert!(m["text"].is_string(), "Each match should have text");
+            let text = m["text"].as_str().unwrap();
+            assert!(text.contains("magic_searchable_token"),
+                "Matched line text should contain the search term, got: {}", text);
+        }
+    }
+
+    // Verify beta.txt is NOT in results (it doesn't contain the token)
+    let paths: Vec<&str> = files.iter().map(|f| f["path"].as_str().unwrap()).collect();
+    for path in &paths {
+        assert!(!path.contains("beta"), "beta.txt should not be in results (no match)");
+        assert!(!path.contains("delta"), "delta.cs should not be in results (wrong extension)");
+    }
+
+    // Test countOnly=true with contents search
+    let result_count = dispatch_tool(&ctx, "search_find", &json!({
+        "pattern": "magic_searchable_token",
+        "contents": true,
+        "ext": "txt",
+        "dir": dir_str,
+        "countOnly": true
+    }));
+    assert!(!result_count.is_error);
+    let output_count: Value = serde_json::from_str(&result_count.content[0].text).unwrap();
+    assert_eq!(output_count["summary"]["totalMatches"].as_u64().unwrap(), 2,
+        "countOnly should still report 2 matches");
+    assert!(output_count["files"].as_array().unwrap().is_empty(),
+        "countOnly=true should return empty files array");
+
+    cleanup_tmp(&tmp_dir);
+}
+
+// ─── search_help response structure tests ────────────────────────────
+
+#[test]
+fn test_search_help_response_structure() {
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(&ctx, "search_help", &json!({}));
+    assert!(!result.is_error, "search_help should not error");
+
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Validate top-level keys exist (from tips::render_json)
+    assert!(output["bestPractices"].is_array(), "Response should have 'bestPractices' array");
+    assert!(output["strategyRecipes"].is_array(), "Response should have 'strategyRecipes' array");
+    assert!(output["performanceTiers"].is_object(), "Response should have 'performanceTiers' object");
+    assert!(output["toolPriority"].is_array(), "Response should have 'toolPriority' array");
+
+    // bestPractices should be non-empty and each entry should have rule/why/example
+    let practices = output["bestPractices"].as_array().unwrap();
+    assert!(!practices.is_empty(), "bestPractices should not be empty");
+    for practice in practices {
+        assert!(practice["rule"].is_string(), "Each practice should have 'rule'");
+        assert!(practice["why"].is_string(), "Each practice should have 'why'");
+        assert!(practice["example"].is_string(), "Each practice should have 'example'");
+    }
+
+    // strategyRecipes should be non-empty and each entry should have name/when/steps/antiPatterns
+    let recipes = output["strategyRecipes"].as_array().unwrap();
+    assert!(!recipes.is_empty(), "strategyRecipes should not be empty");
+    for recipe in recipes {
+        assert!(recipe["name"].is_string(), "Each recipe should have 'name'");
+        assert!(recipe["when"].is_string(), "Each recipe should have 'when'");
+        assert!(recipe["steps"].is_array(), "Each recipe should have 'steps'");
+        assert!(recipe["antiPatterns"].is_array(), "Each recipe should have 'antiPatterns'");
+    }
+
+    // performanceTiers should have entries
+    let tiers = output["performanceTiers"].as_object().unwrap();
+    assert!(!tiers.is_empty(), "performanceTiers should not be empty");
+
+    // toolPriority should be non-empty
+    let priority = output["toolPriority"].as_array().unwrap();
+    assert!(!priority.is_empty(), "toolPriority should not be empty");
+
+    // Verify counts match the source of truth
+    assert_eq!(practices.len(), crate::tips::tips().len(),
+        "bestPractices count should match tips::tips()");
+    assert_eq!(recipes.len(), crate::tips::strategies().len(),
+        "strategyRecipes count should match tips::strategies()");
+    assert_eq!(priority.len(), crate::tips::tool_priority().len(),
+        "toolPriority count should match tips::tool_priority()");
+}
+
+// ─── search_info response structure tests ────────────────────────────
+
+#[test]
+fn test_search_info_response_structure() {
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(&ctx, "search_info", &json!({}));
+    assert!(!result.is_error, "search_info should not error");
+
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Validate top-level keys exist (from cli::info::cmd_info_json)
+    assert!(output["directory"].is_string(), "Response should have 'directory' string");
+    assert!(output["indexes"].is_array(), "Response should have 'indexes' array");
+
+    // indexes is an array (may be empty if no indexes exist, which is fine for test)
+    let indexes = output["indexes"].as_array().unwrap();
+
+    // If indexes exist, validate their structure
+    for idx in indexes {
+        assert!(idx["type"].is_string(), "Each index should have a 'type' field");
+        let idx_type = idx["type"].as_str().unwrap();
+        match idx_type {
+            "file" => {
+                assert!(idx["root"].is_string(), "File index should have 'root'");
+                assert!(idx["entries"].is_number(), "File index should have 'entries'");
+                assert!(idx["sizeMb"].is_number(), "File index should have 'sizeMb'");
+                assert!(idx["ageHours"].is_number(), "File index should have 'ageHours'");
+            }
+            "content" => {
+                assert!(idx["root"].is_string(), "Content index should have 'root'");
+                assert!(idx["files"].is_number(), "Content index should have 'files'");
+                assert!(idx["totalTokens"].is_number(), "Content index should have 'totalTokens'");
+                assert!(idx["extensions"].is_array(), "Content index should have 'extensions'");
+                assert!(idx["sizeMb"].is_number(), "Content index should have 'sizeMb'");
+                assert!(idx["ageHours"].is_number(), "Content index should have 'ageHours'");
+            }
+            "definition" => {
+                assert!(idx["root"].is_string(), "Definition index should have 'root'");
+                assert!(idx["files"].is_number(), "Definition index should have 'files'");
+                assert!(idx["definitions"].is_number(), "Definition index should have 'definitions'");
+                assert!(idx["callSites"].is_number(), "Definition index should have 'callSites'");
+                assert!(idx["extensions"].is_array(), "Definition index should have 'extensions'");
+                assert!(idx["sizeMb"].is_number(), "Definition index should have 'sizeMb'");
+                assert!(idx["ageHours"].is_number(), "Definition index should have 'ageHours'");
+            }
+            other => panic!("Unexpected index type: {}", other),
+        }
+    }
+}
