@@ -3,6 +3,7 @@ name = "search"
 version = "0.1.0"
 edition = "2024"
 description = "High-performance code search engine with inverted indexing and AST-based code intelligence"
+license = "MIT OR Apache-2.0"
 
 [lib]
 name = "search"
