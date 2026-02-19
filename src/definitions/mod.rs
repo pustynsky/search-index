@@ -296,3 +296,11 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 #[cfg(test)]
 #[path = "definitions_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "definitions_tests_csharp.rs"]
+mod tests_csharp;
+
+#[cfg(test)]
+#[path = "definitions_tests_typescript.rs"]
+mod tests_typescript;

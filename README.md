@@ -116,12 +116,20 @@ Indexes are stored in `%LOCALAPPDATA%\search-index\` and are language-agnostic f
 ## Testing
 
 ```bash
-# Run all tests (200 tests: 167 main + 32 lib + 1 doctest)
+# Run all tests (308 unit tests + 34 E2E tests)
 cargo test
 
 # Run benchmarks
 cargo bench
 ```
+
+Test files are split by language module for maintainability:
+
+| Module | Test files |
+|---|---|
+| `src/mcp/handlers/` | `handlers_tests.rs` (77 general), `handlers_tests_csharp.rs` (31 C#), `handlers_tests_typescript.rs` (TS placeholder) |
+| `src/definitions/` | `definitions_tests.rs` (12 general), `definitions_tests_csharp.rs` (19 C#), `definitions_tests_typescript.rs` (32 TS) |
+| `src/` | `main_tests.rs` (35 general) |
 
 | Category | Tests |
 |---|---|

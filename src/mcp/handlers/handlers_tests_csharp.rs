@@ -1,0 +1,1728 @@
+//! C#-specific handler tests — definitions, callers, includeBody, containsLine, reindex.
+//! Split from handlers_tests.rs for maintainability.
+
+use super::*;
+use crate::index::build_trigram_index;
+use crate::Posting;
+use crate::TrigramIndex;
+use crate::definitions::DefinitionEntry;
+use crate::definitions::*;
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
+
+// ─── Helpers ─────────────────────────────────────────────────────────
+
+fn cleanup_tmp(tmp_dir: &std::path::Path) { let _ = std::fs::remove_dir_all(tmp_dir); }
+
+/// Helper: create a context with both content + definition indexes (C# classes/methods).
+fn make_ctx_with_defs() -> HandlerContext {
+    // Content index: tokens -> files+lines
+    let mut content_idx = HashMap::new();
+    content_idx.insert("executequeryasync".to_string(), vec![
+        Posting { file_id: 0, lines: vec![242] },
+        Posting { file_id: 1, lines: vec![88] },
+        Posting { file_id: 2, lines: vec![391] },
+    ]);
+    content_idx.insert("queryinternalasync".to_string(), vec![
+        Posting { file_id: 2, lines: vec![766] },
+        Posting { file_id: 2, lines: vec![462] },
+    ]);
+    content_idx.insert("proxyclient".to_string(), vec![
+        Posting { file_id: 1, lines: vec![1, 88] },
+    ]);
+    content_idx.insert("resilientclient".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1, 242] },
+    ]);
+    content_idx.insert("queryservice".to_string(), vec![
+        Posting { file_id: 2, lines: vec![1, 391, 462, 766] },
+    ]);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        created_at: 0,
+        max_age_secs: 3600,
+        files: vec![
+            "C:\\src\\ResilientClient.cs".to_string(),
+            "C:\\src\\ProxyClient.cs".to_string(),
+            "C:\\src\\QueryService.cs".to_string(),
+        ],
+        index: content_idx,
+        total_tokens: 500,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![100, 50, 200],
+        trigram: TrigramIndex::default(),
+        trigram_dirty: false,
+        forward: None,
+        path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "ResilientClient".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 300,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "ExecuteQueryAsync".to_string(),
+            kind: DefinitionKind::Method, line_start: 240, line_end: 260,
+            parent: Some("ResilientClient".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "ProxyClient".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "ExecuteQueryAsync".to_string(),
+            kind: DefinitionKind::Method, line_start: 85, line_end: 95,
+            parent: Some("ProxyClient".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 2, name: "QueryService".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 900,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 2, name: "RunQueryBatchAsync".to_string(),
+            kind: DefinitionKind::Method, line_start: 386, line_end: 395,
+            parent: Some("QueryService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 2, name: "QueryImplAsync".to_string(),
+            kind: DefinitionKind::Method, line_start: 450, line_end: 470,
+            parent: Some("QueryService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 2, name: "QueryInternalAsync".to_string(),
+            kind: DefinitionKind::Method, line_start: 760, line_end: 830,
+            parent: Some("QueryService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+
+    path_to_id.insert(PathBuf::from("C:\\src\\ResilientClient.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\ProxyClient.cs"), 1);
+    path_to_id.insert(PathBuf::from("C:\\src\\QueryService.cs"), 2);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(),
+        created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![
+            "C:\\src\\ResilientClient.cs".to_string(),
+            "C:\\src\\ProxyClient.cs".to_string(),
+            "C:\\src\\QueryService.cs".to_string(),
+        ],
+        definitions,
+        name_index,
+        kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index,
+        path_to_id,
+        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(),
+        server_ext: "cs".to_string(),
+        metrics: false,
+        index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    }
+}
+
+/// Helper: create a context with real temp .cs files and a definition index.
+fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_test_cs_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    let file0_path = tmp_dir.join("MyService.cs");
+    { let mut f = std::fs::File::create(&file0_path).unwrap(); for i in 1..=15 { writeln!(f, "// line {}", i).unwrap(); } }
+    let file1_path = tmp_dir.join("BigFile.cs");
+    { let mut f = std::fs::File::create(&file1_path).unwrap(); for i in 1..=25 { writeln!(f, "// big line {}", i).unwrap(); } }
+    let file0_str = file0_path.to_string_lossy().to_string();
+    let file1_str = file1_path.to_string_lossy().to_string();
+    let definitions = vec![
+        DefinitionEntry { file_id: 0, name: "MyService".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 15, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        DefinitionEntry { file_id: 0, name: "DoWork".to_string(), kind: DefinitionKind::Method, line_start: 3, line_end: 8, parent: Some("MyService".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        DefinitionEntry { file_id: 1, name: "BigClass".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 25, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        DefinitionEntry { file_id: 1, name: "Process".to_string(), kind: DefinitionKind::Method, line_start: 5, line_end: 24, parent: Some("BigClass".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+    ];
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() { let idx = i as u32; name_index.entry(def.name.to_lowercase()).or_default().push(idx); kind_index.entry(def.kind.clone()).or_default().push(idx); file_index.entry(def.file_id).or_default().push(idx); }
+    path_to_id.insert(file0_path, 0); path_to_id.insert(file1_path, 1);
+    let def_index = DefinitionIndex { root: tmp_dir.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![file0_str.clone(), file1_str.clone()], definitions, name_index, kind_index, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index, path_to_id, method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new() };
+    let content_index = ContentIndex { root: tmp_dir.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600, files: vec![file0_str, file1_str], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0, 0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: Some(Arc::new(RwLock::new(def_index))), server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+    (ctx, tmp_dir)
+}
+
+// ─── search_callers tests ────────────────────────────────────────────
+
+#[test]
+fn test_search_callers_missing_method() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_callers", &json!({}));
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("Missing required parameter: method"));
+}
+
+#[test]
+fn test_search_callers_finds_callers() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "ExecuteQueryAsync",
+        "depth": 2
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    assert!(!tree.is_empty(), "Call tree should not be empty");
+    assert!(output["summary"]["totalNodes"].as_u64().unwrap() > 0);
+    assert!(output["summary"]["searchTimeMs"].as_f64().is_some());
+}
+
+#[test]
+fn test_search_callers_nonexistent_method() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "NonExistentMethodXYZ"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    assert!(tree.is_empty(), "Call tree should be empty for nonexistent method");
+}
+
+#[test]
+fn test_search_callers_max_total_nodes() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "ExecuteQueryAsync",
+        "depth": 5,
+        "maxTotalNodes": 2
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalNodes"].as_u64().unwrap();
+    assert!(total <= 2, "Total nodes should be capped at 2, got {}", total);
+}
+
+#[test]
+fn test_search_callers_max_per_level() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "ExecuteQueryAsync",
+        "depth": 1,
+        "maxCallersPerLevel": 1
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    assert!(tree.len() <= 1, "Should have at most 1 caller per level, got {}", tree.len());
+}
+
+#[test]
+fn test_search_callers_has_class_and_file() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "ExecuteQueryAsync",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    for node in tree {
+        assert!(node["method"].is_string(), "Node should have method name");
+        assert!(node["file"].is_string(), "Node should have file name");
+        assert!(node["line"].is_number(), "Node should have line number");
+    }
+}
+
+#[test]
+fn test_search_callers_field_prefix_m_underscore() {
+    let mut content_idx = HashMap::new();
+    content_idx.insert("submitasync".to_string(), vec![
+        Posting { file_id: 0, lines: vec![45] },
+        Posting { file_id: 1, lines: vec![30] },
+    ]);
+    content_idx.insert("orderprocessor".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1, 45] },
+    ]);
+    content_idx.insert("m_orderprocessor".to_string(), vec![
+        Posting { file_id: 1, lines: vec![5, 30] },
+    ]);
+    content_idx.insert("checkouthandler".to_string(), vec![
+        Posting { file_id: 1, lines: vec![1] },
+    ]);
+
+    let trigram = build_trigram_index(&content_idx);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec![
+            "C:\\src\\OrderProcessor.cs".to_string(),
+            "C:\\src\\CheckoutHandler.cs".to_string(),
+        ],
+        index: content_idx, total_tokens: 200,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![100, 100],
+        trigram, trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "OrderProcessor".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "SubmitAsync".to_string(),
+            kind: DefinitionKind::Method, line_start: 45, line_end: 60,
+            parent: Some("OrderProcessor".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "CheckoutHandler".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "HandleRequest".to_string(),
+            kind: DefinitionKind::Method, line_start: 25, line_end: 40,
+            parent: Some("CheckoutHandler".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\OrderProcessor.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\CheckoutHandler.cs"), 1);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![
+            "C:\\src\\OrderProcessor.cs".to_string(),
+            "C:\\src\\CheckoutHandler.cs".to_string(),
+        ],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "SubmitAsync",
+        "class": "OrderProcessor",
+        "depth": 1
+    }));
+    assert!(!result.is_error, "search_callers should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    assert!(!tree.is_empty(),
+        "Call tree should find caller through m_orderProcessor field prefix. Got: {}",
+        serde_json::to_string_pretty(&output).unwrap());
+    assert_eq!(tree[0]["method"], "HandleRequest");
+    assert_eq!(tree[0]["class"], "CheckoutHandler");
+}
+
+#[test]
+fn test_search_callers_field_prefix_underscore() {
+    let mut content_idx = HashMap::new();
+    content_idx.insert("getuserasync".to_string(), vec![
+        Posting { file_id: 0, lines: vec![15] },
+        Posting { file_id: 1, lines: vec![15] },
+    ]);
+    content_idx.insert("userservice".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+    ]);
+    content_idx.insert("_userservice".to_string(), vec![
+        Posting { file_id: 1, lines: vec![3, 15] },
+    ]);
+
+    let trigram = build_trigram_index(&content_idx);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec!["C:\\src\\UserService.cs".to_string(), "C:\\src\\AccountController.cs".to_string()],
+        index: content_idx, total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50, 50],
+        trigram, trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "UserService".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "GetUserAsync".to_string(),
+            kind: DefinitionKind::Method, line_start: 15, line_end: 30,
+            parent: Some("UserService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "AccountController".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 30,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "GetAccount".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 25,
+            parent: Some("AccountController".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\UserService.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\AccountController.cs"), 1);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["C:\\src\\UserService.cs".to_string(), "C:\\src\\AccountController.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "GetUserAsync",
+        "class": "UserService",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    assert!(!tree.is_empty(), "Should find caller through _userService field prefix");
+    assert_eq!(tree[0]["method"], "GetAccount");
+    assert_eq!(tree[0]["class"], "AccountController");
+}
+
+#[test]
+fn test_search_callers_no_trigram_no_regression() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "ExecuteQueryAsync",
+        "class": "ResilientClient",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"]["searchTimeMs"].as_f64().is_some());
+}
+
+#[test]
+fn test_search_callers_multi_ext_filter() {
+    let ctx = make_ctx_with_defs();
+    let multi_ext_ctx = HandlerContext {
+        index: ctx.index.clone(),
+        def_index: ctx.def_index.clone(),
+        server_dir: ctx.server_dir.clone(),
+        server_ext: "cs,xml,sql".to_string(),
+        metrics: false,
+        index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    let result = dispatch_tool(&multi_ext_ctx, "search_callers", &json!({
+        "method": "ExecuteQueryAsync",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    assert!(!tree.is_empty(),
+        "Multi-ext server_ext should NOT filter out .cs files. Got empty callTree.");
+}
+
+// ─── containsLine tests ─────────────────────────────────────────────
+
+#[test]
+fn test_contains_line_finds_method() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "QueryService",
+        "containsLine": 391
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["containingDefinitions"].as_array().unwrap();
+    assert!(!defs.is_empty(), "Should find containing definitions");
+    assert_eq!(defs[0]["name"], "RunQueryBatchAsync");
+    assert_eq!(defs[0]["kind"], "method");
+}
+
+#[test]
+fn test_contains_line_returns_parent() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "QueryService",
+        "containsLine": 800
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["containingDefinitions"].as_array().unwrap();
+    let method = defs.iter().find(|d| d["kind"] == "method").unwrap();
+    assert_eq!(method["name"], "QueryInternalAsync");
+    assert_eq!(method["parent"], "QueryService");
+}
+
+#[test]
+fn test_contains_line_no_match() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "QueryService",
+        "containsLine": 999
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["containingDefinitions"].as_array().unwrap();
+    assert!(defs.is_empty(), "Should find no definitions for line 999");
+}
+
+// ─── find_containing_method tests ────────────────────────────────────
+
+#[test]
+fn test_find_containing_method_innermost() {
+    let ctx = make_ctx_with_defs();
+    let def_idx = ctx.def_index.as_ref().unwrap().read().unwrap();
+    let result = find_containing_method(&def_idx, 2, 391);
+    assert!(result.is_some());
+    let (name, parent, _line) = result.unwrap();
+    assert_eq!(name, "RunQueryBatchAsync");
+    assert_eq!(parent.as_deref(), Some("QueryService"));
+}
+
+#[test]
+fn test_find_containing_method_none() {
+    let ctx = make_ctx_with_defs();
+    let def_idx = ctx.def_index.as_ref().unwrap().read().unwrap();
+    let result = find_containing_method(&def_idx, 2, 999);
+    assert!(result.is_none());
+}
+
+// ─── resolve_call_site tests ─────────────────────────────────────────
+
+#[test]
+fn test_resolve_call_site_with_class_scope() {
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "ServiceA".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![],
+            base_types: vec!["IService".to_string()],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "Execute".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("ServiceA".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "ServiceB".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![],
+            base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "Execute".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("ServiceB".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut base_type_index: HashMap<String, Vec<u32>> = HashMap::new();
+
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+        for bt in &def.base_types {
+            base_type_index.entry(bt.to_lowercase()).or_default().push(idx);
+        }
+    }
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(),
+        created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["a.cs".to_string(), "b.cs".to_string()],
+        definitions,
+        name_index,
+        kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index,
+        file_index,
+        path_to_id: HashMap::new(),
+        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let call_a = CallSite {
+        method_name: "Execute".to_string(),
+        receiver_type: Some("ServiceA".to_string()),
+        line: 5,
+    };
+    let resolved_a = resolve_call_site(&call_a, &def_index);
+    assert_eq!(resolved_a.len(), 1);
+    assert_eq!(def_index.definitions[resolved_a[0] as usize].parent.as_deref(), Some("ServiceA"));
+
+    let call_b = CallSite {
+        method_name: "Execute".to_string(),
+        receiver_type: Some("ServiceB".to_string()),
+        line: 10,
+    };
+    let resolved_b = resolve_call_site(&call_b, &def_index);
+    assert_eq!(resolved_b.len(), 1);
+    assert_eq!(def_index.definitions[resolved_b[0] as usize].parent.as_deref(), Some("ServiceB"));
+
+    let call_no_recv = CallSite {
+        method_name: "Execute".to_string(),
+        receiver_type: None,
+        line: 15,
+    };
+    let resolved_none = resolve_call_site(&call_no_recv, &def_index);
+    assert_eq!(resolved_none.len(), 2);
+
+    let call_iface = CallSite {
+        method_name: "Execute".to_string(),
+        receiver_type: Some("IService".to_string()),
+        line: 20,
+    };
+    let resolved_iface = resolve_call_site(&call_iface, &def_index);
+    assert!(!resolved_iface.is_empty());
+    assert!(resolved_iface.iter().any(|&di| {
+        def_index.definitions[di as usize].parent.as_deref() == Some("ServiceA")
+    }));
+}
+
+// ─── search_callers "down" direction + class filter tests ────────────
+
+#[test]
+fn test_search_callers_down_class_filter() {
+    let definitions = vec![
+        DefinitionEntry { file_id: 0, name: "IndexSearchService".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 900, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        DefinitionEntry { file_id: 0, name: "SearchInternalAsync".to_string(), kind: DefinitionKind::Method, line_start: 766, line_end: 833, parent: Some("IndexSearchService".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        DefinitionEntry { file_id: 0, name: "ShouldIssueVectorSearch".to_string(), kind: DefinitionKind::Method, line_start: 200, line_end: 220, parent: Some("IndexSearchService".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        DefinitionEntry { file_id: 1, name: "IndexedSearchQueryExecuter".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 400, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        DefinitionEntry { file_id: 1, name: "SearchInternalAsync".to_string(), kind: DefinitionKind::Method, line_start: 328, line_end: 341, parent: Some("IndexedSearchQueryExecuter".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        DefinitionEntry { file_id: 1, name: "TraceInformation".to_string(), kind: DefinitionKind::Method, line_start: 50, line_end: 55, parent: Some("IndexedSearchQueryExecuter".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(1, vec![CallSite { method_name: "ShouldIssueVectorSearch".to_string(), receiver_type: None, line: 780 }]);
+    method_calls.insert(4, vec![CallSite { method_name: "TraceInformation".to_string(), receiver_type: None, line: 333 }]);
+
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    path_to_id.insert(PathBuf::from("C:\\src\\IndexSearchService.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\IndexedSearchQueryExecuter.cs"), 1);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()],
+        files: vec!["C:\\src\\IndexSearchService.cs".to_string(), "C:\\src\\IndexedSearchQueryExecuter.cs".to_string()],
+        definitions, name_index, kind_index, attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls,
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec!["C:\\src\\IndexSearchService.cs".to_string(), "C:\\src\\IndexedSearchQueryExecuter.cs".to_string()],
+        index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()],
+        file_token_counts: vec![100, 100], trigram: TrigramIndex::default(),
+        trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    let result = dispatch_tool(&ctx, "search_callers", &json!({ "method": "SearchInternalAsync", "class": "IndexSearchService", "direction": "down", "depth": 1 }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    let callee_names: Vec<&str> = tree.iter().filter_map(|n| n["method"].as_str()).collect();
+    assert!(callee_names.contains(&"ShouldIssueVectorSearch"));
+    assert!(!callee_names.contains(&"TraceInformation"));
+
+    let result2 = dispatch_tool(&ctx, "search_callers", &json!({ "method": "SearchInternalAsync", "class": "IndexedSearchQueryExecuter", "direction": "down", "depth": 1 }));
+    assert!(!result2.is_error);
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    let tree2 = output2["callTree"].as_array().unwrap();
+    let callee_names2: Vec<&str> = tree2.iter().filter_map(|n| n["method"].as_str()).collect();
+    assert!(callee_names2.contains(&"TraceInformation"));
+    assert!(!callee_names2.contains(&"ShouldIssueVectorSearch"));
+
+    let result3 = dispatch_tool(&ctx, "search_callers", &json!({ "method": "SearchInternalAsync", "direction": "down", "depth": 1 }));
+    assert!(!result3.is_error);
+    let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
+    let tree3 = output3["callTree"].as_array().unwrap();
+    let callee_names3: Vec<&str> = tree3.iter().filter_map(|n| n["method"].as_str()).collect();
+    assert!(callee_names3.contains(&"ShouldIssueVectorSearch"));
+    assert!(callee_names3.contains(&"TraceInformation"));
+    assert!(output3.get("warning").is_some());
+}
+
+#[test]
+fn test_search_callers_ambiguity_warning_truncated() {
+    // Create 15 classes each with a method named "OnInit" — exceeds MAX_LISTED (10)
+    let num_classes = 15;
+    let mut content_idx: HashMap<String, Vec<Posting>> = HashMap::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut definitions: Vec<DefinitionEntry> = Vec::new();
+
+    for i in 0..num_classes {
+        let class_name = format!("Component{}", i);
+        let file_name = format!("C:\\src\\{}.ts", class_name);
+        files.push(file_name.clone());
+
+        // Class definition
+        definitions.push(DefinitionEntry {
+            file_id: i as u32, name: class_name.clone(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        });
+        // Method definition
+        definitions.push(DefinitionEntry {
+            file_id: i as u32, name: "OnInit".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some(class_name.clone()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        });
+
+        content_idx.entry("oninit".to_string()).or_default().push(
+            Posting { file_id: i as u32, lines: vec![10] }
+        );
+    }
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    for (i, f) in files.iter().enumerate() {
+        path_to_id.insert(PathBuf::from(f), i as u32);
+    }
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: files.clone(),
+        index: content_idx, total_tokens: 500,
+        extensions: vec!["ts".to_string()],
+        file_token_counts: vec![50; num_classes],
+        trigram: TrigramIndex::default(), trigram_dirty: false,
+        forward: None, path_to_id: None,
+    };
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["ts".to_string()],
+        files,
+        definitions,
+        name_index, kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index, path_to_id,
+        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(),
+        server_ext: "ts".to_string(),
+        metrics: false,
+        index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    let result = dispatch_tool(&ctx, "search_callers", &json!({ "method": "OnInit" }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let warning = output["warning"].as_str().expect("should have warning");
+
+    // Warning should mention total count (15)
+    assert!(warning.contains("15 classes"), "Warning should mention 15 classes, got: {}", warning);
+    // Warning should be truncated (showing first 10)
+    assert!(warning.contains("showing first 10"), "Warning should say 'showing first 10', got: {}", warning);
+    // Warning should NOT list all 15 classes — check total length is reasonable
+    assert!(warning.len() < 500, "Warning should be truncated, but was {} bytes", warning.len());
+}
+
+#[test]
+fn test_search_callers_exclude_dir_and_file() {
+    // Set up: MethodA is defined in ServiceA (dir: src\services)
+    // MethodA is called from ControllerB (dir: src\controllers) and from TestC (dir: src\tests)
+    let mut content_idx = HashMap::new();
+    content_idx.insert("methoda".to_string(), vec![
+        Posting { file_id: 0, lines: vec![10] },
+        Posting { file_id: 1, lines: vec![25] },
+        Posting { file_id: 2, lines: vec![15] },
+    ]);
+    content_idx.insert("servicea".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![5] },
+        Posting { file_id: 2, lines: vec![3] },
+    ]);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec![
+            "C:\\src\\services\\ServiceA.cs".to_string(),
+            "C:\\src\\controllers\\ControllerB.cs".to_string(),
+            "C:\\src\\tests\\TestC.cs".to_string(),
+        ],
+        index: content_idx, total_tokens: 300,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![100, 100, 100],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "ServiceA".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "MethodA".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("ServiceA".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "ControllerB".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "HandleRequest".to_string(),
+            kind: DefinitionKind::Method, line_start: 20, line_end: 35,
+            parent: Some("ControllerB".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 2, name: "TestC".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 40,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 2, name: "TestMethodA".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 25,
+            parent: Some("TestC".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\services\\ServiceA.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\controllers\\ControllerB.cs"), 1);
+    path_to_id.insert(PathBuf::from("C:\\src\\tests\\TestC.cs"), 2);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![
+            "C:\\src\\services\\ServiceA.cs".to_string(),
+            "C:\\src\\controllers\\ControllerB.cs".to_string(),
+            "C:\\src\\tests\\TestC.cs".to_string(),
+        ],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // Test excludeDir: exclude "tests" directory
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "MethodA",
+        "class": "ServiceA",
+        "depth": 1,
+        "excludeDir": ["tests"]
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+
+    // Should NOT contain callers from the "tests" directory
+    for node in tree {
+        let file = node["file"].as_str().unwrap_or("");
+        assert!(!file.to_lowercase().contains("test"),
+            "excludeDir should filter out test files, but found: {}", file);
+    }
+
+    // Test excludeFile: exclude "TestC" file pattern
+    let result2 = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "MethodA",
+        "class": "ServiceA",
+        "depth": 1,
+        "excludeFile": ["TestC"]
+    }));
+    assert!(!result2.is_error);
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    let tree2 = output2["callTree"].as_array().unwrap();
+
+    for node in tree2 {
+        let file = node["file"].as_str().unwrap_or("");
+        assert!(!file.to_lowercase().contains("testc"),
+            "excludeFile should filter out TestC, but found: {}", file);
+    }
+}
+
+#[test]
+fn test_search_callers_cycle_detection_down() {
+    // Set up: MethodA (in ClassA) calls MethodB (in ClassB),
+    // and MethodB calls MethodA back — creating a cycle.
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "ClassA".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "MethodA".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 30,
+            parent: Some("ClassA".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "ClassB".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "MethodB".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 30,
+            parent: Some("ClassB".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\ClassA.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\ClassB.cs"), 1);
+
+    // MethodA (def index 1) calls MethodB; MethodB (def index 3) calls MethodA
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(1, vec![CallSite {
+        method_name: "MethodB".to_string(),
+        receiver_type: Some("ClassB".to_string()),
+        line: 20,
+    }]);
+    method_calls.insert(3, vec![CallSite {
+        method_name: "MethodA".to_string(),
+        receiver_type: Some("ClassA".to_string()),
+        line: 20,
+    }]);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["C:\\src\\ClassA.cs".to_string(), "C:\\src\\ClassB.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls,
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec!["C:\\src\\ClassA.cs".to_string(), "C:\\src\\ClassB.cs".to_string()],
+        index: HashMap::new(), total_tokens: 0,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50, 50],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // direction=down with depth=5 — cycle should be stopped by visited set
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "MethodA",
+        "class": "ClassA",
+        "direction": "down",
+        "depth": 5,
+        "maxTotalNodes": 50
+    }));
+    assert!(!result.is_error, "Cycle in call graph should not cause error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Should complete and have some nodes (MethodA → MethodB, but MethodB → MethodA is blocked)
+    let tree = output["callTree"].as_array().unwrap();
+    let total_nodes = output["summary"]["totalNodes"].as_u64().unwrap();
+    assert!(total_nodes > 0, "Should find at least one callee before cycle is detected");
+    // The cycle means we can't recurse forever — total nodes should be bounded
+    assert!(total_nodes <= 10, "Cycle detection should prevent runaway recursion, got {} nodes", total_nodes);
+
+    // First level should find MethodB as a callee
+    if !tree.is_empty() {
+        let callee_names: Vec<&str> = tree.iter().filter_map(|n| n["method"].as_str()).collect();
+        assert!(callee_names.contains(&"MethodB"),
+            "MethodA should call MethodB. Got callees: {:?}", callee_names);
+    }
+}
+
+// ─── search_definitions filter tests ─────────────────────────────────
+
+#[test]
+fn test_search_definitions_regex_name_filter() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "Execute.*",
+        "regex": true
+    }));
+    assert!(!result.is_error, "search_definitions regex should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    // Should find ExecuteQueryAsync (exists in ResilientClient and ProxyClient)
+    assert!(!defs.is_empty(), "Regex 'Execute.*' should match ExecuteQueryAsync definitions");
+
+    // All returned definitions should match the regex
+    for def in defs {
+        let name = def["name"].as_str().unwrap();
+        assert!(name.to_lowercase().starts_with("execute"),
+            "Definition '{}' should match regex 'Execute.*'", name);
+    }
+
+    // Should NOT contain definitions that don't match
+    for def in defs {
+        let name = def["name"].as_str().unwrap();
+        assert!(name != "QueryService" && name != "RunQueryBatchAsync",
+            "Definition '{}' should NOT match regex 'Execute.*'", name);
+    }
+}
+
+#[test]
+fn test_search_definitions_audit_mode() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "audit": true
+    }));
+    assert!(!result.is_error, "audit mode should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Audit output should have the audit object
+    let audit = &output["audit"];
+    assert!(audit.is_object(), "Expected 'audit' object in output");
+    assert!(audit["totalFiles"].as_u64().is_some(), "Expected totalFiles in audit");
+    assert!(audit["filesWithDefinitions"].as_u64().is_some(), "Expected filesWithDefinitions in audit");
+    assert!(audit["filesWithoutDefinitions"].as_u64().is_some(), "Expected filesWithoutDefinitions in audit");
+    assert!(audit["readErrors"].as_u64().is_some(), "Expected readErrors in audit");
+    assert!(audit["lossyUtf8Files"].as_u64().is_some(), "Expected lossyUtf8Files in audit");
+    assert!(audit["suspiciousFiles"].as_u64().is_some(), "Expected suspiciousFiles count in audit");
+    assert!(audit["suspiciousThresholdBytes"].as_u64().is_some(), "Expected suspiciousThresholdBytes in audit");
+
+    // Should also have suspiciousFiles array at top level
+    assert!(output["suspiciousFiles"].is_array(), "Expected suspiciousFiles array in output");
+
+    // Verify the counts make sense for our test context (3 files, all with definitions)
+    assert_eq!(audit["totalFiles"].as_u64().unwrap(), 3);
+    assert_eq!(audit["filesWithDefinitions"].as_u64().unwrap(), 3);
+}
+
+#[test]
+fn test_search_definitions_exclude_dir() {
+    // Create a context with definitions in two different directories
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec![
+            "C:\\src\\main\\UserService.cs".to_string(),
+            "C:\\src\\tests\\UserServiceTests.cs".to_string(),
+        ],
+        index: HashMap::new(), total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50, 50],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "UserService".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "GetUser".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("UserService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "UserServiceTests".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "TestGetUser".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 30,
+            parent: Some("UserServiceTests".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\main\\UserService.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\tests\\UserServiceTests.cs"), 1);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![
+            "C:\\src\\main\\UserService.cs".to_string(),
+            "C:\\src\\tests\\UserServiceTests.cs".to_string(),
+        ],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // Exclude "tests" directory
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "excludeDir": ["tests"]
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    // All returned definitions should be from non-test directories
+    for def in defs {
+        let file = def["file"].as_str().unwrap_or("");
+        assert!(!file.to_lowercase().contains("tests"),
+            "excludeDir should filter out definitions from 'tests' dir, but found file: {}", file);
+    }
+
+    // Should still have the main definitions
+    assert!(!defs.is_empty(), "Should have definitions from non-excluded directories");
+    let names: Vec<&str> = defs.iter().filter_map(|d| d["name"].as_str()).collect();
+    assert!(names.contains(&"UserService"), "Should contain UserService from main dir");
+    assert!(names.contains(&"GetUser"), "Should contain GetUser from main dir");
+    assert!(!names.contains(&"UserServiceTests"), "Should NOT contain UserServiceTests from tests dir");
+    assert!(!names.contains(&"TestGetUser"), "Should NOT contain TestGetUser from tests dir");
+}
+
+#[test]
+fn test_search_definitions_combined_name_parent_kind_filter() {
+    let ctx = make_ctx_with_defs();
+
+    // Filter: name=ExecuteQueryAsync, parent=ResilientClient, kind=method
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "ExecuteQueryAsync",
+        "parent": "ResilientClient",
+        "kind": "method"
+    }));
+    assert!(!result.is_error, "Combined filter should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    // Should return exactly 1 definition: ExecuteQueryAsync in ResilientClient
+    assert_eq!(defs.len(), 1,
+        "Expected exactly 1 result for name+parent+kind filter, got {}: {:?}",
+        defs.len(), defs);
+    assert_eq!(defs[0]["name"], "ExecuteQueryAsync");
+    assert_eq!(defs[0]["parent"], "ResilientClient");
+    assert_eq!(defs[0]["kind"], "method");
+
+    // Verify: same name+kind but different parent should NOT match
+    let result2 = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "ExecuteQueryAsync",
+        "parent": "NonExistentClass",
+        "kind": "method"
+    }));
+    assert!(!result2.is_error);
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    let defs2 = output2["definitions"].as_array().unwrap();
+    assert_eq!(defs2.len(), 0,
+        "Non-matching parent should return 0 results, got {}", defs2.len());
+}
+
+#[test]
+fn test_search_definitions_struct_kind() {
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec!["C:\\src\\Models.cs".to_string()],
+        index: HashMap::new(), total_tokens: 50,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "UserModel".to_string(),
+            kind: DefinitionKind::Struct, line_start: 1, line_end: 20,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "UserService".to_string(),
+            kind: DefinitionKind::Class, line_start: 25, line_end: 80,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "GetUser".to_string(),
+            kind: DefinitionKind::Method, line_start: 30, line_end: 45,
+            parent: Some("UserService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "OrderInfo".to_string(),
+            kind: DefinitionKind::Struct, line_start: 85, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\Models.cs"), 0);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["C:\\src\\Models.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "kind": "struct"
+    }));
+    assert!(!result.is_error, "kind=struct should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    // Should return only struct definitions
+    assert_eq!(defs.len(), 2, "Expected 2 struct definitions, got {}", defs.len());
+    for def in defs {
+        assert_eq!(def["kind"], "struct",
+            "All results should be structs, but got kind={}", def["kind"]);
+    }
+    let names: Vec<&str> = defs.iter().filter_map(|d| d["name"].as_str()).collect();
+    assert!(names.contains(&"UserModel"), "Should contain UserModel struct");
+    assert!(names.contains(&"OrderInfo"), "Should contain OrderInfo struct");
+}
+
+#[test]
+fn test_search_definitions_base_type_filter() {
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec!["C:\\src\\Controllers.cs".to_string()],
+        index: HashMap::new(), total_tokens: 50,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "UserController".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![],
+            base_types: vec!["ControllerBase".to_string()],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "OrderService".to_string(),
+            kind: DefinitionKind::Class, line_start: 55, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![],
+            base_types: vec!["IOrderService".to_string()],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "AdminController".to_string(),
+            kind: DefinitionKind::Class, line_start: 105, line_end: 150,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![],
+            base_types: vec!["ControllerBase".to_string(), "IAdminAccess".to_string()],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "PlainClass".to_string(),
+            kind: DefinitionKind::Class, line_start: 155, line_end: 170,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![],
+            base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    let mut base_type_index: HashMap<String, Vec<u32>> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+        for bt in &def.base_types {
+            base_type_index.entry(bt.to_lowercase()).or_default().push(idx);
+        }
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\Controllers.cs"), 0);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["C:\\src\\Controllers.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index,
+        file_index, path_to_id, method_calls: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // Filter by baseType=ControllerBase — should return UserController and AdminController
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "baseType": "ControllerBase"
+    }));
+    assert!(!result.is_error, "baseType filter should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 2, "Expected 2 definitions with baseType=ControllerBase, got {}", defs.len());
+    let names: Vec<&str> = defs.iter().filter_map(|d| d["name"].as_str()).collect();
+    assert!(names.contains(&"UserController"), "Should contain UserController");
+    assert!(names.contains(&"AdminController"), "Should contain AdminController");
+
+    // Filter by baseType=IOrderService — should return only OrderService
+    let result2 = dispatch_tool(&ctx, "search_definitions", &json!({
+        "baseType": "IOrderService"
+    }));
+    assert!(!result2.is_error);
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    let defs2 = output2["definitions"].as_array().unwrap();
+    assert_eq!(defs2.len(), 1, "Expected 1 definition with baseType=IOrderService, got {}", defs2.len());
+    assert_eq!(defs2[0]["name"], "OrderService");
+
+    // Filter by non-existent baseType — should return empty
+    let result3 = dispatch_tool(&ctx, "search_definitions", &json!({
+        "baseType": "NonExistentBase"
+    }));
+    assert!(!result3.is_error);
+    let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
+    let defs3 = output3["definitions"].as_array().unwrap();
+    assert!(defs3.is_empty(), "Non-existent baseType should return empty, got {}", defs3.len());
+}
+
+#[test]
+fn test_search_definitions_enum_member_kind() {
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec!["C:\\src\\Enums.cs".to_string()],
+        index: HashMap::new(), total_tokens: 50,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "OrderStatus".to_string(),
+            kind: DefinitionKind::Enum, line_start: 1, line_end: 20,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "Pending".to_string(),
+            kind: DefinitionKind::EnumMember, line_start: 3, line_end: 3,
+            parent: Some("OrderStatus".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "Completed".to_string(),
+            kind: DefinitionKind::EnumMember, line_start: 4, line_end: 4,
+            parent: Some("OrderStatus".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "Cancelled".to_string(),
+            kind: DefinitionKind::EnumMember, line_start: 5, line_end: 5,
+            parent: Some("OrderStatus".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "OrderHelper".to_string(),
+            kind: DefinitionKind::Class, line_start: 25, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "GetStatus".to_string(),
+            kind: DefinitionKind::Method, line_start: 30, line_end: 40,
+            parent: Some("OrderHelper".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\Enums.cs"), 0);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["C:\\src\\Enums.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // Filter by kind=enumMember
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "kind": "enumMember"
+    }));
+    assert!(!result.is_error, "kind=enumMember should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    // Should return exactly 3 enum members: Pending, Completed, Cancelled
+    assert_eq!(defs.len(), 3, "Expected 3 enumMember definitions, got {}", defs.len());
+    for def in defs {
+        assert_eq!(def["kind"], "enumMember",
+            "All results should be enumMember, but got kind={}", def["kind"]);
+    }
+    let names: Vec<&str> = defs.iter().filter_map(|d| d["name"].as_str()).collect();
+    assert!(names.contains(&"Pending"), "Should contain Pending enum member");
+    assert!(names.contains(&"Completed"), "Should contain Completed enum member");
+    assert!(names.contains(&"Cancelled"), "Should contain Cancelled enum member");
+
+    // Verify parent is set correctly
+    for def in defs {
+        assert_eq!(def["parent"], "OrderStatus",
+            "Enum members should have parent=OrderStatus, got {}", def["parent"]);
+    }
+}
+
+// ─── includeBody tests (require real files) ──────────────────────────
+
+#[test] fn test_search_definitions_include_body() {
+    let (ctx, tmp) = make_ctx_with_real_files();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "DoWork", "includeBody": true}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 1);
+    let body = defs[0]["body"].as_array().unwrap();
+    assert_eq!(body.len(), 6);
+    assert_eq!(defs[0]["bodyStartLine"], 3);
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_search_definitions_include_body_default_false() {
+    let (ctx, tmp) = make_ctx_with_real_files();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "DoWork"}));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["definitions"].as_array().unwrap()[0].get("body").is_none());
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_search_definitions_max_body_lines_truncation() {
+    let (ctx, tmp) = make_ctx_with_real_files();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "Process", "includeBody": true, "maxBodyLines": 5}));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+    assert_eq!(defs[0]["body"].as_array().unwrap().len(), 5);
+    assert_eq!(defs[0]["bodyTruncated"], true);
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_search_definitions_max_total_body_lines_budget() {
+    let (ctx, tmp) = make_ctx_with_real_files();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "DoWork,Process", "includeBody": true, "maxTotalBodyLines": 10}));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalBodyLinesReturned"].as_u64().unwrap();
+    assert!(total <= 10);
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_search_definitions_contains_line_with_body() {
+    let (ctx, tmp) = make_ctx_with_real_files();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({"file": "MyService", "containsLine": 5, "includeBody": true}));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["containingDefinitions"].as_array().unwrap();
+    assert_eq!(defs[0]["name"], "DoWork");
+    assert!(defs[0]["body"].as_array().unwrap().len() > 0);
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_search_definitions_file_cache() {
+    let (ctx, tmp) = make_ctx_with_real_files();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({"parent": "MyService", "includeBody": true}));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+    for def in defs { assert!(def.get("body").is_some()); }
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_search_definitions_stale_file_warning() {
+    use std::io::Write;
+    let tmp = std::env::temp_dir().join(format!("search_test_stale_cs_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    let fp = tmp.join("Stale.cs");
+    { let mut f = std::fs::File::create(&fp).unwrap(); for i in 1..=10 { writeln!(f, "// stale line {}", i).unwrap(); } }
+    let fs = fp.to_string_lossy().to_string();
+    let definitions = vec![DefinitionEntry { file_id: 0, name: "StaleClass".to_string(), kind: DefinitionKind::Class, line_start: 5, line_end: 20, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] }];
+    let mut ni: HashMap<String, Vec<u32>> = HashMap::new(); let mut ki: HashMap<DefinitionKind, Vec<u32>> = HashMap::new(); let mut fi: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() { ni.entry(def.name.to_lowercase()).or_default().push(i as u32); ki.entry(def.kind.clone()).or_default().push(i as u32); fi.entry(def.file_id).or_default().push(i as u32); }
+    let di = DefinitionIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![fs.clone()], definitions, name_index: ni, kind_index: ki, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index: fi, path_to_id: HashMap::new(), method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new() };
+    let ci = ContentIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600, files: vec![fs], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "StaleClass", "includeBody": true}));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["definitions"].as_array().unwrap()[0].get("bodyWarning").is_some());
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test] fn test_search_definitions_body_error() {
+    let definitions = vec![DefinitionEntry { file_id: 0, name: "GhostClass".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 10, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] }];
+    let mut ni: HashMap<String, Vec<u32>> = HashMap::new(); let mut ki: HashMap<DefinitionKind, Vec<u32>> = HashMap::new(); let mut fi: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() { ni.entry(def.name.to_lowercase()).or_default().push(i as u32); ki.entry(def.kind.clone()).or_default().push(i as u32); fi.entry(def.file_id).or_default().push(i as u32); }
+    let ne = "C:\\nonexistent\\path\\Ghost.cs".to_string();
+    let di = DefinitionIndex { root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![ne.clone()], definitions, name_index: ni, kind_index: ki, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index: fi, path_to_id: HashMap::new(), method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new() };
+    let ci = ContentIndex { root: ".".to_string(), created_at: 0, max_age_secs: 3600, files: vec![ne], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "GhostClass", "includeBody": true}));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["definitions"].as_array().unwrap()[0]["bodyError"], "failed to read file");
+}
+
+// ─── search_reindex_definitions success test ─────────────────────────
+
+#[test]
+fn test_reindex_definitions_success() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_reindex_def_cs_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create a minimal .cs file so the reindex has something to parse
+    let cs_file = tmp_dir.join("Sample.cs");
+    {
+        let mut f = std::fs::File::create(&cs_file).unwrap();
+        writeln!(f, "public class SampleClass {{").unwrap();
+        writeln!(f, "    public void DoWork() {{ }}").unwrap();
+        writeln!(f, "}}").unwrap();
+    }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+
+    // Build an initial (empty) definition index
+    let def_index = DefinitionIndex {
+        root: dir_str.clone(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![], definitions: vec![],
+        name_index: HashMap::new(), kind_index: HashMap::new(),
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index: HashMap::new(), path_to_id: HashMap::new(),
+        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0,
+        empty_file_ids: Vec::new(),
+    };
+
+    let content_index = ContentIndex {
+        root: dir_str.clone(), created_at: 0, max_age_secs: 3600,
+        files: vec![], index: HashMap::new(), total_tokens: 0,
+        extensions: vec!["cs".to_string()], file_token_counts: vec![],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: dir_str.clone(),
+        server_ext: "cs".to_string(),
+        metrics: false,
+        index_base: tmp_dir.join(".index"),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    let result = dispatch_tool(&ctx, "search_reindex_definitions", &json!({}));
+    assert!(!result.is_error, "Reindex definitions should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["status"], "ok", "Status should be 'ok'");
+    assert!(output["files"].as_u64().unwrap() >= 1, "Should have parsed at least 1 file");
+    assert!(output["definitions"].as_u64().unwrap() >= 1, "Should have found at least 1 definition");
+    assert!(output["rebuildTimeMs"].as_f64().is_some(), "Should report rebuild time");
+
+    cleanup_tmp(&tmp_dir);
+}
