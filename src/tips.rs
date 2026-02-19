@@ -295,20 +295,32 @@ pub fn render_json() -> Value {
 }
 
 /// Render tips as compact text for MCP initialize instructions field.
+///
+/// Design principles (see docs/TODO-hint-optimization.md):
+/// - Machine-targeted: no emoji, use ALL CAPS for emphasis
+/// - Client-agnostic: no Roo/Cline-specific tool names (read_file, list_files)
+/// - Compact: 5 key bullets + strategy recipes + tool priority (not all 18 tips)
+/// - Full tips available via search_help tool
 pub fn render_instructions() -> String {
     let mut out = String::new();
-    out.push_str("⚠️ IMPORTANT: Call search_help first to learn best practices before using other search tools.\n\n");
-    out.push_str("⚡ PREFER search-index tools OVER built-in read_file / list_files / list_code_definition_names for code exploration.\n");
-    out.push_str("   search_definitions returns classes, methods, bodies, and file paths in ONE call — no need to list_files then read_file.\n");
-    out.push_str("   search_callers builds full call trees in <1ms — no need to grep then read_file each caller.\n");
-    out.push_str("   search_grep finds content across 100K files instantly — no need to search_files with regex.\n");
-    out.push_str("   Only use read_file when you need exact file content for EDITING (apply_diff / write_to_file).\n\n");
-    out.push_str("search-index MCP server — Best Practices for Tool Selection\n\n");
 
-    for (i, tip) in tips().iter().enumerate() {
-        out.push_str(&format!("{}. {}: {}\n", i + 1, tip.rule.to_uppercase(), tip.why));
-    }
+    // --- PREFER block (Phase 0: client-agnostic, no emoji, CAPS emphasis) ---
+    out.push_str("CRITICAL: ALWAYS use search-index tools for code exploration. They are 90-1000x faster than file browsing.\n");
+    out.push_str("   search_definitions -- classes, methods, source code, file paths in ONE call. DO NOT browse directories then read files.\n");
+    out.push_str("   search_callers -- full call trees in <1ms. DO NOT search for callers manually.\n");
+    out.push_str("   search_grep -- content search across 100K+ files instantly. DO NOT use regex-based file search.\n");
+    out.push_str("   search_fast -- file name lookup in ~35ms. DO NOT walk the filesystem.\n");
+    out.push_str("   ONLY read files directly when search tools can't help -- for editing, non-C#/TS content, or full file context.\n\n");
 
+    // --- Quick reference (Phase 1: 5 bullets instead of 18 full tips) ---
+    out.push_str("search-index MCP server -- Quick Reference\n\n");
+    out.push_str("1. USE search_definitions for code exploration -- returns classes, methods, bodies, file paths in ONE call. Supports containsLine for stack traces, includeBody for source code.\n");
+    out.push_str("2. USE search_callers for call chains -- sub-millisecond full call tree. ALWAYS specify class parameter.\n");
+    out.push_str("3. USE search_grep for content search -- substring ON by default, multi-term OR with commas, countOnly for reconnaissance.\n");
+    out.push_str("4. USE search_fast for file lookup -- 90x faster than search_find.\n");
+    out.push_str("5. AIM for <=3 search calls per task. Call search_help for full guide with examples.\n");
+
+    // --- Strategy recipes (kept unchanged -- highest-value content) ---
     out.push_str("\nSTRATEGY RECIPES (aim for <=3 search calls per task):\n");
     for strat in strategies() {
         out.push_str(&format!("  [{}] {}\n", strat.name, strat.when));
@@ -317,11 +329,15 @@ pub fn render_instructions() -> String {
         }
     }
 
+    // --- Tool priority (kept unchanged) ---
     out.push_str("\nTOOL PRIORITY:\n");
     for tp in tool_priority() {
-        out.push_str(&format!("  {}. {} — {}\n", tp.rank, tp.tool, tp.description));
+        // Use ASCII -- for CLI compatibility instead of em-dash
+        out.push_str(&format!("  {}. {} -- {}\n", tp.rank, tp.tool, tp.description));
     }
-    out.push_str("\nCall search_help for a detailed JSON guide with examples.\n");
+
+    // --- Soft reference to search_help (Phase 4: no urgency) ---
+    out.push_str("\nCall search_help for detailed best practices with examples.\n");
 
     out
 }
@@ -382,18 +398,34 @@ mod tests {
     #[test]
     fn test_render_instructions_contains_key_terms() {
         let text = render_instructions();
+        // Core tools mentioned
         assert!(text.contains("search_fast"), "instructions should mention search_fast");
         assert!(text.contains("search_callers"), "instructions should mention search_callers");
+        assert!(text.contains("search_definitions"), "instructions should mention search_definitions");
+        assert!(text.contains("search_grep"), "instructions should mention search_grep");
+        // Key features mentioned in 5 bullets
         assert!(text.contains("substring"), "instructions should mention substring");
         assert!(text.contains("containsLine"), "instructions should mention containsLine");
         assert!(text.contains("includeBody"), "instructions should mention includeBody");
         assert!(text.contains("countOnly"), "instructions should mention countOnly");
+        // search_help reference (soft, not urgent)
         assert!(text.contains("search_help"), "instructions should mention search_help");
+        assert!(!text.contains("IMPORTANT: Call search_help first"), "instructions should NOT have urgent search_help prompt");
+        // Strategy recipes and query budget
         assert!(text.contains("STRATEGY RECIPES"), "instructions should include strategy recipes");
         assert!(text.contains("Architecture Exploration"), "instructions should include arch exploration recipe");
         assert!(text.contains("<=3 search calls"), "instructions should mention query budget");
-        assert!(text.contains("PREFER search-index tools OVER built-in read_file"), "instructions should tell LLM to prefer search-index over read_file");
-        assert!(text.contains("Only use read_file when you need exact file content for EDITING"), "instructions should clarify when read_file is appropriate");
+        // PREFER block -- client-agnostic, no emoji, CAPS emphasis
+        assert!(text.contains("CRITICAL: ALWAYS use search-index tools"), "instructions should have CRITICAL PREFER block");
+        assert!(text.contains("DO NOT browse directories"), "instructions should use DO NOT framing");
+        assert!(text.contains("ONLY read files directly when search tools can't help"), "instructions should restrict file reading");
+        // No emoji in machine-targeted text
+        assert!(!text.contains('⚠'), "instructions should not contain emoji (machine-targeted text)");
+        assert!(!text.contains('⚡'), "instructions should not contain emoji (machine-targeted text)");
+        // No Roo-specific tool names
+        assert!(!text.contains("read_file"), "instructions should not reference Roo-specific read_file");
+        assert!(!text.contains("list_files"), "instructions should not reference Roo-specific list_files");
+        assert!(!text.contains("list_code_definition_names"), "instructions should not reference Roo-specific list_code_definition_names");
     }
 
     /// CLI output must be pure ASCII — no Unicode box-drawing, em-dashes, arrows, or emoji.
