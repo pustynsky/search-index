@@ -14,6 +14,37 @@ use search::generate_trigrams;
 
 use super::HandlerContext;
 
+/// Built-in JavaScript/TypeScript types whose methods should never be resolved
+/// to user-defined classes. When a call site has one of these as its receiver type,
+/// we skip candidate matching to avoid false positives (e.g., Promise.resolve()
+/// matching user-defined Deferred.resolve()).
+const BUILTIN_RECEIVER_TYPES: &[&str] = &[
+    // Core
+    "Promise", "Array", "Map", "Set", "Object", "String", "Number", "Boolean",
+    "Date", "RegExp", "Error", "Symbol", "BigInt", "Function",
+    // Static namespaces
+    "Math", "JSON", "Reflect", "Proxy", "Intl",
+    // Typed arrays
+    "Int8Array", "Uint8Array", "Uint8ClampedArray", "Int16Array", "Uint16Array",
+    "Int32Array", "Uint32Array", "Float32Array", "Float64Array",
+    "BigInt64Array", "BigUint64Array",
+    // Buffers
+    "ArrayBuffer", "SharedArrayBuffer", "DataView",
+    // Collections
+    "WeakMap", "WeakSet", "WeakRef", "FinalizationRegistry",
+    // Browser / Node globals
+    "console", "window", "document", "globalThis", "navigator", "localStorage",
+    "sessionStorage", "setTimeout", "setInterval", "fetch",
+    // Iterators / Generators
+    "Iterator", "Generator", "AsyncGenerator", "AsyncIterator",
+    // Errors
+    "TypeError", "RangeError", "ReferenceError", "SyntaxError", "URIError", "EvalError",
+    // C# built-ins (for parity)
+    "Task", "List", "Dictionary", "HashSet", "Queue", "Stack",
+    "Console", "Convert", "Enum", "Guid", "Nullable",
+    "Tuple", "ValueTuple", "Span", "Memory",
+];
+
 pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index = match &ctx.def_index {
         Some(idx) => idx,
@@ -389,6 +420,15 @@ fn verify_call_site_target(
                 if target_base_types.iter().any(|bt| *bt == rt_lower) {
                     return true;
                 }
+                // Fuzzy DI interface matching: IDataModelService → DataModelWebService
+                // Check if target_class is an implementation of the receiver interface
+                if is_implementation_of(&target_lower, &rt_lower) {
+                    return true;
+                }
+                // Reverse: receiver is the implementation, target is the interface
+                if is_implementation_of(&rt_lower, &target_lower) {
+                    return true;
+                }
             }
             None => {
                 // No receiver type — accept if caller is in the same class or a subclass
@@ -509,6 +549,22 @@ fn build_caller_tree(
         let interface_name = format!("i{}", cls_lower);
         if let Some(postings) = content_index.index.get(&interface_name) {
             file_ids.extend(postings.iter().map(|p| p.file_id));
+        }
+
+        // Fuzzy DI: find implementations of I{ClassName} via base_type_index
+        // and add files containing those implementation class names
+        let impls = find_implementations_of_interface(def_idx, &interface_name);
+        for impl_lower in &impls {
+            if let Some(postings) = content_index.index.get(impl_lower) {
+                file_ids.extend(postings.iter().map(|p| p.file_id));
+            }
+        }
+        // Also find implementations of the class itself (if cls IS an interface)
+        let impls_of_cls = find_implementations_of_interface(def_idx, &cls_lower);
+        for impl_lower in &impls_of_cls {
+            if let Some(postings) = content_index.index.get(impl_lower) {
+                file_ids.extend(postings.iter().map(|p| p.file_id));
+            }
         }
 
         // Note: we intentionally do NOT expand pre-filter by base_types (interfaces).
@@ -683,6 +739,18 @@ fn build_caller_tree(
                             }
                         }
                     }
+                }
+                // Find implementations of the target class via base_type_index
+                // (if it's an interface, this finds concrete classes)
+                let impls = find_implementations_of_interface(def_idx, &pc_lower);
+                for impl_name in &impls {
+                    related.insert(impl_name.clone());
+                }
+                // Also find implementations of I{ClassName}
+                let iface_name = format!("i{}", pc_lower);
+                let impls_iface = find_implementations_of_interface(def_idx, &iface_name);
+                for impl_name in &impls_iface {
+                    related.insert(impl_name.clone());
                 }
                 // Also include the target class itself (it could be an interface)
                 related.insert(pc_lower);
@@ -920,6 +988,81 @@ fn build_callee_tree(
     callees
 }
 
+/// Check if `class_name` could be an implementation of `interface_name`.
+///
+/// Strategy (ordered by reliability):
+/// 1. Exact I-prefix convention: IFoo → Foo
+/// 2. Suffix-tolerant: strip "I" prefix from interface → stem; check if class_name
+///    contains the stem (case-insensitive). E.g., IDataModelService → stem "DataModelService"
+///    → matches "DataModelWebService" because it contains "DataModelService".
+///
+/// To reduce false positives, the stem must be at least 4 characters.
+fn is_implementation_of(class_name: &str, interface_name: &str) -> bool {
+    // Must start with "I" followed by uppercase
+    if !interface_name.starts_with('I') || interface_name.len() < 2 {
+        return false;
+    }
+    let second_char = interface_name.chars().nth(1).unwrap();
+    if !second_char.is_uppercase() {
+        return false;
+    }
+
+    let stem = &interface_name[1..]; // strip "I" prefix
+
+    // Exact match (existing convention)
+    if class_name.eq_ignore_ascii_case(stem) {
+        return true;
+    }
+
+    // Stem too short → skip fuzzy to avoid false positives
+    if stem.len() < 4 {
+        return false;
+    }
+
+    // Suffix-tolerant matching (case-insensitive):
+    let class_lower = class_name.to_lowercase();
+    let stem_lower = stem.to_lowercase();
+
+    // 1. class_name contains the entire stem as a contiguous substring
+    //    e.g., "MyDataModelServiceImpl" contains "datamodelservice"
+    if class_lower.contains(&stem_lower) {
+        return true;
+    }
+
+    // 2. Shared prefix covering at least half the stem length (and at least 4 chars)
+    //    e.g., "DataModelWebService" and "DataModelService" share prefix "datamodel" (9 chars)
+    //    9 * 2 >= 16 (stem len) → match. This handles cases where extra words are inserted
+    //    between stem parts, while avoiding false positives like "DataProcessor" matching
+    //    "IDataModelService" (prefix "data" = 4 chars, 4*2=8 < 16 → no match).
+    let common_prefix_len = class_lower.bytes()
+        .zip(stem_lower.bytes())
+        .take_while(|(a, b)| a == b)
+        .count();
+
+    common_prefix_len >= 4 && common_prefix_len * 2 >= stem_lower.len()
+}
+
+/// Find all classes that implement a given interface, using the base_type_index.
+/// Returns lowercased class names.
+fn find_implementations_of_interface(
+    def_idx: &DefinitionIndex,
+    interface_name_lower: &str,
+) -> Vec<String> {
+    let mut impls = Vec::new();
+    if let Some(impl_indices) = def_idx.base_type_index.get(interface_name_lower) {
+        for &ii in impl_indices {
+            if let Some(impl_def) = def_idx.definitions.get(ii as usize) {
+                if matches!(impl_def.kind,
+                    DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record)
+                {
+                    impls.push(impl_def.name.to_lowercase());
+                }
+            }
+        }
+    }
+    impls
+}
+
 /// Check if a class (by lowercased name) has generic parameters in its signature.
 /// Returns true if ANY class definition with that name has `<` in its signature.
 fn is_class_generic(def_idx: &DefinitionIndex, class_name_lower: &str) -> bool {
@@ -951,6 +1094,13 @@ pub(crate) fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex, call
     };
 
     let mut resolved: Vec<u32> = Vec::new();
+
+    // Skip matching for built-in types to avoid false positives
+    if let Some(ref rt) = call.receiver_type {
+        if BUILTIN_RECEIVER_TYPES.iter().any(|&b| b.eq_ignore_ascii_case(rt.as_str())) {
+            return Vec::new();
+        }
+    }
 
     for &di in candidates {
         let def = match def_idx.definitions.get(di as usize) {
@@ -1603,44 +1753,45 @@ mod tests {
 
     #[test]
     fn test_resolve_call_site_generic_arity_mismatch() {
-        // Scenario: new List<int>() should NOT resolve to a non-generic List class
-        // that happens to have the same name (e.g. ReportRenderingModel.List : DataRegion)
+        // Scenario: new DataList<int>() should NOT resolve to a non-generic DataList class
+        // that happens to have the same name (e.g. ReportRenderingModel.DataList : DataRegion)
+        // Note: uses "DataList" instead of "List" because "List" is on the built-in blocklist.
         let definitions = vec![
-            // idx 0: non-generic List class (user-defined, NOT System.Collections.Generic.List<T>)
+            // idx 0: non-generic DataList class (user-defined)
             DefinitionEntry {
-                file_id: 0, name: "List".to_string(), kind: DefinitionKind::Class,
+                file_id: 0, name: "DataList".to_string(), kind: DefinitionKind::Class,
                 line_start: 1, line_end: 50, parent: None,
-                signature: Some("internal sealed class List : DataRegion".to_string()),
+                signature: Some("internal sealed class DataList : DataRegion".to_string()),
                 modifiers: vec![], attributes: vec![], base_types: vec!["DataRegion".to_string()],
             },
-            // idx 1: constructor of non-generic List
+            // idx 1: constructor of non-generic DataList
             DefinitionEntry {
-                file_id: 0, name: "List".to_string(), kind: DefinitionKind::Constructor,
-                line_start: 10, line_end: 20, parent: Some("List".to_string()),
-                signature: Some("internal List(int, ReportProcessing.List, ListInstance, RenderingContext)".to_string()),
+                file_id: 0, name: "DataList".to_string(), kind: DefinitionKind::Constructor,
+                line_start: 10, line_end: 20, parent: Some("DataList".to_string()),
+                signature: Some("internal DataList(int, ReportProcessing.DataList, ListInstance, RenderingContext)".to_string()),
                 modifiers: vec![], attributes: vec![], base_types: vec![],
             },
         ];
 
         let def_idx = make_def_index(definitions, HashMap::new());
 
-        // Call site: new List<CatalogEntry>() — generic call
+        // Call site: new DataList<CatalogEntry>() — generic call
         let call_generic = CallSite {
-            method_name: "List".to_string(),
-            receiver_type: Some("List".to_string()),
+            method_name: "DataList".to_string(),
+            receiver_type: Some("DataList".to_string()),
             line: 252,
             receiver_is_generic: true, // <-- the key: call site had generics
         };
 
-        // Should NOT resolve because the only List class is non-generic
+        // Should NOT resolve because the only DataList class is non-generic
         let resolved = resolve_call_site(&call_generic, &def_idx, None);
         assert!(resolved.is_empty(),
-            "Generic call new List<CatalogEntry>() should NOT resolve to non-generic List class, got {:?}", resolved);
+            "Generic call new DataList<CatalogEntry>() should NOT resolve to non-generic DataList class, got {:?}", resolved);
 
-        // Call site: new List() — non-generic call
+        // Call site: new DataList() — non-generic call
         let call_non_generic = CallSite {
-            method_name: "List".to_string(),
-            receiver_type: Some("List".to_string()),
+            method_name: "DataList".to_string(),
+            receiver_type: Some("DataList".to_string()),
             line: 300,
             receiver_is_generic: false,
         };
@@ -1648,6 +1799,279 @@ mod tests {
         // SHOULD resolve — both non-generic
         let resolved2 = resolve_call_site(&call_non_generic, &def_idx, None);
         assert!(!resolved2.is_empty(),
-            "Non-generic call new List() SHOULD resolve to non-generic List class");
+            "Non-generic call new DataList() SHOULD resolve to non-generic DataList class");
+    }
+
+    // ─── Test 13: Built-in Promise.resolve() not matched to user Deferred.resolve() ──
+
+    #[test]
+    fn test_builtin_promise_resolve_not_matched() {
+        // Scenario: doWork() calls Promise.resolve(42).
+        // User has classes UserService.resolve() and Deferred.resolve().
+        // The built-in blocklist should prevent resolving Promise.resolve()
+        // to any user-defined class.
+        let definitions = vec![
+            class_def(0, "UserService", vec![]),                          // idx 0
+            method_def(0, "resolve", "UserService", 10, 20),             // idx 1
+            class_def(1, "Deferred", vec![]),                             // idx 2
+            method_def(1, "resolve", "Deferred", 5, 15),                 // idx 3
+            class_def(2, "Worker", vec![]),                               // idx 4
+            method_def(2, "doWork", "Worker", 1, 30),                    // idx 5
+        ];
+
+        let mut method_calls = HashMap::new();
+        // doWork calls Promise.resolve(42)
+        method_calls.insert(5u32, vec![
+            CallSite {
+                method_name: "resolve".to_string(),
+                receiver_type: Some("Promise".to_string()),
+                line: 10,
+                receiver_is_generic: false,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        // resolve_call_site with receiver_type = Promise should return empty
+        let call = CallSite {
+            method_name: "resolve".to_string(),
+            receiver_type: Some("Promise".to_string()),
+            line: 10,
+            receiver_is_generic: false,
+        };
+
+        let resolved = resolve_call_site(&call, &def_idx, Some("Worker"));
+        assert!(resolved.is_empty(),
+            "Promise.resolve() should NOT resolve to any user-defined class, got {:?}", resolved);
+    }
+
+    // ─── Test 14: Built-in Array.map() not matched to user MyCollection.map() ──
+
+    #[test]
+    fn test_builtin_array_map_not_matched() {
+        // Scenario: processItems() calls Array.map().
+        // User has MyCollection.map().
+        // The blocklist should prevent resolving Array.map() to MyCollection.map().
+        let definitions = vec![
+            class_def(0, "MyCollection", vec![]),                         // idx 0
+            method_def(0, "map", "MyCollection", 5, 15),                 // idx 1
+            class_def(1, "Processor", vec![]),                            // idx 2
+            method_def(1, "processItems", "Processor", 1, 20),           // idx 3
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(3u32, vec![
+            CallSite {
+                method_name: "map".to_string(),
+                receiver_type: Some("Array".to_string()),
+                line: 10,
+                receiver_is_generic: false,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        let call = CallSite {
+            method_name: "map".to_string(),
+            receiver_type: Some("Array".to_string()),
+            line: 10,
+            receiver_is_generic: false,
+        };
+
+        let resolved = resolve_call_site(&call, &def_idx, Some("Processor"));
+        assert!(resolved.is_empty(),
+            "Array.map() should NOT resolve to MyCollection.map(), got {:?}", resolved);
+    }
+
+    // ─── Test 15: Non-built-in type still matches normally ──
+
+    #[test]
+    fn test_non_builtin_type_still_matches() {
+        // Scenario: caller calls MyService.process().
+        // MyService is NOT a built-in type, so it should still resolve normally.
+        let definitions = vec![
+            class_def(0, "MyService", vec![]),                            // idx 0
+            method_def(0, "process", "MyService", 5, 15),                // idx 1
+            class_def(1, "Controller", vec![]),                           // idx 2
+            method_def(1, "handleRequest", "Controller", 1, 20),         // idx 3
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(3u32, vec![
+            CallSite {
+                method_name: "process".to_string(),
+                receiver_type: Some("MyService".to_string()),
+                line: 10,
+                receiver_is_generic: false,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        let call = CallSite {
+            method_name: "process".to_string(),
+            receiver_type: Some("MyService".to_string()),
+            line: 10,
+            receiver_is_generic: false,
+        };
+
+        let resolved = resolve_call_site(&call, &def_idx, Some("Controller"));
+        assert!(!resolved.is_empty(),
+            "MyService.process() SHOULD resolve (not a built-in type), got empty");
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(def_idx.definitions[resolved[0] as usize].parent.as_deref(), Some("MyService"));
+    }
+
+    // ─── Test 16: is_implementation_of — exact I-prefix convention ──
+
+    #[test]
+    fn test_is_implementation_of_exact_prefix() {
+        // IFooService → FooService (exact match after stripping I)
+        assert!(is_implementation_of("FooService", "IFooService"));
+        assert!(is_implementation_of("fooservice", "IFooService")); // case-insensitive
+        assert!(is_implementation_of("FOOSERVICE", "IFooService")); // case-insensitive
+    }
+
+    // ─── Test 17: is_implementation_of — suffix-tolerant ──
+
+    #[test]
+    fn test_is_implementation_of_suffix_tolerant() {
+        // IDataModelService → DataModelWebService (class contains the stem "DataModelService")
+        assert!(is_implementation_of("DataModelWebService", "IDataModelService"));
+        // stem "DataModelService" is contained in "MyDataModelServiceImpl"
+        assert!(is_implementation_of("MyDataModelServiceImpl", "IDataModelService"));
+    }
+
+    // ─── Test 18: is_implementation_of — no false positive for short stems ──
+
+    #[test]
+    fn test_is_implementation_of_short_stem_no_match() {
+        // IFoo → stem "Foo" (3 chars < 4 minimum) → no fuzzy match
+        assert!(!is_implementation_of("FooBar", "IFoo"));
+        // IFoo → "Foo" exact match should still work
+        assert!(is_implementation_of("Foo", "IFoo"));
+    }
+
+    // ─── Test 19: is_implementation_of — no false positive for unrelated classes ──
+
+    #[test]
+    fn test_is_implementation_of_no_false_positive() {
+        // IService → stem "Service" (7 chars, ≥ 4) but "UnrelatedRunner" does NOT contain "service"
+        assert!(!is_implementation_of("UnrelatedRunner", "IService"));
+        // Not an interface (doesn't start with I + uppercase)
+        assert!(!is_implementation_of("FooService", "fooService"));
+        assert!(!is_implementation_of("FooService", "invalidName"));
+        // "I" alone is not valid
+        assert!(!is_implementation_of("Foo", "I"));
+    }
+
+    // ─── Test 20: Fuzzy DI interface matching via verify_call_site_target ──
+
+    #[test]
+    fn test_verify_call_site_target_fuzzy_interface_match() {
+        // IDataModelService → DataModelWebService (suffix-tolerant)
+        // Caller calls svc.getData() with receiver_type = "IDataModelService"
+        // Target class is "DataModelWebService" — should match via fuzzy DI
+        let definitions = vec![
+            class_def(0, "SomeController", vec![]),                        // idx 0
+            method_def(0, "process", "SomeController", 20, 40),           // idx 1
+            class_def(1, "DataModelWebService", vec!["IDataModelService"]), // idx 2
+            method_def(1, "getData", "DataModelWebService", 10, 30),      // idx 3
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(1u32, vec![
+            CallSite {
+                method_name: "getData".to_string(),
+                receiver_type: Some("IDataModelService".to_string()),
+                line: 25,
+                receiver_is_generic: false,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        // receiver is IDataModelService, target is DataModelWebService
+        // Should match via fuzzy DI: stem "DataModelService" is contained in "DataModelWebService"
+        assert!(verify_call_site_target(&def_idx, 1, 25, "getData", Some("DataModelWebService")),
+            "IDataModelService → DataModelWebService should match via fuzzy DI");
+    }
+
+    // ─── Test 21: Fuzzy DI — no false positive for unrelated class ──
+
+    #[test]
+    fn test_fuzzy_di_no_false_positive() {
+        // IService → stem "Service", but "UnrelatedRunner" does NOT contain "Service"
+        // So receiver IService should NOT match target UnrelatedRunner
+        let definitions = vec![
+            class_def(0, "SomeController", vec![]),                     // idx 0
+            method_def(0, "process", "SomeController", 20, 40),        // idx 1
+            class_def(1, "UnrelatedRunner", vec![]),                    // idx 2
+            method_def(1, "run", "UnrelatedRunner", 10, 30),           // idx 3
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(1u32, vec![
+            CallSite {
+                method_name: "run".to_string(),
+                receiver_type: Some("IService".to_string()),
+                line: 25,
+                receiver_is_generic: false,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        // receiver is IService, target is UnrelatedRunner
+        // "UnrelatedRunner" does NOT contain "Service" → should NOT match
+        assert!(!verify_call_site_target(&def_idx, 1, 25, "run", Some("UnrelatedRunner")),
+            "IService → UnrelatedRunner should NOT match (no 'Service' in class name)");
+    }
+
+    // ─── Test 22: find_implementations_of_interface via base_type_index ──
+
+    #[test]
+    fn test_find_implementations_of_interface() {
+        let definitions = vec![
+            class_def(0, "DataModelWebService", vec!["IDataModelService"]), // idx 0
+            class_def(1, "AnotherService", vec!["IDataModelService"]),      // idx 1
+        ];
+
+        let mut def_idx = make_def_index(definitions, HashMap::new());
+        // Manually populate base_type_index
+        def_idx.base_type_index.insert(
+            "idatamodelservice".to_string(),
+            vec![0, 1],
+        );
+
+        let impls = find_implementations_of_interface(&def_idx, "idatamodelservice");
+        assert_eq!(impls.len(), 2);
+        assert!(impls.contains(&"datamodelwebservice".to_string()));
+        assert!(impls.contains(&"anotherservice".to_string()));
+    }
+
+    // ─── Test 23: resolve_call_site resolves via base_types (existing behavior preserved) ──
+
+    #[test]
+    fn test_resolve_call_site_via_base_types() {
+        // IDataModelService.getData() should resolve to DataModelWebService.getData()
+        // via base_types in the class definition
+        let definitions = vec![
+            class_def(0, "DataModelWebService", vec!["IDataModelService"]), // idx 0
+            method_def(0, "getData", "DataModelWebService", 10, 30),       // idx 1
+        ];
+
+        let def_idx = make_def_index(definitions, HashMap::new());
+
+        let call = CallSite {
+            method_name: "getData".to_string(),
+            receiver_type: Some("IDataModelService".to_string()),
+            line: 5,
+            receiver_is_generic: false,
+        };
+
+        let resolved = resolve_call_site(&call, &def_idx, None);
+        assert!(!resolved.is_empty(),
+            "IDataModelService.getData() should resolve to DataModelWebService.getData via base_types");
     }
 }

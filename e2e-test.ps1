@@ -98,6 +98,14 @@ Run-Test "T42b tips-query-budget"    "$Binary tips | Select-String 'Query budget
 #       Tests are adapted to use equivalent CLI commands (grep, fast, content-index).
 #       T61 number is already used by grep-substring-default, so invalid regex test uses T65.
 
+# Safety net: ensure content index exists before grep edge-case tests.
+# T54/T82 depend on a content index (grep returns exit 1 without one).
+# The index may be missing if: previous run cleaned up, binary was reinstalled,
+# or the script was partially re-run. This makes these tests self-contained.
+$ErrorActionPreference = "Continue"
+Invoke-Expression "$Binary content-index -d $TestDir -e $TestExt 2>&1" | Out-Null
+$ErrorActionPreference = "Stop"
+
 # T54: grep with non-existent term should return 0 matches gracefully (not crash)
 Run-Test "T54 grep-nonexistent-term" "$Binary grep ZZZNonExistentXYZ123 -d $TestDir -e $TestExt"
 

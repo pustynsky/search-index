@@ -1469,3 +1469,152 @@ fn test_ts_search_callers_di_interface_resolution() {
     // Note: If resolveInterfaces defaults to true, this should find callers.
     // If not, at minimum it should not error. The test validates the path works.
 }
+
+// ─── Part 16: Direction=down with explicitly typed local variables ────
+
+#[test]
+fn test_ts_direction_down_with_typed_local_variable() {
+    // This test verifies that direction=down resolves callees through
+    // explicitly typed local variables (const x: Foo = ...).
+    // Orchestrator.run() contains `const proc: DataProcessor = this.getProcessor()`
+    // followed by `proc.transform("hello")`. Because `proc` has explicit type
+    // `DataProcessor`, the call site has receiver_type = "DataProcessor",
+    // so direction=down from Orchestrator.run() should find DataProcessor.transform().
+
+    let mut content_idx = HashMap::new();
+    content_idx.insert("transform".to_string(), vec![
+        Posting { file_id: 0, lines: vec![3] },
+        Posting { file_id: 1, lines: vec![10] },
+    ]);
+    content_idx.insert("dataprocessor".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![9] },
+    ]);
+    content_idx.insert("orchestrator".to_string(), vec![
+        Posting { file_id: 1, lines: vec![7] },
+    ]);
+
+    let trigram = build_trigram_index(&content_idx);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec![
+            "src/DataProcessor.ts".to_string(),
+            "src/Orchestrator.ts".to_string(),
+        ],
+        index: content_idx, total_tokens: 100,
+        extensions: vec!["ts".to_string()],
+        file_token_counts: vec![50, 50],
+        trigram, trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        // 0: Class DataProcessor (file 0)
+        DefinitionEntry {
+            file_id: 0, name: "DataProcessor".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 6,
+            parent: None, signature: None,
+            modifiers: vec!["export".to_string()],
+            attributes: vec![], base_types: vec![],
+        },
+        // 1: Method transform (file 0, parent: DataProcessor)
+        DefinitionEntry {
+            file_id: 0, name: "transform".to_string(),
+            kind: DefinitionKind::Method, line_start: 2, line_end: 5,
+            parent: Some("DataProcessor".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        // 2: Class Orchestrator (file 1)
+        DefinitionEntry {
+            file_id: 1, name: "Orchestrator".to_string(),
+            kind: DefinitionKind::Class, line_start: 7, line_end: 16,
+            parent: None, signature: None,
+            modifiers: vec!["export".to_string()],
+            attributes: vec![], base_types: vec![],
+        },
+        // 3: Method run (file 1, parent: Orchestrator)
+        DefinitionEntry {
+            file_id: 1, name: "run".to_string(),
+            kind: DefinitionKind::Method, line_start: 8, line_end: 12,
+            parent: Some("Orchestrator".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        // 4: Method getProcessor (file 1, parent: Orchestrator)
+        DefinitionEntry {
+            file_id: 1, name: "getProcessor".to_string(),
+            kind: DefinitionKind::Method, line_start: 13, line_end: 15,
+            parent: Some("Orchestrator".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("src/DataProcessor.ts"), 0);
+    path_to_id.insert(PathBuf::from("src/Orchestrator.ts"), 1);
+
+    // Orchestrator.run() (idx 3) calls:
+    //   - getProcessor() on Orchestrator (this call)
+    //   - transform() on DataProcessor (via explicitly typed local: const proc: DataProcessor)
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(3, vec![
+        CallSite {
+            method_name: "getProcessor".to_string(),
+            receiver_type: Some("Orchestrator".to_string()),
+            line: 9,
+            receiver_is_generic: false,
+        },
+        CallSite {
+            method_name: "transform".to_string(),
+            receiver_type: Some("DataProcessor".to_string()),
+            line: 10,
+            receiver_is_generic: false,
+        },
+    ]);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["ts".to_string()],
+        files: vec!["src/DataProcessor.ts".to_string(), "src/Orchestrator.ts".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls,
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "ts".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // direction=down from Orchestrator.run() should find DataProcessor.transform()
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "run",
+        "class": "Orchestrator",
+        "direction": "down",
+        "depth": 1
+    }));
+    assert!(!result.is_error, "direction=down should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    assert!(!tree.is_empty(), "Call tree should not be empty — run() calls transform() and getProcessor()");
+
+    let callee_methods: Vec<&str> = tree.iter().filter_map(|n| n["method"].as_str()).collect();
+    assert!(callee_methods.contains(&"transform"),
+        "direction=down from Orchestrator.run() should find DataProcessor.transform() \
+         (resolved through explicit type annotation `const proc: DataProcessor`), got: {:?}",
+        callee_methods);
+}
