@@ -830,6 +830,209 @@ fn test_search_callers_ambiguity_warning_truncated() {
     // Warning should NOT list all 15 classes — check total length is reasonable
     assert!(warning.len() < 500, "Warning should be truncated, but was {} bytes", warning.len());
 }
+#[test]
+fn test_search_callers_ambiguity_warning_few_classes() {
+    // Create 3 classes each with a method named "Initialize" — within MAX_LISTED (10)
+    // When called without `class` param, should get a warning listing ALL 3 classes.
+    let num_classes = 3;
+    let mut content_idx: HashMap<String, Vec<Posting>> = HashMap::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut definitions: Vec<DefinitionEntry> = Vec::new();
+
+    let class_names = ["AlphaService", "BetaService", "GammaService"];
+    for (i, class_name) in class_names.iter().enumerate() {
+        let file_name = format!("C:\\src\\{}.cs", class_name);
+        files.push(file_name.clone());
+
+        definitions.push(DefinitionEntry {
+            file_id: i as u32, name: class_name.to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        });
+        definitions.push(DefinitionEntry {
+            file_id: i as u32, name: "Initialize".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some(class_name.to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        });
+
+        content_idx.entry("initialize".to_string()).or_default().push(
+            Posting { file_id: i as u32, lines: vec![10] }
+        );
+    }
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    for (i, f) in files.iter().enumerate() {
+        path_to_id.insert(PathBuf::from(f), i as u32);
+    }
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: files.clone(),
+        index: content_idx, total_tokens: 300,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50; num_classes],
+        trigram: TrigramIndex::default(), trigram_dirty: false,
+        forward: None, path_to_id: None,
+    };
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files,
+        definitions,
+        name_index, kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index, path_to_id,
+        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(),
+        server_ext: "cs".to_string(),
+        metrics: false,
+        index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // No `class` param → should produce a warning listing all 3 classes
+    let result = dispatch_tool(&ctx, "search_callers", &json!({ "method": "Initialize" }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let warning = output["warning"].as_str().expect("should have warning when method is in multiple classes");
+
+    // Warning should mention total count (3)
+    assert!(warning.contains("3 classes"), "Warning should mention 3 classes, got: {}", warning);
+    // Warning should list all 3 class names (sorted alphabetically)
+    assert!(warning.contains("AlphaService"), "Warning should list AlphaService, got: {}", warning);
+    assert!(warning.contains("BetaService"), "Warning should list BetaService, got: {}", warning);
+    assert!(warning.contains("GammaService"), "Warning should list GammaService, got: {}", warning);
+    // Warning should NOT say "showing first" (since ≤10 classes)
+    assert!(!warning.contains("showing first"), "Warning should NOT be truncated for ≤10 classes, got: {}", warning);
+    // Warning should suggest using `class` parameter
+    assert!(warning.contains("class"), "Warning should suggest using 'class' parameter, got: {}", warning);
+}
+
+#[test]
+fn test_search_callers_no_ambiguity_warning_with_class_param() {
+    // Same setup as above (3 classes with "Initialize") but WITH `class` param → no warning.
+    let mut content_idx: HashMap<String, Vec<Posting>> = HashMap::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut definitions: Vec<DefinitionEntry> = Vec::new();
+
+    let class_names = ["AlphaService", "BetaService", "GammaService"];
+    for (i, class_name) in class_names.iter().enumerate() {
+        let file_name = format!("C:\\src\\{}.cs", class_name);
+        files.push(file_name.clone());
+
+        definitions.push(DefinitionEntry {
+            file_id: i as u32, name: class_name.to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        });
+        definitions.push(DefinitionEntry {
+            file_id: i as u32, name: "Initialize".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some(class_name.to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        });
+
+        content_idx.entry("initialize".to_string()).or_default().push(
+            Posting { file_id: i as u32, lines: vec![10] }
+        );
+        content_idx.entry(class_name.to_lowercase()).or_default().push(
+            Posting { file_id: i as u32, lines: vec![1, 10] }
+        );
+    }
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    for (i, f) in files.iter().enumerate() {
+        path_to_id.insert(PathBuf::from(f), i as u32);
+    }
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: files.clone(),
+        index: content_idx, total_tokens: 300,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50; 3],
+        trigram: TrigramIndex::default(), trigram_dirty: false,
+        forward: None, path_to_id: None,
+    };
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files,
+        definitions,
+        name_index, kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index, path_to_id,
+        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(),
+        server_ext: "cs".to_string(),
+        metrics: false,
+        index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // WITH `class` param → should NOT produce a warning
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "Initialize",
+        "class": "AlphaService"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output.get("warning").is_none(),
+        "No warning should be emitted when 'class' parameter is provided. Got: {:?}",
+        output.get("warning"));
+}
+
+#[test]
+fn test_search_callers_no_ambiguity_warning_single_class() {
+    // Method exists in only 1 class → no warning even without `class` param.
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "QueryInternalAsync"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output.get("warning").is_none(),
+        "No warning should be emitted when method exists in only 1 class. Got: {:?}",
+        output.get("warning"));
+}
+
 
 #[test]
 fn test_search_callers_exclude_dir_and_file() {
@@ -1902,4 +2105,290 @@ fn test_search_definitions_contains_line_mixed_separators() {
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = output["containingDefinitions"].as_array().unwrap();
     assert!(!defs.is_empty(), "containsLine with mixed separators should find definitions");
+}
+
+// ─── search_callers cycle detection (up direction) ───────────────────
+
+#[test]
+fn test_search_callers_cycle_detection() {
+    // Regression test: A recursive call graph (A calls B, B calls A) must NOT
+    // cause infinite recursion in `search_callers` direction="up".
+    //
+    // Setup:
+    //   ServiceA.MethodA() calls ServiceB.MethodB()
+    //   ServiceB.MethodB() calls ServiceA.MethodA()
+    //
+    // Searching callers of MethodA (up) should find MethodB as a caller,
+    // then when recursing to find callers of MethodB it should find MethodA
+    // but the visited set must stop the recursion.
+
+    let mut content_idx = HashMap::new();
+    // MethodA token appears in file 0 (definition) and file 1 (call site in MethodB)
+    content_idx.insert("methoda".to_string(), vec![
+        Posting { file_id: 0, lines: vec![10] },  // definition in ServiceA
+        Posting { file_id: 1, lines: vec![20] },  // call site in ServiceB.MethodB
+    ]);
+    // MethodB token appears in file 1 (definition) and file 0 (call site in MethodA)
+    content_idx.insert("methodb".to_string(), vec![
+        Posting { file_id: 1, lines: vec![10] },  // definition in ServiceB
+        Posting { file_id: 0, lines: vec![20] },  // call site in ServiceA.MethodA
+    ]);
+    // Class tokens for parent filtering
+    content_idx.insert("servicea".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![20] },  // ServiceB references ServiceA
+    ]);
+    content_idx.insert("serviceb".to_string(), vec![
+        Posting { file_id: 1, lines: vec![1] },
+        Posting { file_id: 0, lines: vec![20] },  // ServiceA references ServiceB
+    ]);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec![
+            "C:\\src\\ServiceA.cs".to_string(),
+            "C:\\src\\ServiceB.cs".to_string(),
+        ],
+        index: content_idx, total_tokens: 200,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![100, 100],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "ServiceA".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "MethodA".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 30,
+            parent: Some("ServiceA".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "ServiceB".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "MethodB".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 30,
+            parent: Some("ServiceB".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\ServiceA.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\ServiceB.cs"), 1);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["C:\\src\\ServiceA.cs".to_string(), "C:\\src\\ServiceB.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // direction=up (default) with depth=5 — cycle should be stopped by visited set
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "MethodA",
+        "class": "ServiceA",
+        "depth": 5,
+        "maxTotalNodes": 50
+    }));
+    assert!(!result.is_error,
+        "Cycle in call graph (up direction) should not cause error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Should complete and have some nodes (MethodB calls MethodA, but recursing
+    // into callers of MethodB would find MethodA again — blocked by visited set)
+    let tree = output["callTree"].as_array().unwrap();
+    let total_nodes = output["summary"]["totalNodes"].as_u64().unwrap();
+    assert!(total_nodes > 0,
+        "Should find at least one caller before cycle is detected");
+    // The cycle means we can't recurse forever — total nodes should be bounded
+    assert!(total_nodes <= 10,
+        "Cycle detection should prevent runaway recursion, got {} nodes", total_nodes);
+
+    // First level should find MethodB as a caller of MethodA
+    if !tree.is_empty() {
+        let caller_names: Vec<&str> = tree.iter().filter_map(|n| n["method"].as_str()).collect();
+        assert!(caller_names.contains(&"MethodB"),
+            "MethodA should be called by MethodB. Got callers: {:?}", caller_names);
+    }
+
+    // Verify nodesVisited is reported (shows the visited set was used)
+    assert!(output["summary"]["nodesVisited"].as_u64().is_some(),
+        "Summary should include nodesVisited count");
+}
+
+#[test]
+fn test_search_callers_ext_filter_comma_split() {
+    // Setup: DataService.cs defines ProcessData; callers exist in both .cs and .txt files.
+    // The ext parameter should filter caller files by extension.
+    let mut content_idx = HashMap::new();
+    content_idx.insert("processdata".to_string(), vec![
+        Posting { file_id: 0, lines: vec![20] },   // definition site
+        Posting { file_id: 1, lines: vec![15] },   // caller in .cs file
+        Posting { file_id: 2, lines: vec![10] },   // caller in .txt file
+    ]);
+    content_idx.insert("dataservice".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![5, 15] },
+        Posting { file_id: 2, lines: vec![3, 10] },
+    ]);
+    content_idx.insert("cscontroller".to_string(), vec![
+        Posting { file_id: 1, lines: vec![1] },
+    ]);
+    content_idx.insert("scriptrunner".to_string(), vec![
+        Posting { file_id: 2, lines: vec![1] },
+    ]);
+
+    let trigram = build_trigram_index(&content_idx);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec![
+            "C:\\src\\DataService.cs".to_string(),
+            "C:\\src\\CsController.cs".to_string(),
+            "C:\\src\\script.txt".to_string(),
+        ],
+        index: content_idx, total_tokens: 200,
+        extensions: vec!["cs".to_string(), "txt".to_string()],
+        file_token_counts: vec![80, 60, 60],
+        trigram, trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "DataService".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "ProcessData".to_string(),
+            kind: DefinitionKind::Method, line_start: 18, line_end: 30,
+            parent: Some("DataService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "CsController".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 40,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "HandleRequest".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 25,
+            parent: Some("CsController".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 2, name: "ScriptRunner".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 30,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 2, name: "RunScript".to_string(),
+            kind: DefinitionKind::Method, line_start: 5, line_end: 20,
+            parent: Some("ScriptRunner".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\DataService.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\CsController.cs"), 1);
+    path_to_id.insert(PathBuf::from("C:\\src\\script.txt"), 2);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string(), "txt".to_string()],
+        files: vec![
+            "C:\\src\\DataService.cs".to_string(),
+            "C:\\src\\CsController.cs".to_string(),
+            "C:\\src\\script.txt".to_string(),
+        ],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs,txt".to_string(),
+        metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // ── Case 1: ext="cs" → only .cs callers ──────────────────────────
+    let result_cs = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "ProcessData",
+        "class": "DataService",
+        "depth": 1,
+        "ext": "cs"
+    }));
+    assert!(!result_cs.is_error, "search_callers ext=cs should not error: {}", result_cs.content[0].text);
+    let output_cs: Value = serde_json::from_str(&result_cs.content[0].text).unwrap();
+    let tree_cs = output_cs["callTree"].as_array().unwrap();
+    assert!(!tree_cs.is_empty(), "ext=cs should find at least one caller from .cs files");
+    for node in tree_cs {
+        let file = node["file"].as_str().unwrap();
+        assert!(file.ends_with(".cs"),
+            "ext=cs should only return .cs callers, got file: {}", file);
+    }
+    // Verify .txt caller is NOT present
+    let has_txt = tree_cs.iter().any(|n| n["file"].as_str().unwrap().ends_with(".txt"));
+    assert!(!has_txt, "ext=cs should NOT include .txt callers");
+
+    // ── Case 2: ext="cs,txt" → callers from both extensions ─────────
+    let result_both = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "ProcessData",
+        "class": "DataService",
+        "depth": 1,
+        "ext": "cs,txt"
+    }));
+    assert!(!result_both.is_error, "search_callers ext=cs,txt should not error: {}", result_both.content[0].text);
+    let output_both: Value = serde_json::from_str(&result_both.content[0].text).unwrap();
+    let tree_both = output_both["callTree"].as_array().unwrap();
+
+    let caller_files: Vec<&str> = tree_both.iter()
+        .filter_map(|n| n["file"].as_str())
+        .collect();
+    let has_cs = caller_files.iter().any(|f| f.ends_with(".cs"));
+    let has_txt_both = caller_files.iter().any(|f| f.ends_with(".txt"));
+    assert!(has_cs, "ext=cs,txt should include .cs callers. Got: {:?}", caller_files);
+    assert!(has_txt_both, "ext=cs,txt should include .txt callers. Got: {:?}", caller_files);
 }

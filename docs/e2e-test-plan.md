@@ -3074,3 +3074,192 @@ and returns build metrics.
 - Error message indicates the directory does not exist or is invalid
 
 **Unit test:** [`test_search_reindex_invalid_directory`](../src/mcp/handlers/handlers_tests.rs)
+
+
+---
+
+#### T87: `search_definitions` — Audit mode with `.spec.ts` files (0 definitions expected)
+
+**Tool:** `search_definitions` (audit mode)
+
+**Scenario:** In TypeScript projects, `.spec.ts` files typically contain `describe()` and `it()`
+blocks which are function *calls*, not syntactic definitions (function declarations, class
+declarations, etc.). When running `search_definitions` with `audit: true`, these files are
+expected to appear in the audit report with 0 definitions. This is **by-design behavior**, not
+a bug or a parsing failure.
+
+**Expected:**
+
+- `.spec.ts` files correctly reported with 0 definitions in the `filesWithoutDefinitions` count
+- `describe` and `it` are NOT misclassified as `function` definitions — they are call expressions
+- `suspiciousFiles` may include large `.spec.ts` files (>500 bytes with 0 definitions), but this
+  is expected and not an indication of a parser bug
+- Setting `auditMinBytes` higher (e.g., 10000) can filter out small spec files from suspicious list
+
+**Source:** PBIClients E2E report T49
+
+**Note:** This is a documentation-only scenario clarifying expected behavior. No code fix needed.
+
+---
+
+#### T88: `search_reindex` / `search_reindex_definitions` — Invalid or outside directory
+
+**Tool:** `search_reindex`, `search_reindex_definitions`
+
+**Scenario:** Calling `search_reindex` or `search_reindex_definitions` with a `dir` parameter
+that either doesn't exist or is outside the allowed `--dir` server scope should return a
+descriptive error, not crash or silently succeed.
+
+**Test — non-existent directory:**
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_reindex","arguments":{"dir":"C:\\nonexistent\\path\\xyz"}}}
+```
+
+**Expected:**
+
+- Response is an error (`isError: true`)
+- Error message indicates directory does not exist or is outside server scope
+- Server does NOT crash or hang
+
+**Test — directory outside server `--dir`:**
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_reindex_definitions","arguments":{"dir":"C:\\Windows\\System32"}}}
+```
+
+**Expected:**
+
+- Response is an error (`isError: true`)
+- Error message references `--dir` / server directory restriction
+- No filesystem operations performed outside allowed scope
+
+**Validates:** Error handling for reindex tools with invalid/out-of-scope directories.
+Security boundary enforcement consistent with `search_grep` and `search_find` directory validation.
+
+**Source:** Shared repo T80
+
+**Unit test:** [`test_search_reindex_invalid_directory`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+### Parser-Level Unit Tests
+
+#### T89: TypeScript `const enum` parsing
+
+**Parser:** TypeScript (tree-sitter)
+
+**Scenario:** TypeScript `const enum` declarations (e.g., `const enum Direction { Up, Down }`)
+are correctly parsed and indexed as `enum` definitions with `enumMember` children. The `const`
+modifier does not prevent the enum from being extracted.
+
+**Expected:**
+
+- `const enum` parsed as `kind: "enum"`
+- Individual members parsed as `kind: "enumMember"` with parent set to the enum name
+- Signatures include `const` modifier
+
+**Unit test:** [`test_parse_ts_const_enum`](../src/definitions/definitions_tests_typescript.rs)
+
+**Source:** PBIClients T35
+
+---
+
+### search_callers — Additional Unit Tests
+
+#### T90: `search_callers` — Cycle detection (direction=up)
+
+**Tool:** `search_callers`
+
+**Scenario:** When tracing callers (`direction: "up"`) through a circular call graph
+(A calls B, B calls A), the search completes without infinite loop. This complements T84
+which covers cycle detection in the `down` direction.
+
+**Expected:**
+
+- Search completes in finite time
+- No infinite recursion or stack overflow
+- Call tree represents the cycle without duplicating nodes indefinitely
+- `summary.totalNodes` is bounded
+
+**Unit test:** [`test_search_callers_cycle_detection`](../src/mcp/handlers/handlers_tests.rs)
+
+**Source:** Shared T78
+
+---
+
+#### T91: `search_callers` — Comma-split `ext` filter
+
+**Tool:** `search_callers`
+
+**Scenario:** When the server is started with `--ext cs,ts` and the `search_callers` tool is
+called with `ext: "cs"`, the ext filter is correctly parsed and applied. Previously, the ext
+filter compared against the entire comma-separated string instead of splitting on commas first.
+
+**Expected:**
+
+- `ext: "cs"` correctly filters to only `.cs` files in the call tree
+- `ext: "ts"` correctly filters to only `.ts` files
+- No false negatives from comparing `"cs"` against `"cs,ts"` as a single string
+
+**Unit test:** [`test_search_callers_ext_filter_comma_split`](../src/mcp/handlers/handlers_tests.rs)
+
+**Source:** Shared T68
+
+---
+
+#### T92: Directory validation — Security boundary tests (4 tests)
+
+**Tool:** `validate_search_dir()` utility function
+
+**Scenario:** The `validate_search_dir` function enforces that user-provided `dir` parameters
+cannot escape the server's `--dir` scope. Four boundary cases are validated:
+
+1. **Subdirectory accepted** — `dir: "src/mcp"` when server started with `--dir .` → allowed
+2. **Outside directory rejected** — `dir: "C:\Windows"` when server started with `--dir .` → error
+3. **Parent traversal rejected** — `dir: "../other-repo"` → error
+4. **Exact match accepted** — `dir` equals server `--dir` exactly → allowed
+
+**Expected:**
+
+- Subdirectories within `--dir`: `Ok(resolved_path)`
+- Directories outside `--dir`: `Err` with descriptive error message
+- Path traversal attempts: `Err` with descriptive error message
+- Exact `--dir` match: `Ok(path)`
+
+**Unit tests:**
+- [`test_validate_search_dir_subdirectory`](../src/mcp/handlers/handlers_tests.rs)
+- [`test_validate_search_dir_outside_rejects`](../src/mcp/handlers/handlers_tests.rs)
+- [`test_validate_search_dir_parent_traversal`](../src/mcp/handlers/handlers_tests.rs)
+- [`test_validate_search_dir_exact_match`](../src/mcp/handlers/handlers_tests.rs)
+
+**Source:** Shared T79/T80
+
+---
+
+#### T93: `search_callers` — Ambiguity warning variants (3 tests)
+
+**Tool:** `search_callers`
+
+**Scenario:** When `search_callers` is called without a `class` parameter and the method name
+matches definitions in multiple classes, the response includes a warning. Three variants are tested:
+
+1. **No ambiguity** — method exists in only 1 class → no warning
+2. **Ambiguous (few classes)** — method exists in 2-3 classes → warning lists all class names
+3. **Truncated warning** — method exists in 10+ classes → warning lists at most 10 class names
+   followed by "…" to prevent multi-KB warning strings (fixes PBIClients T55 regression where
+   `ngOnInit` in 1899 classes produced ~56KB warnings)
+
+**Expected:**
+
+- Single-class: no `warning` field in response
+- Few classes: `warning` contains all class names, advises using `class` parameter
+- Many classes: `warning` truncated to ~10 class names + "…", mentions total count
+- Warning length stays under ~500 bytes regardless of class count
+
+**Unit tests:**
+- [`test_search_callers_ambiguity_warning_none`](../src/mcp/handlers/handlers_tests.rs)
+- [`test_search_callers_ambiguity_warning_few_classes`](../src/mcp/handlers/handlers_tests.rs)
+- [`test_search_callers_ambiguity_warning_truncated`](../src/mcp/handlers/handlers_tests.rs)
+
+**Source:** PBIClients T55
