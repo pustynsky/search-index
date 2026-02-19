@@ -233,7 +233,7 @@ fn extract_invocation(
     match expr.kind() {
         "identifier" => {
             let method_name = node_text(expr, source).to_string();
-            Some(CallSite { method_name, receiver_type: None, line })
+            Some(CallSite { method_name, receiver_type: None, line, receiver_is_generic: false })
         }
         "member_access_expression" => {
             extract_member_access_call(expr, source, class_name, field_types, base_types, line)
@@ -246,7 +246,7 @@ fn extract_invocation(
                 .or_else(|| expr.child(0));
             let method_name = name_node.map(|n| node_text(n, source)).unwrap_or("");
             if !method_name.is_empty() {
-                Some(CallSite { method_name: method_name.to_string(), receiver_type: None, line })
+                Some(CallSite { method_name: method_name.to_string(), receiver_type: None, line, receiver_is_generic: false })
             } else {
                 None
             }
@@ -270,7 +270,7 @@ fn extract_member_access_call(
         .or_else(|| node.child(0))?;
     let receiver_type = resolve_receiver_type(receiver_node, source, class_name, field_types, base_types);
 
-    Some(CallSite { method_name, receiver_type, line })
+    Some(CallSite { method_name, receiver_type, line, receiver_is_generic: false })
 }
 
 fn extract_conditional_access_call(
@@ -299,7 +299,7 @@ fn extract_conditional_access_call(
 
     let receiver_type = resolve_receiver_type(receiver_node, source, class_name, field_types, base_types);
 
-    Some(CallSite { method_name, receiver_type, line })
+    Some(CallSite { method_name, receiver_type, line, receiver_is_generic: false })
 }
 
 fn extract_object_creation(
@@ -308,6 +308,7 @@ fn extract_object_creation(
 ) -> Option<CallSite> {
     let type_node = find_child_by_field(node, "type")?;
     let type_text = node_text(type_node, source);
+    let is_generic = type_text.contains('<');
     let type_name = type_text.split('<').next().unwrap_or(type_text).trim();
 
     if type_name.is_empty() { return None; }
@@ -316,6 +317,7 @@ fn extract_object_creation(
         method_name: type_name.to_string(),
         receiver_type: Some(type_name.to_string()),
         line: node.start_position().row as u32 + 1,
+        receiver_is_generic: is_generic,
     })
 }
 
@@ -408,7 +410,13 @@ fn walk_csharp_node_collecting<'a>(
         }
         "property_declaration" => {
             if let Some(def) = extract_csharp_property_def(node, source, file_id, parent_name) {
+                let idx = defs.len();
                 defs.push(def);
+                // Expression body properties (e.g. `public string Name => expr;`)
+                // have an arrow_expression_clause that may contain call sites.
+                if find_child_by_kind(node, "arrow_expression_clause").is_some() {
+                    method_nodes.push((idx, node));
+                }
                 return;
             }
         }

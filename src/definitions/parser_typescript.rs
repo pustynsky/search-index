@@ -1305,6 +1305,7 @@ fn extract_ts_call(
                 method_name,
                 receiver_type: None,
                 line,
+                receiver_is_generic: false,
             })
         }
         "member_expression" => {
@@ -1333,6 +1334,7 @@ fn extract_ts_member_call(
         method_name,
         receiver_type,
         line,
+        receiver_is_generic: false,
     })
 }
 
@@ -1404,6 +1406,21 @@ fn extract_ts_new_expression(node: tree_sitter::Node, source: &str) -> Option<Ca
     })?;
 
     let type_text = node_text(type_node, source);
+    // Check for generics BEFORE stripping: new Map<K,V>() → is_generic = true
+    // Also check the full new_expression text for type_arguments child node
+    let is_generic = type_text.contains('<') || {
+        // tree-sitter may separate generics into a type_arguments child node
+        let mut found = false;
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                if child.kind() == "type_arguments" {
+                    found = true;
+                    break;
+                }
+            }
+        }
+        found
+    };
     let type_name = type_text.split('<').next().unwrap_or(type_text).trim();
 
     if type_name.is_empty() {
@@ -1414,5 +1431,6 @@ fn extract_ts_new_expression(node: tree_sitter::Node, source: &str) -> Option<Ca
         method_name: type_name.to_string(),
         receiver_type: Some(type_name.to_string()),
         line: node.start_position().row as u32 + 1,
+        receiver_is_generic: is_generic,
     })
 }

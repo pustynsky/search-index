@@ -621,6 +621,309 @@ catch {
 }
 
 
+# --- T-FIX3-EXPR-BODY: C# expression body property call sites ---
+Write-Host -NoNewline "  T-FIX3-EXPR-BODY callers-csharp-expression-body ... "
+$total++
+try {
+    $exprBodyDir = Join-Path $env:TEMP "search_e2e_expr_body_$PID"
+    if (Test-Path $exprBodyDir) { Remove-Item -Recurse -Force $exprBodyDir }
+    New-Item -ItemType Directory -Path $exprBodyDir | Out-Null
+
+    # Create NameProvider class with GetName() method
+    $nameProviderCs = @"
+namespace TestApp
+{
+    public class NameProvider
+    {
+        public string GetName() => "test";
+    }
+}
+"@
+    Set-Content -Path (Join-Path $exprBodyDir "NameProvider.cs") -Value $nameProviderCs
+
+    # Create Consumer with expression body property calling GetName()
+    $consumerCs = @"
+namespace TestApp
+{
+    public class Consumer
+    {
+        private NameProvider _provider;
+        public string DisplayName => _provider.GetName();
+    }
+}
+"@
+    Set-Content -Path (Join-Path $exprBodyDir "Consumer.cs") -Value $consumerCs
+
+    # Build content-index and def-index
+    $ErrorActionPreference = "Continue"
+    & $searchBin content-index -d $exprBodyDir -e cs 2>&1 | Out-Null
+    & $searchBin def-index -d $exprBodyDir -e cs 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+
+    # Query search_callers direction=up for NameProvider.GetName
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"GetName","class":"NameProvider","direction":"up","depth":1}}}'
+    ) -join "`n"
+
+    $ErrorActionPreference = "Continue"
+    $output = ($msgs | & $searchBin serve --dir $exprBodyDir --ext cs --definitions 2>$null) | Out-String
+    $ErrorActionPreference = "Stop"
+
+    # Extract the JSON-RPC response (id=5)
+    $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+    if ($jsonLine) {
+        # Consumer.DisplayName (expression body property) should appear as a caller
+        if ($jsonLine -match 'DisplayName') {
+            Write-Host "OK" -ForegroundColor Green
+            $passed++
+        }
+        else {
+            Write-Host "FAILED (DisplayName not found in callers - expression body property not parsed)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $failed++
+        }
+    }
+    else {
+        Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
+        Write-Host "    output: $output" -ForegroundColor Yellow
+        $failed++
+    }
+
+    # Cleanup
+    $ErrorActionPreference = "Continue"
+    & $searchBin cleanup --dir $exprBodyDir 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $exprBodyDir -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+    if (Test-Path $exprBodyDir) {
+        $ErrorActionPreference = "Continue"
+        & $searchBin cleanup --dir $exprBodyDir 2>&1 | Out-Null
+        $ErrorActionPreference = "Stop"
+        Remove-Item -Recurse -Force $exprBodyDir -ErrorAction SilentlyContinue
+    }
+}
+
+# --- T-FIX3-VERIFY: No false positives from missing call-site data (bypass #2 closed) ---
+Write-Host -NoNewline "  T-FIX3-VERIFY callers-no-false-positives-missing-data ... "
+$total++
+try {
+    $verifyDir = Join-Path $env:TEMP "search_e2e_verify_$PID"
+    if (Test-Path $verifyDir) { Remove-Item -Recurse -Force $verifyDir }
+    New-Item -ItemType Directory -Path $verifyDir | Out-Null
+
+    # Create DataService class with Process() method
+    $serviceCs = @"
+namespace TestApp
+{
+    public class DataService
+    {
+        public void Process() { }
+    }
+}
+"@
+    Set-Content -Path (Join-Path $verifyDir "DataService.cs") -Value $serviceCs
+
+    # Real caller: genuinely calls _service.Process()
+    $realCallerCs = @"
+namespace TestApp
+{
+    public class RealCaller
+    {
+        private DataService _service;
+        public void Execute()
+        {
+            _service.Process();
+        }
+    }
+}
+"@
+    Set-Content -Path (Join-Path $verifyDir "RealCaller.cs") -Value $realCallerCs
+
+    # False caller: mentions "Process" in a string but has no actual call to DataService.Process()
+    $falseCallerCs = @"
+namespace TestApp
+{
+    public class FalseCaller
+    {
+        public void DoWork()
+        {
+            var msg = "We need to Process the data";
+            System.Console.WriteLine(msg);
+        }
+    }
+}
+"@
+    Set-Content -Path (Join-Path $verifyDir "FalseCaller.cs") -Value $falseCallerCs
+
+    # Build content-index and def-index
+    $ErrorActionPreference = "Continue"
+    & $searchBin content-index -d $verifyDir -e cs 2>&1 | Out-Null
+    & $searchBin def-index -d $verifyDir -e cs 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+
+    # Query search_callers direction=up for DataService.Process
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Process","class":"DataService","direction":"up","depth":1}}}'
+    ) -join "`n"
+
+    $ErrorActionPreference = "Continue"
+    $output = ($msgs | & $searchBin serve --dir $verifyDir --ext cs --definitions 2>$null) | Out-String
+    $ErrorActionPreference = "Stop"
+
+    # Extract the JSON-RPC response (id=5)
+    $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+    $testPassed = $true
+    if ($jsonLine) {
+        # GOOD: RealCaller should appear (has actual call site)
+        if ($jsonLine -notmatch 'RealCaller') {
+            Write-Host "FAILED (RealCaller not found in callers)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $testPassed = $false
+        }
+        # BAD: FalseCaller should NOT appear (no call-site data for DataService.Process)
+        if ($jsonLine -match 'FalseCaller') {
+            Write-Host "FAILED (FalseCaller should be filtered out - no call-site data)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $testPassed = $false
+        }
+        if ($testPassed) {
+            Write-Host "OK" -ForegroundColor Green
+            $passed++
+        }
+        else {
+            $failed++
+        }
+    }
+    else {
+        Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
+        Write-Host "    output: $output" -ForegroundColor Yellow
+        $failed++
+    }
+
+    # Cleanup
+    $ErrorActionPreference = "Continue"
+    & $searchBin cleanup --dir $verifyDir 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $verifyDir -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+    if (Test-Path $verifyDir) {
+        $ErrorActionPreference = "Continue"
+        & $searchBin cleanup --dir $verifyDir 2>&1 | Out-Null
+        $ErrorActionPreference = "Stop"
+        Remove-Item -Recurse -Force $verifyDir -ErrorAction SilentlyContinue
+    }
+}
+
+# --- T-FIX3-LAMBDA: Lambda calls in arguments captured (C#) ---
+Write-Host -NoNewline "  T-FIX3-LAMBDA callers-csharp-lambda-in-args ... "
+$total++
+try {
+    $lambdaDir = Join-Path $env:TEMP "search_e2e_lambda_$PID"
+    if (Test-Path $lambdaDir) { Remove-Item -Recurse -Force $lambdaDir }
+    New-Item -ItemType Directory -Path $lambdaDir | Out-Null
+
+    # Create Validator class with Validate() method
+    $validatorCs = @"
+using System;
+namespace TestApp
+{
+    public class Validator
+    {
+        public bool Validate(string s)
+        {
+            return s.Length > 0;
+        }
+    }
+}
+"@
+    Set-Content -Path (Join-Path $lambdaDir "Validator.cs") -Value $validatorCs
+
+    # Create Processor that calls Validate() inside a lambda argument
+    $processorCs = @"
+using System;
+using System.Collections.Generic;
+namespace TestApp
+{
+    public class Processor
+    {
+        private Validator _validator;
+        public void ProcessAll(List<string> items)
+        {
+            items.ForEach(x => _validator.Validate(x));
+        }
+    }
+}
+"@
+    Set-Content -Path (Join-Path $lambdaDir "Processor.cs") -Value $processorCs
+
+    # Build content-index and def-index
+    $ErrorActionPreference = "Continue"
+    & $searchBin content-index -d $lambdaDir -e cs 2>&1 | Out-Null
+    & $searchBin def-index -d $lambdaDir -e cs 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+
+    # Query search_callers direction=up for Validator.Validate
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Validate","class":"Validator","direction":"up","depth":1}}}'
+    ) -join "`n"
+
+    $ErrorActionPreference = "Continue"
+    $output = ($msgs | & $searchBin serve --dir $lambdaDir --ext cs --definitions 2>$null) | Out-String
+    $ErrorActionPreference = "Stop"
+
+    # Extract the JSON-RPC response (id=5)
+    $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+    if ($jsonLine) {
+        # Processor.ProcessAll should appear as a caller (lambda call inside ForEach)
+        if ($jsonLine -match 'ProcessAll') {
+            Write-Host "OK" -ForegroundColor Green
+            $passed++
+        }
+        else {
+            Write-Host "FAILED (ProcessAll not found in callers - lambda call site not captured)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $failed++
+        }
+    }
+    else {
+        Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
+        Write-Host "    output: $output" -ForegroundColor Yellow
+        $failed++
+    }
+
+    # Cleanup
+    $ErrorActionPreference = "Continue"
+    & $searchBin cleanup --dir $lambdaDir 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $lambdaDir -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+    if (Test-Path $lambdaDir) {
+        $ErrorActionPreference = "Continue"
+        & $searchBin cleanup --dir $lambdaDir 2>&1 | Out-Null
+        $ErrorActionPreference = "Stop"
+        Remove-Item -Recurse -Force $lambdaDir -ErrorAction SilentlyContinue
+    }
+}
+
+# Note: T-FIX3-PREFILTER (base types removed from pre-filter) and T-FIX3-FIND-CONTAINING
+# (find_containing_method returns di directly) are internal optimizations with no CLI-observable
+# differences. They are covered by unit tests in handlers_tests_csharp.rs.
+
 # T25-T52: serve (MCP)
 Write-Host "  T25-T52: MCP serve tests - run manually (see e2e-test-plan.md)"
 

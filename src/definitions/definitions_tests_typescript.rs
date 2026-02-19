@@ -911,3 +911,53 @@ fn test_ts_local_var_field_types_take_precedence() {
         "this.result.fieldMethod() should resolve to field type 'FieldType', not local var type 'LocalType'"
     );
 }
+
+// ─── Lambda / Arrow Function Parsing Tests ───────────────────────────
+
+#[test]
+fn test_ts_arrow_function_in_argument_calls_captured() {
+    let source = r#"class ItemProcessor {
+    process() {
+        items.forEach(item => item.validate());
+        promise.then(result => result.transform());
+    }
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "process").unwrap();
+    let pc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'process'");
+
+    let names: Vec<&str> = pc[0].1.iter().map(|c| c.method_name.as_str()).collect();
+    assert!(names.contains(&"forEach"), "Expected call to 'forEach', got: {:?}", names);
+    assert!(names.contains(&"validate"), "Expected call to 'validate' inside arrow function, got: {:?}", names);
+    assert!(names.contains(&"then"), "Expected call to 'then', got: {:?}", names);
+    assert!(names.contains(&"transform"), "Expected call to 'transform' inside arrow function, got: {:?}", names);
+}
+
+#[test]
+fn test_ts_multiline_arrow_function_calls_captured() {
+    let source = r#"class TaskRunner {
+    execute() {
+        tasks.map(t => {
+            t.initialize();
+            t.run();
+            return t.getResult();
+        });
+    }
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let ei = defs.iter().position(|d| d.name == "execute").unwrap();
+    let ec: Vec<_> = call_sites.iter().filter(|(i, _)| *i == ei).collect();
+    assert!(!ec.is_empty(), "Expected call sites for 'execute'");
+
+    let names: Vec<&str> = ec[0].1.iter().map(|c| c.method_name.as_str()).collect();
+    assert!(names.contains(&"initialize"), "Expected call to 'initialize' inside multiline arrow function, got: {:?}", names);
+    assert!(names.contains(&"run"), "Expected call to 'run' inside multiline arrow function, got: {:?}", names);
+    assert!(names.contains(&"getResult"), "Expected call to 'getResult' inside multiline arrow function, got: {:?}", names);
+}

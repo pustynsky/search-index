@@ -3824,3 +3824,178 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 **Validates:** `verify_call_site_target()` correctly filters comment-line matches from the content index. The content index matches multiple lines containing "resolve" (comments + real call), but only the real call site survives verification.
 
 **Status:** ✅ Covered by E2E test in `e2e-test.ps1` and unit tests in `handlers_tests_typescript.rs`
+
+
+---
+
+## Fix 3 — Bypass Gate Closure and Lambda/Expression Body Parsing
+
+These test scenarios validate the changes from Fix 3 which closed three bypass gates in the
+caller verification pipeline and extended the C# parser to extract call sites from expression
+body properties and lambda expressions in arguments.
+
+### T-FIX3-VERIFY: Callers verification — no false positives from missing call-site data
+
+**Background:** Before Fix 3, `verify_call_site_target()` returned `true` (accept) when
+`method_calls.get(&caller_di)` returned `None` — meaning a caller method with no parsed
+call-site data would pass verification by default. After Fix 3, this bypass is closed:
+the function returns `false` (reject) when call-site data is missing, ensuring only callers
+with actual call-site evidence are included in the call tree.
+
+**Setup:** Create C# files:
+- `Service.cs`: A class with a method (e.g., `DataService.Process()`)
+- `RealCaller.cs`: Contains a method that genuinely calls `service.Process()`
+- `FalseCaller.cs`: Contains a method that mentions "Process" in a string or comment but has
+  no actual call site to `DataService.Process()`
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Process","class":"DataService","direction":"up","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
+```
+
+**Expected:**
+
+- `callTree` includes `RealCaller` (has actual call site with matching receiver type)
+- `callTree` does NOT include `FalseCaller` (no call-site data → rejected by `verify_call_site_target()`)
+- `summary.totalNodes` reflects only verified callers
+
+**Validates:** Bypass #2 closure — `verify_call_site_target()` rejects callers without call-site data instead of accepting them by default.
+
+**Status:** ✅ Covered by unit tests in `handlers_tests_csharp.rs`: `test_csharp_callers_no_false_positive_from_missing_call_site_data`
+
+---
+
+### T-FIX3-EXPR-BODY: Expression body property call sites (C#)
+
+**Background:** Before Fix 3, C# expression body properties (e.g., `public string Name => _service.GetName();`)
+did not have their call sites extracted because the parser only looked at block bodies (`{ ... }`),
+not `arrow_expression_clause` (`=> expr;`). After Fix 3, call sites inside expression body
+properties are extracted and included in the caller tree.
+
+**Setup:** Create C# files:
+- `NameProvider.cs`: `public class NameProvider { public string GetName() => "test"; }`
+- `Consumer.cs`: Contains an expression body property that calls `GetName()`:
+  ```csharp
+  public class Consumer {
+      private NameProvider _provider;
+      public string DisplayName => _provider.GetName();
+  }
+  ```
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"GetName","class":"NameProvider","direction":"up","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
+```
+
+**Expected:**
+
+- `callTree` includes `Consumer.DisplayName` as a caller (expression body property)
+- The property is found because `arrow_expression_clause` is now parsed for call sites
+- `summary.totalNodes` ≥ 1
+
+**Validates:** C# parser extension for expression body properties (`=> expr;`). Call sites inside
+`arrow_expression_clause` nodes are extracted and linked to the containing property definition.
+
+**Status:** ✅ Covered by unit tests in `definitions_tests_csharp.rs`: `test_csharp_expression_body_property_call_sites` and `handlers_tests_csharp.rs`: `test_csharp_callers_expression_body_property`
+
+---
+
+### T-FIX3-LAMBDA: Lambda calls in arguments captured (C#)
+
+**Background:** C# lambda expressions passed as arguments (e.g., `items.ForEach(x => x.Method())`)
+contain call sites that should be attributed to the enclosing method. The parser extracts call
+sites from lambda bodies, resolving the call to the containing method definition.
+
+**Setup:** Create C# files:
+- `Validator.cs`: `public class Validator { public bool Validate(string s) => s.Length > 0; }`
+- `Processor.cs`: Contains a method with a lambda that calls `Validate()`:
+  ```csharp
+  public class Processor {
+      private Validator _validator;
+      public void ProcessAll(List<string> items) {
+          items.ForEach(x => _validator.Validate(x));
+      }
+  }
+  ```
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Validate","class":"Validator","direction":"up","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
+```
+
+**Expected:**
+
+- `callTree` includes `Processor.ProcessAll` as a caller
+- The call site inside the lambda body (`x => _validator.Validate(x)`) is attributed to `ProcessAll`
+- `summary.totalNodes` ≥ 1
+
+**Validates:** Lambda expressions in argument lists have their call sites extracted and attributed
+to the enclosing method. The C# parser traverses lambda bodies for call expressions.
+
+**Status:** ✅ Covered by unit tests in `definitions_tests_csharp.rs`: `test_csharp_lambda_in_argument_call_sites` and `handlers_tests_csharp.rs`: `test_csharp_callers_lambda_in_arguments`
+
+---
+
+### T-FIX3-PREFILTER: Base types removed from caller pre-filter
+
+**Background:** Before Fix 3, `build_caller_tree()` expanded the pre-filter grep terms to include
+base types of the target class (e.g., if `DataService` implements `IDisposable`, the pre-filter
+would grep for `IDisposable` too). For classes implementing common interfaces, this caused the
+pre-filter to match thousands of irrelevant files (e.g., every file using `IDisposable`), which
+then all had to be individually verified — massively degrading performance and sometimes producing
+false positives from files that happened to match base type names.
+
+After Fix 3, the pre-filter only greps for the target class name and its direct interface
+(DI-aware), not the transitive base types. This dramatically reduces the number of candidate
+files without losing real callers.
+
+**Expected behavior:**
+
+- Searching for callers of `DataService.Process()` where `DataService : IService, IDisposable`
+  should NOT pre-filter using `IDisposable` — only `DataService` and `IService` (DI pair)
+- The call tree should contain only genuine callers, not files that mention `IDisposable`
+- Performance: pre-filter should match a small number of files (tens, not thousands)
+
+**Validates:** Bypass #3 closure — base types expansion removed from pre-filter in `build_caller_tree()`.
+
+**Status:** ✅ Covered by unit tests in `handlers_tests_csharp.rs`: `test_csharp_callers_no_base_type_expansion_in_prefilter`. Not CLI-testable because the pre-filter is an internal optimization — the observable effect is fewer false positives and faster execution, verified via unit tests.
+
+---
+
+### T-FIX3-FIND-CONTAINING: find_containing_method returns definition index directly
+
+**Background:** Before Fix 3, `find_containing_method()` returned a `DefinitionInfo` clone, then
+`find_method_def_index()` was called separately to look up the definition index. When the index
+lookup returned `None`, verification was skipped entirely (bypass #1). After Fix 3,
+`find_containing_method()` returns the definition index (`di`) directly, eliminating the
+redundant lookup and the bypass where verification was skipped.
+
+**Expected behavior:**
+
+- All callers go through full verification (no bypass when definition index is not found)
+- Call tree accuracy is improved: methods that previously bypassed verification are now properly
+  verified against their call-site data
+
+**Validates:** Bypass #1 closure — `find_containing_method()` returns `di` directly, removing the
+`find_method_def_index()` intermediate step and its `None` bypass.
+
+**Status:** ✅ Internal refactor — covered by all existing caller unit tests which exercise the
+full verification pipeline. No separate test needed.

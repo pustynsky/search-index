@@ -195,6 +195,14 @@ fn test_search_callers_field_prefix_m_underscore() {
     path_to_id.insert(PathBuf::from("C:\\src\\OrderProcessor.cs"), 0);
     path_to_id.insert(PathBuf::from("C:\\src\\CheckoutHandler.cs"), 1);
 
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(3, vec![CallSite {
+        method_name: "SubmitAsync".to_string(),
+        receiver_type: Some("OrderProcessor".to_string()),
+        line: 30,
+                receiver_is_generic: false,
+            }]);
+
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,
         extensions: vec!["cs".to_string()],
@@ -204,7 +212,7 @@ fn test_search_callers_field_prefix_m_underscore() {
         ],
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
-        file_index, path_to_id, method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        file_index, path_to_id, method_calls, parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
     let ctx = HandlerContext {
@@ -292,13 +300,21 @@ fn test_search_callers_field_prefix_underscore() {
     path_to_id.insert(PathBuf::from("C:\\src\\UserService.cs"), 0);
     path_to_id.insert(PathBuf::from("C:\\src\\AccountController.cs"), 1);
 
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(3, vec![CallSite {
+        method_name: "GetUserAsync".to_string(),
+        receiver_type: Some("UserService".to_string()),
+        line: 15,
+                receiver_is_generic: false,
+            }]);
+
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,
         extensions: vec!["cs".to_string()],
         files: vec!["C:\\src\\UserService.cs".to_string(), "C:\\src\\AccountController.cs".to_string()],
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
-        file_index, path_to_id, method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        file_index, path_to_id, method_calls, parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
     let ctx = HandlerContext {
@@ -410,7 +426,7 @@ fn test_find_containing_method_innermost() {
     let def_idx = ctx.def_index.as_ref().unwrap().read().unwrap();
     let result = find_containing_method(&def_idx, 2, 391);
     assert!(result.is_some());
-    let (name, parent, _line) = result.unwrap();
+    let (name, parent, _line, _di) = result.unwrap();
     assert_eq!(name, "RunQueryBatchAsync");
     assert_eq!(parent.as_deref(), Some("QueryService"));
 }
@@ -488,8 +504,9 @@ fn test_resolve_call_site_with_class_scope() {
         method_name: "Execute".to_string(),
         receiver_type: Some("ServiceA".to_string()),
         line: 5,
-    };
-    let resolved_a = resolve_call_site(&call_a, &def_index);
+                receiver_is_generic: false,
+            };
+    let resolved_a = resolve_call_site(&call_a, &def_index, None);
     assert_eq!(resolved_a.len(), 1);
     assert_eq!(def_index.definitions[resolved_a[0] as usize].parent.as_deref(), Some("ServiceA"));
 
@@ -497,8 +514,9 @@ fn test_resolve_call_site_with_class_scope() {
         method_name: "Execute".to_string(),
         receiver_type: Some("ServiceB".to_string()),
         line: 10,
-    };
-    let resolved_b = resolve_call_site(&call_b, &def_index);
+                receiver_is_generic: false,
+            };
+    let resolved_b = resolve_call_site(&call_b, &def_index, None);
     assert_eq!(resolved_b.len(), 1);
     assert_eq!(def_index.definitions[resolved_b[0] as usize].parent.as_deref(), Some("ServiceB"));
 
@@ -506,16 +524,18 @@ fn test_resolve_call_site_with_class_scope() {
         method_name: "Execute".to_string(),
         receiver_type: None,
         line: 15,
-    };
-    let resolved_none = resolve_call_site(&call_no_recv, &def_index);
+                receiver_is_generic: false,
+            };
+    let resolved_none = resolve_call_site(&call_no_recv, &def_index, None);
     assert_eq!(resolved_none.len(), 2);
 
     let call_iface = CallSite {
         method_name: "Execute".to_string(),
         receiver_type: Some("IService".to_string()),
         line: 20,
-    };
-    let resolved_iface = resolve_call_site(&call_iface, &def_index);
+                receiver_is_generic: false,
+            };
+    let resolved_iface = resolve_call_site(&call_iface, &def_index, None);
     assert!(!resolved_iface.is_empty());
     assert!(resolved_iface.iter().any(|&di| {
         def_index.definitions[di as usize].parent.as_deref() == Some("ServiceA")
@@ -546,8 +566,8 @@ fn test_search_callers_down_class_filter() {
     }
 
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
-    method_calls.insert(1, vec![CallSite { method_name: "ShouldIssueVectorSearch".to_string(), receiver_type: None, line: 780 }]);
-    method_calls.insert(4, vec![CallSite { method_name: "TraceInformation".to_string(), receiver_type: None, line: 333 }]);
+    method_calls.insert(1, vec![CallSite { method_name: "ShouldIssueVectorSearch".to_string(), receiver_type: None, line: 780, receiver_is_generic: false }]);
+    method_calls.insert(4, vec![CallSite { method_name: "TraceInformation".to_string(), receiver_type: None, line: 333, receiver_is_generic: false }]);
 
     let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
     path_to_id.insert(PathBuf::from("C:\\src\\IndexSearchService.cs"), 0);
@@ -1084,12 +1104,14 @@ fn test_search_callers_cycle_detection_down() {
         method_name: "MethodB".to_string(),
         receiver_type: Some("ClassB".to_string()),
         line: 20,
-    }]);
+                receiver_is_generic: false,
+            }]);
     method_calls.insert(3, vec![CallSite {
         method_name: "MethodA".to_string(),
         receiver_type: Some("ClassA".to_string()),
         line: 20,
-    }]);
+                receiver_is_generic: false,
+            }]);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,
@@ -2056,13 +2078,29 @@ fn test_search_callers_cycle_detection() {
     path_to_id.insert(PathBuf::from("C:\\src\\ServiceA.cs"), 0);
     path_to_id.insert(PathBuf::from("C:\\src\\ServiceB.cs"), 1);
 
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    // MethodB (di=3) calls MethodA at line 20
+    method_calls.insert(3, vec![CallSite {
+        method_name: "MethodA".to_string(),
+        receiver_type: Some("ServiceA".to_string()),
+        line: 20,
+                receiver_is_generic: false,
+            }]);
+    // MethodA (di=1) calls MethodB at line 20
+    method_calls.insert(1, vec![CallSite {
+        method_name: "MethodB".to_string(),
+        receiver_type: Some("ServiceB".to_string()),
+        line: 20,
+                receiver_is_generic: false,
+            }]);
+
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,
         extensions: vec!["cs".to_string()],
         files: vec!["C:\\src\\ServiceA.cs".to_string(), "C:\\src\\ServiceB.cs".to_string()],
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
-        file_index, path_to_id, method_calls: HashMap::new(),
+        file_index, path_to_id, method_calls,
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -2196,6 +2234,22 @@ fn test_search_callers_ext_filter_comma_split() {
     path_to_id.insert(PathBuf::from("C:\\src\\CsController.cs"), 1);
     path_to_id.insert(PathBuf::from("C:\\src\\script.txt"), 2);
 
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    // HandleRequest (di=3) calls ProcessData at line 15
+    method_calls.insert(3, vec![CallSite {
+        method_name: "ProcessData".to_string(),
+        receiver_type: Some("DataService".to_string()),
+        line: 15,
+                receiver_is_generic: false,
+            }]);
+    // RunScript (di=5) calls ProcessData at line 10
+    method_calls.insert(5, vec![CallSite {
+        method_name: "ProcessData".to_string(),
+        receiver_type: Some("DataService".to_string()),
+        line: 10,
+                receiver_is_generic: false,
+            }]);
+
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,
         extensions: vec!["cs".to_string(), "txt".to_string()],
@@ -2206,7 +2260,7 @@ fn test_search_callers_ext_filter_comma_split() {
         ],
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
-        file_index, path_to_id, method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        file_index, path_to_id, method_calls, parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
     let ctx = HandlerContext {

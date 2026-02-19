@@ -611,3 +611,85 @@ public class DataService {
         "Local var 'users' with generic type 'List<User>' should resolve receiver_type to 'List' (stripped generics)"
     );
 }
+
+// ─── Lambda / Expression Body Parsing Tests ──────────────────────────
+
+#[test]
+fn test_csharp_lambda_in_argument_list_calls_captured() {
+    let source = r#"
+public class OrderService {
+    public void Process() {
+        items.ForEach(item => item.Validate());
+        var result = list.Select(x => x.ToString());
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "Process").unwrap();
+    let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'Process'");
+
+    let names: Vec<&str> = pc[0].1.iter().map(|c| c.method_name.as_str()).collect();
+    assert!(names.contains(&"ForEach"), "Expected call to 'ForEach', got: {:?}", names);
+    assert!(names.contains(&"Validate"), "Expected call to 'Validate' inside lambda, got: {:?}", names);
+    assert!(names.contains(&"Select"), "Expected call to 'Select', got: {:?}", names);
+    assert!(names.contains(&"ToString"), "Expected call to 'ToString' inside lambda, got: {:?}", names);
+}
+
+#[test]
+fn test_csharp_expression_body_member_calls_captured() {
+    let source = r#"
+public class UserFormatter {
+    private readonly IService _service;
+    public string Name => _service.GetName();
+    public int Count => _items.Calculate();
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs) = parse_csharp_definitions(&mut parser, source, 0);
+
+    // Check Name property
+    let name_idx = defs.iter().position(|d| d.name == "Name").unwrap();
+    let name_calls: Vec<_> = cs.iter().filter(|(i, _)| *i == name_idx).collect();
+    assert!(!name_calls.is_empty(), "Expected call sites for 'Name' expression body property");
+    let name_methods: Vec<&str> = name_calls[0].1.iter().map(|c| c.method_name.as_str()).collect();
+    assert!(name_methods.contains(&"GetName"), "Expected call to 'GetName' in Name property, got: {:?}", name_methods);
+
+    // Check Count property
+    let count_idx = defs.iter().position(|d| d.name == "Count").unwrap();
+    let count_calls: Vec<_> = cs.iter().filter(|(i, _)| *i == count_idx).collect();
+    assert!(!count_calls.is_empty(), "Expected call sites for 'Count' expression body property");
+    let count_methods: Vec<&str> = count_calls[0].1.iter().map(|c| c.method_name.as_str()).collect();
+    assert!(count_methods.contains(&"Calculate"), "Expected call to 'Calculate' in Count property, got: {:?}", count_methods);
+}
+
+#[test]
+fn test_csharp_multiline_lambda_calls_captured() {
+    let source = r#"
+public class Processor {
+    public void Run() {
+        tasks.ForEach(t => {
+            t.Initialize();
+            t.Execute();
+            var result = t.GetResult();
+        });
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let ri = defs.iter().position(|d| d.name == "Run").unwrap();
+    let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
+    assert!(!rc.is_empty(), "Expected call sites for 'Run'");
+
+    let names: Vec<&str> = rc[0].1.iter().map(|c| c.method_name.as_str()).collect();
+    assert!(names.contains(&"Initialize"), "Expected call to 'Initialize' inside multiline lambda, got: {:?}", names);
+    assert!(names.contains(&"Execute"), "Expected call to 'Execute' inside multiline lambda, got: {:?}", names);
+    assert!(names.contains(&"GetResult"), "Expected call to 'GetResult' inside multiline lambda, got: {:?}", names);
+}
