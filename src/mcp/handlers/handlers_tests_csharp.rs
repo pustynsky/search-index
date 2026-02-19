@@ -1726,3 +1726,180 @@ fn test_reindex_definitions_success() {
 
     cleanup_tmp(&tmp_dir);
 }
+
+// ─── File filter path separator normalization tests (T77) ────────────
+
+/// Helper: create a context with backslash paths in definition index
+/// to test file filter separator normalization.
+fn make_ctx_with_backslash_paths() -> HandlerContext {
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "UserService".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "GetUser".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("UserService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "OrderProcessor".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 80,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "ProcessOrder".to_string(),
+            kind: DefinitionKind::Method, line_start: 30, line_end: 45,
+            parent: Some("OrderProcessor".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+
+    // Paths stored with BACKSLASHES (simulating Windows paths from clean_path before fix,
+    // or manually constructed test data)
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![
+            r"src\Services\UserService.cs".to_string(),
+            r"src\Processing\OrderProcessor.cs".to_string(),
+        ],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id,
+        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0,
+        empty_file_ids: Vec::new(),
+    };
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec![
+            r"src\Services\UserService.cs".to_string(),
+            r"src\Processing\OrderProcessor.cs".to_string(),
+        ],
+        index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()],
+        file_token_counts: vec![100, 100], trigram: TrigramIndex::default(),
+        trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    }
+}
+
+#[test]
+fn test_search_definitions_file_filter_forward_slash() {
+    // T77: file filter with forward slashes should match backslash-stored paths
+    let ctx = make_ctx_with_backslash_paths();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "src/Services/UserService"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalResults"].as_u64().unwrap();
+    assert_eq!(total, 2, "Forward-slash file filter should match backslash paths (UserService class + GetUser method)");
+}
+
+#[test]
+fn test_search_definitions_file_filter_backslash() {
+    // T77: file filter with backslashes should also still work
+    let ctx = make_ctx_with_backslash_paths();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": r"src\Services\UserService"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalResults"].as_u64().unwrap();
+    assert_eq!(total, 2, "Backslash file filter should match backslash paths");
+}
+
+#[test]
+fn test_search_definitions_file_filter_mixed_separators() {
+    // T77: mixed separators should work
+    let ctx = make_ctx_with_backslash_paths();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": r"src/Services\UserService"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalResults"].as_u64().unwrap();
+    assert_eq!(total, 2, "Mixed-separator file filter should match");
+}
+
+#[test]
+fn test_search_definitions_file_filter_no_match() {
+    // Sanity check: non-matching file filter returns 0
+    let ctx = make_ctx_with_backslash_paths();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "src/NonExistent/Path"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalResults"].as_u64().unwrap();
+    assert_eq!(total, 0, "Non-matching file filter should return 0 results");
+}
+
+#[test]
+fn test_search_definitions_contains_line_forward_slash() {
+    // T77: containsLine with forward-slash file filter should work
+    let ctx = make_ctx_with_backslash_paths();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "src/Services/UserService",
+        "containsLine": 15
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["containingDefinitions"].as_array().unwrap();
+    assert!(!defs.is_empty(), "containsLine with forward-slash file should find definitions");
+    let names: Vec<&str> = defs.iter().filter_map(|d| d["name"].as_str()).collect();
+    assert!(names.contains(&"GetUser") || names.contains(&"UserService"),
+        "Should find GetUser or UserService containing line 15, got: {:?}", names);
+}
+
+#[test]
+fn test_search_definitions_contains_line_backslash() {
+    // T77: containsLine with backslash file filter should also work
+    let ctx = make_ctx_with_backslash_paths();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": r"src\Services\UserService",
+        "containsLine": 15
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["containingDefinitions"].as_array().unwrap();
+    assert!(!defs.is_empty(), "containsLine with backslash file should find definitions");
+}
+
+#[test]
+fn test_search_definitions_contains_line_mixed_separators() {
+    // T77: containsLine with mixed separators should work
+    let ctx = make_ctx_with_backslash_paths();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": r"src/Services\UserService",
+        "containsLine": 15
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["containingDefinitions"].as_array().unwrap();
+    assert!(!defs.is_empty(), "containsLine with mixed separators should find definitions");
+}

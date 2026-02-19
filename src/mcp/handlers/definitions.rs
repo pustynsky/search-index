@@ -86,14 +86,14 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
                 "containsLine requires 'file' parameter to identify the file.".to_string()
             );
         }
-        let file_substr = file_filter.unwrap().to_lowercase();
+        let file_substr = file_filter.unwrap().replace('\\', "/").to_lowercase();
 
         // Find matching file(s)
         let mut containing_defs: Vec<Value> = Vec::new();
         let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
         let mut total_body_lines_emitted: usize = 0;
         for (file_id, file_path) in index.files.iter().enumerate() {
-            if !file_path.to_lowercase().contains(&file_substr) {
+            if !file_path.replace('\\', "/").to_lowercase().contains(&file_substr) {
                 continue;
             }
             // Get all definitions in this file
@@ -265,9 +265,9 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
             let def = index.definitions.get(idx as usize)?;
             let file_path = index.files.get(def.file_id as usize)?;
 
-            // File filter
+            // File filter (normalize separators for cross-platform matching)
             if let Some(ff) = file_filter
-                && !file_path.to_lowercase().contains(&ff.to_lowercase()) {
+                && !file_path.replace('\\', "/").to_lowercase().contains(&ff.replace('\\', "/").to_lowercase()) {
                     return None;
                 }
 

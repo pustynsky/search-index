@@ -2908,15 +2908,27 @@ from or implement the specified type.
 
 **Tool:** `search_definitions`
 
-**Scenario:** The `file` parameter handles both forward slashes and backslashes for path matching,
-documenting the current behavior on Windows vs. Unix-style paths.
+**Scenario:** The `file` parameter normalizes path separators so both forward slashes (`/`) and
+backslashes (`\`) work identically for path filtering. This applies to both the general file filter
+and the `containsLine` file filter. `clean_path()` normalizes all stored paths to forward slashes,
+and the file filter comparison normalizes user input for defense-in-depth.
 
 **Expected:**
 
-- File filter with forward slashes matches files stored with the OS path separator
-- Behavior is consistent and documented (may vary by OS)
+- `file: "src/Services/UserService"` matches paths stored as `src\Services\UserService.cs` (backslash) or `src/Services/UserService.cs` (forward slash)
+- `file: "src\Services\UserService"` also matches (backslash input normalized)
+- Mixed separators like `src/Services\UserService` also match
+- Same normalization works for `containsLine` + `file` combination
+- All stored paths in indexes use forward slashes (via `clean_path()`)
 
-**Unit test:** [`test_search_definitions_file_filter_slash_normalization`](../src/mcp/handlers/handlers_tests.rs)
+**Unit tests:**
+- [`test_search_definitions_file_filter_forward_slash`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_search_definitions_file_filter_backslash`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_search_definitions_file_filter_mixed_separators`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_search_definitions_file_filter_no_match`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_search_definitions_contains_line_forward_slash`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_search_definitions_contains_line_backslash`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_search_definitions_contains_line_mixed_separators`](../src/mcp/handlers/handlers_tests_csharp.rs)
 
 ---
 

@@ -40,10 +40,11 @@ pub fn stable_hash(parts: &[&[u8]]) -> u64 {
 
 // ─── Core public types ───────────────────────────────────────────────
 
-/// Strip the `\\?\` extended-length path prefix that Windows canonicalize adds.
+/// Strip the `\\?\` extended-length path prefix that Windows canonicalize adds,
+/// and normalize path separators to forward slashes for cross-platform consistency.
 #[must_use]
 pub fn clean_path(p: &str) -> String {
-    p.strip_prefix(r"\\?\").unwrap_or(p).to_string()
+    p.strip_prefix(r"\\?\").unwrap_or(p).replace('\\', "/")
 }
 
 /// Read a file as a String, using lossy UTF-8 conversion for non-UTF8 files.
@@ -221,12 +222,32 @@ mod lib_tests {
 
     #[test]
     fn test_clean_path_strips_prefix() {
-        assert_eq!(clean_path(r"\\?\C:\Users\test"), r"C:\Users\test");
+        assert_eq!(clean_path(r"\\?\C:\Users\test"), "C:/Users/test");
     }
 
     #[test]
     fn test_clean_path_no_prefix() {
-        assert_eq!(clean_path(r"C:\Users\test"), r"C:\Users\test");
+        assert_eq!(clean_path(r"C:\Users\test"), "C:/Users/test");
+    }
+
+    #[test]
+    fn test_clean_path_normalizes_backslashes() {
+        assert_eq!(clean_path(r"src\PowerBI\OnelakeCatalog"), "src/PowerBI/OnelakeCatalog");
+    }
+
+    #[test]
+    fn test_clean_path_preserves_forward_slashes() {
+        assert_eq!(clean_path("src/PowerBI/OnelakeCatalog"), "src/PowerBI/OnelakeCatalog");
+    }
+
+    #[test]
+    fn test_clean_path_mixed_separators() {
+        assert_eq!(clean_path(r"src/PowerBI\OnelakeCatalog\file.cs"), "src/PowerBI/OnelakeCatalog/file.cs");
+    }
+
+    #[test]
+    fn test_clean_path_unc_prefix_with_normalization() {
+        assert_eq!(clean_path(r"\\?\C:\Projects\src\file.cs"), "C:/Projects/src/file.cs");
     }
 
     // ─── stable_hash tests ──────────────────────────────────────

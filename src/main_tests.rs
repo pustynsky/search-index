@@ -8,12 +8,12 @@
 
     #[test]
     fn test_clean_path_strips_prefix() {
-        assert_eq!(clean_path(r"\\?\C:\Windows\notepad.exe"), r"C:\Windows\notepad.exe");
+        assert_eq!(clean_path(r"\\?\C:\Windows\notepad.exe"), "C:/Windows/notepad.exe");
     }
 
     #[test]
     fn test_clean_path_no_prefix() {
-        assert_eq!(clean_path(r"C:\Windows\notepad.exe"), r"C:\Windows\notepad.exe");
+        assert_eq!(clean_path(r"C:\Windows\notepad.exe"), "C:/Windows/notepad.exe");
     }
 
     #[test]
