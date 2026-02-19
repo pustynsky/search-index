@@ -142,19 +142,38 @@ pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
         !v.is_empty()
     });
 
-    // Shrink secondary index vecs after retain() to release excess capacity.
+    // Conditionally shrink secondary index vecs after retain() to release excess capacity.
+    // Only shrink when capacity > 2 × len to avoid unnecessary realloc storms.
     // retain() reduces len but not capacity — shrink_to_fit() reclaims dead allocations.
-    for v in index.name_index.values_mut() { v.shrink_to_fit(); }
-    for v in index.kind_index.values_mut() { v.shrink_to_fit(); }
-    for v in index.attribute_index.values_mut() { v.shrink_to_fit(); }
-    for v in index.base_type_index.values_mut() { v.shrink_to_fit(); }
+    for v in index.name_index.values_mut() {
+        if v.capacity() > v.len() * 2 { v.shrink_to_fit(); }
+    }
+    for v in index.kind_index.values_mut() {
+        if v.capacity() > v.len() * 2 { v.shrink_to_fit(); }
+    }
+    for v in index.attribute_index.values_mut() {
+        if v.capacity() > v.len() * 2 { v.shrink_to_fit(); }
+    }
+    for v in index.base_type_index.values_mut() {
+        if v.capacity() > v.len() * 2 { v.shrink_to_fit(); }
+    }
 
-    // Shrink the HashMaps themselves
-    index.name_index.shrink_to_fit();
-    index.kind_index.shrink_to_fit();
-    index.attribute_index.shrink_to_fit();
-    index.base_type_index.shrink_to_fit();
-    index.method_calls.shrink_to_fit();
+    // Shrink the HashMaps themselves (only if significantly over-allocated)
+    if index.name_index.capacity() > index.name_index.len() * 2 {
+        index.name_index.shrink_to_fit();
+    }
+    if index.kind_index.capacity() > index.kind_index.len() * 2 {
+        index.kind_index.shrink_to_fit();
+    }
+    if index.attribute_index.capacity() > index.attribute_index.len() * 2 {
+        index.attribute_index.shrink_to_fit();
+    }
+    if index.base_type_index.capacity() > index.base_type_index.len() * 2 {
+        index.base_type_index.shrink_to_fit();
+    }
+    if index.method_calls.capacity() > index.method_calls.len() * 2 {
+        index.method_calls.shrink_to_fit();
+    }
 
     // Check for excessive tombstone growth
     let active_count: usize = index.file_index.values().map(|v| v.len()).sum();

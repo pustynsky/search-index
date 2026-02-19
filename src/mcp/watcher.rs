@@ -6,7 +6,7 @@ use std::time::Duration;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::{error, info, warn};
 
-use crate::{build_content_index, clean_path, save_content_index, tokenize, ContentIndex, ContentIndexArgs, Posting, DEFAULT_MIN_TOKEN_LEN};
+use crate::{build_content_index, clean_path, load_content_index, save_content_index, tokenize, ContentIndex, ContentIndexArgs, Posting, DEFAULT_MIN_TOKEN_LEN};
 use crate::definitions::{self, DefinitionIndex};
 
 /// Start a file watcher thread that incrementally updates the in-memory index
@@ -86,6 +86,28 @@ pub fn start_watcher(
                         if let Err(e) = save_content_index(&new_index, &index_base) {
                             warn!(error = %e, "Failed to save reindexed content to disk");
                         }
+
+                        // Anti-fragmentation: drop the freshly-built index (fragmented heap)
+                        // and reload from disk (compact, defragmented allocations).
+                        // Same pattern used at startup in serve.rs.
+                        drop(new_index);
+                        let ext_reload = extensions.join(",");
+                        let new_index = match load_content_index(&dir_str, &ext_reload, &index_base) {
+                            Ok(idx) => idx,
+                            Err(e) => {
+                                warn!(error = %e, "Failed to reload content index from disk after bulk reindex, rebuilding in-memory");
+                                build_content_index(&ContentIndexArgs {
+                                    dir: dir_str.clone(),
+                                    ext: ext_reload,
+                                    max_age_hours: 24,
+                                    hidden: false,
+                                    no_ignore: false,
+                                    threads: 0,
+                                    min_token_len: DEFAULT_MIN_TOKEN_LEN,
+                                })
+                            }
+                        };
+
                         // Build path_to_id for watch mode (no forward index — saves ~1.5 GB RAM)
                         let new_index = build_watch_index_from(new_index);
                         match index.write() {
@@ -121,15 +143,22 @@ pub fn start_watcher(
                             // Mark trigram index as dirty — will be rebuilt lazily on next substring search
                             idx.trigram_dirty = true;
 
-                            // Shrink collections after retain() to release excess capacity.
+                            // Conditionally shrink collections after retain() to release excess capacity.
+                            // Only shrink when capacity > 2 × len to avoid unnecessary realloc storms.
                             // retain() reduces len but not capacity — shrink_to_fit() reclaims
                             // the dead allocations, which mimalloc/system allocator can return to OS.
                             for postings in idx.index.values_mut() {
-                                postings.shrink_to_fit();
+                                if postings.capacity() > postings.len() * 2 {
+                                    postings.shrink_to_fit();
+                                }
                             }
-                            idx.index.shrink_to_fit();
+                            if idx.index.capacity() > idx.index.len() * 2 {
+                                idx.index.shrink_to_fit();
+                            }
                             if let Some(ref mut p2id) = idx.path_to_id {
-                                p2id.shrink_to_fit();
+                                if p2id.capacity() > p2id.len() * 2 {
+                                    p2id.shrink_to_fit();
+                                }
                             }
                         }
                         Err(e) => {
