@@ -3078,7 +3078,9 @@ and returns build metrics.
 
 ---
 
-#### T87: `search_definitions` — Audit mode with `.spec.ts` files (0 definitions expected)
+## Additional Test Scenarios (from upstream merge)
+
+#### T-SPEC-AUDIT: `search_definitions` — Audit mode with `.spec.ts` files (0 definitions expected)
 
 **Tool:** `search_definitions` (audit mode)
 
@@ -3102,7 +3104,7 @@ a bug or a parsing failure.
 
 ---
 
-#### T88: `search_reindex` / `search_reindex_definitions` — Invalid or outside directory
+#### T-REINDEX-SECURITY: `search_reindex` / `search_reindex_definitions` — Invalid or outside directory
 
 **Tool:** `search_reindex`, `search_reindex_definitions`
 
@@ -3110,156 +3112,468 @@ a bug or a parsing failure.
 that either doesn't exist or is outside the allowed `--dir` server scope should return a
 descriptive error, not crash or silently succeed.
 
-**Test — non-existent directory:**
-
-```json
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_reindex","arguments":{"dir":"C:\\nonexistent\\path\\xyz"}}}
-```
-
 **Expected:**
 
-- Response is an error (`isError: true`)
-- Error message indicates directory does not exist or is outside server scope
-- Server does NOT crash or hang
-
-**Test — directory outside server `--dir`:**
-
-```json
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_reindex_definitions","arguments":{"dir":"C:\\Windows\\System32"}}}
-```
-
-**Expected:**
-
-- Response is an error (`isError: true`)
-- Error message references `--dir` / server directory restriction
-- No filesystem operations performed outside allowed scope
-
-**Validates:** Error handling for reindex tools with invalid/out-of-scope directories.
-Security boundary enforcement consistent with `search_grep` and `search_find` directory validation.
-
-**Source:** Shared repo T80
+- Error response with `isError: true`
+- Error message mentions the invalid directory path
 
 **Unit test:** [`test_search_reindex_invalid_directory`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-### Parser-Level Unit Tests
+#### T-CALLERS-CYCLE-UP: `search_callers` — Cycle detection (direction=up)
 
-#### T89: TypeScript `const enum` parsing
-
-**Parser:** TypeScript (tree-sitter)
-
-**Scenario:** TypeScript `const enum` declarations (e.g., `const enum Direction { Up, Down }`)
-are correctly parsed and indexed as `enum` definitions with `enumMember` children. The `const`
-modifier does not prevent the enum from being extracted.
+**Scenario:** When tracing callers upward and encountering a call cycle (A→B→A),
+the search completes without infinite loop.
 
 **Expected:**
 
-- `const enum` parsed as `kind: "enum"`
-- Individual members parsed as `kind: "enumMember"` with parent set to the enum name
-- Signatures include `const` modifier
+- No infinite recursion or stack overflow
+- Call tree represents the cycle without duplicating nodes indefinitely
+- `summary.truncatedByBudget` may be true if cycle is deep
+
+**Unit test:** [`test_search_callers_cycle_detection`](../src/mcp/handlers/handlers_tests_csharp.rs)
+
+---
+
+#### T-CALLERS-EXT-COMMA: `search_callers` — Comma-split `ext` filter
+
+**Scenario:** The `ext` parameter in `search_callers` accepts comma-separated extensions
+(e.g., `"cs,ts"`) for multi-language call tree analysis.
+
+**Expected:**
+
+- Both C# and TypeScript files are included in the call tree
+- Single extension filter (e.g., `"cs"`) excludes other languages
+
+**Unit test:** [`test_search_callers_ext_filter_comma_split`](../src/mcp/handlers/handlers_tests_csharp.rs)
+
+---
+
+#### T-DIR-SECURITY: Directory validation — Security boundary tests (4 tests)
+
+**Scenario:** The `validate_search_dir` function ensures all search operations
+stay within the configured server directory. Tests cover subdirectory acceptance,
+sibling directory rejection, path traversal rejection, and absolute path rejection.
+
+**Unit tests:**
+- [`test_validate_search_dir_subdir_accepted`](../src/mcp/handlers/handlers_tests.rs)
+- [`test_validate_search_dir_outside_rejected`](../src/mcp/handlers/handlers_tests.rs)
+- [`test_validate_search_dir_path_traversal_rejected`](../src/mcp/handlers/handlers_tests.rs)
+- [`test_validate_search_dir_windows_absolute_outside_rejected`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T-CALLERS-AMBIGUITY: `search_callers` — Ambiguity warning variants (3 tests)
+
+**Scenario:** When searching for callers without specifying the `class` parameter,
+the response includes an ambiguity warning showing which classes contain the method.
+The warning is truncated for common methods with many implementations.
+
+**Unit tests:**
+- [`test_search_callers_no_ambiguity_warning_single_class`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_search_callers_ambiguity_warning_few_classes`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_search_callers_ambiguity_warning_truncated`](../src/mcp/handlers/handlers_tests_csharp.rs)
+
+---
+
+## TypeScript Handler-Level Unit Tests
+
+The following test scenarios are covered by unit tests in
+[`handlers_tests_typescript.rs`](../src/mcp/handlers/handlers_tests_typescript.rs). They validate
+MCP handler behavior for TypeScript definitions and call graphs using real indexes built from
+TypeScript test fixture files.
+
+### search_definitions — TypeScript Kinds
+
+#### T87: `search_definitions` — Finds TypeScript class
+
+**Tool:** `search_definitions`
+
+**Scenario:** Searching for a TypeScript class by name returns the class definition with correct
+metadata (file, lines, kind).
+
+**Expected:**
+
+- `definitions` array contains the class with `kind: "class"`
+- Definition includes `name`, `file`, `lines`, `signature`
+
+**Unit test:** [`test_ts_search_definitions_finds_class`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T88: `search_definitions` — Finds TypeScript interface
+
+**Tool:** `search_definitions`
+
+**Scenario:** Searching for a TypeScript interface by name returns the interface definition.
+
+**Expected:**
+
+- `definitions` array contains the interface with `kind: "interface"`
+- Definition includes correct file path and line range
+
+**Unit test:** [`test_ts_search_definitions_finds_interface`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T89: `search_definitions` — Finds TypeScript method
+
+**Tool:** `search_definitions`
+
+**Scenario:** Searching for a TypeScript class method returns the method definition with its
+parent class.
+
+**Expected:**
+
+- `definitions` array contains the method with `kind: "method"`
+- Definition has correct `parent` class name
+
+**Unit test:** [`test_ts_search_definitions_finds_method`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T90: `search_definitions` — Finds TypeScript function
+
+**Tool:** `search_definitions`
+
+**Scenario:** Searching for a TypeScript standalone function returns the function definition
+with `kind: "function"`.
+
+**Expected:**
+
+- `definitions` array contains the function with `kind: "function"`
+- Standalone functions (not class methods) are correctly categorized
+
+**Unit test:** [`test_ts_search_definitions_finds_function`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T91: `search_definitions` — Finds TypeScript enum
+
+**Tool:** `search_definitions`
+
+**Scenario:** Searching for a TypeScript enum returns the enum definition.
+
+**Expected:**
+
+- `definitions` array contains the enum with `kind: "enum"`
+- Enum signature includes member names
+
+**Unit test:** [`test_ts_search_definitions_finds_enum`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T92: `search_definitions` — Finds TypeScript enum member
+
+**Tool:** `search_definitions`
+
+**Scenario:** Searching for TypeScript enum members returns individual enum values.
+
+**Expected:**
+
+- `definitions` array contains entries with `kind: "enumMember"`
+- Each enum member has its parent enum as the `parent` field
+
+**Unit test:** [`test_ts_search_definitions_finds_enum_member`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T93: `search_definitions` — Finds TypeScript type alias
+
+**Tool:** `search_definitions`
+
+**Scenario:** Searching for a TypeScript type alias returns the type declaration.
+
+**Expected:**
+
+- `definitions` array contains the type alias with `kind: "typeAlias"`
+- Type aliases (e.g., `type Props = { ... }`) are correctly categorized
+
+**Unit test:** [`test_ts_search_definitions_finds_type_alias`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T94: `search_definitions` — Finds TypeScript variable
+
+**Tool:** `search_definitions`
+
+**Scenario:** Searching for a TypeScript exported variable/constant returns the variable definition.
+
+**Expected:**
+
+- `definitions` array contains the variable with `kind: "variable"`
+- Exported `const`/`let` declarations and `InjectionToken` variables are included
+
+**Unit test:** [`test_ts_search_definitions_finds_variable`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T95: `search_definitions` — Finds TypeScript field
+
+**Tool:** `search_definitions`
+
+**Scenario:** Searching for a TypeScript class field returns the field definition.
+
+**Expected:**
+
+- `definitions` array contains the field with `kind: "field"`
+- Field has correct parent class
+
+**Unit test:** [`test_ts_search_definitions_finds_field`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T96: `search_definitions` — Finds TypeScript constructor
+
+**Tool:** `search_definitions`
+
+**Scenario:** Searching for a TypeScript class constructor returns the constructor definition.
+
+**Expected:**
+
+- `definitions` array contains the constructor with `kind: "constructor"`
+- Constructor has correct parent class
+
+**Unit test:** [`test_ts_search_definitions_finds_constructor`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+### search_definitions — TypeScript Filters
+
+#### T97: `search_definitions` — TypeScript `baseType` filter (implements)
+
+**Tool:** `search_definitions`
+
+**Scenario:** Filtering by `baseType` returns TypeScript classes that implement the specified
+interface.
+
+**Expected:**
+
+- All returned definitions list the specified base type in their `baseTypes`
+- Classes using `implements` keyword are matched
+
+**Unit test:** [`test_ts_search_definitions_base_type_implements`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T98: `search_definitions` — TypeScript `baseType` filter (abstract/extends)
+
+**Tool:** `search_definitions`
+
+**Scenario:** Filtering by `baseType` returns TypeScript classes extending an abstract class.
+
+**Expected:**
+
+- All returned definitions list the abstract base class in their `baseTypes`
+- Classes using `extends` keyword are matched
+
+**Unit test:** [`test_ts_search_definitions_base_type_abstract`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T99: `search_definitions` — TypeScript `containsLine` finds method
+
+**Tool:** `search_definitions`
+
+**Scenario:** Using `containsLine` with a TypeScript file returns the innermost method
+containing the specified line number.
+
+**Expected:**
+
+- `containingDefinitions` array includes the method at that line
+- Parent class is also returned in the containing definitions
+
+**Unit test:** [`test_ts_contains_line_finds_method`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T100: `search_definitions` — TypeScript `includeBody`
+
+**Tool:** `search_definitions`
+
+**Scenario:** Setting `includeBody: true` for TypeScript definitions returns source code
+inline.
+
+**Expected:**
+
+- Definition objects contain `body` array with source lines
+- `bodyStartLine` matches the definition's start line
+- Body content is actual TypeScript source code
+
+**Unit test:** [`test_ts_search_definitions_include_body`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T101: `search_definitions` — TypeScript combined name + parent + kind filter
+
+**Tool:** `search_definitions`
+
+**Scenario:** Passing `name`, `parent`, and `kind` filters simultaneously for TypeScript
+definitions returns only those matching all three criteria.
+
+**Expected:**
+
+- All returned definitions match the name substring, parent class, and kind
+- `summary.totalResults` reflects only matching definitions
+
+**Unit test:** [`test_ts_search_definitions_combined_name_parent_kind`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T102: `search_definitions` — TypeScript regex name filter
+
+**Tool:** `search_definitions`
+
+**Scenario:** Setting `regex: true` with a name pattern matches TypeScript definitions
+using regex.
+
+**Expected:**
+
+- All returned definitions have names matching the regex pattern
+- Non-matching definitions are excluded
+
+**Unit test:** [`test_ts_search_definitions_name_regex`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+### search_callers — TypeScript
+
+#### T103: `search_callers` — TypeScript callers (direction=up)
+
+**Tool:** `search_callers`
+
+**Scenario:** Finding callers of a TypeScript method returns the call tree with callers
+from TypeScript files.
+
+**Expected:**
+
+- `callTree` includes callers from `.ts` files
+- Caller entries have correct method name, parent class, file path, and line number
+
+**Unit test:** [`test_ts_search_callers_up_finds_caller`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T104: `search_callers` — TypeScript callees (direction=down)
+
+**Tool:** `search_callers`
+
+**Scenario:** Finding callees of a TypeScript method returns the callee tree showing
+what the method calls.
+
+**Expected:**
+
+- `callTree` includes callees (methods called by the target method)
+- Callee entries have correct method names and file paths
+
+**Unit test:** [`test_ts_search_callers_down_finds_callees`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+#### T105: `search_callers` — TypeScript nonexistent method
+
+**Tool:** `search_callers`
+
+**Scenario:** Searching for callers of a method that doesn't exist returns an empty call tree
+without errors.
+
+**Expected:**
+
+- `callTree` array is empty
+- `summary.totalNodes` = 0
+- No error (graceful empty response)
+
+**Unit test:** [`test_ts_search_callers_nonexistent_method`](../src/mcp/handlers/handlers_tests_typescript.rs)
+
+---
+
+### search_find — Additional Scenarios
+
+#### T106: `search_find` — Contents mode
+
+**Tool:** `search_find`
+
+**Scenario:** Setting `contents: true` searches file contents instead of file names,
+returning matching lines with file path and line number.
+
+**Expected:**
+
+- Results contain file path and line number for each match
+- Search term is found in the file content, not the file name
+- Response includes match count
+
+**Unit test:** [`test_search_find_contents_mode`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+### search_help / search_info — Response Validation
+
+#### T107: `search_help` — Response structure validation
+
+**Tool:** `search_help`
+
+**Scenario:** Calling `search_help` returns a well-structured JSON response containing
+best practices, performance tiers, tool priority, and strategy recipes.
+
+**Expected:**
+
+- Response contains `bestPractices` array (non-empty)
+- Response contains `performanceTiers` object
+- Response contains `toolPriority` array
+- Response contains `strategyRecipes` array
+- All expected fields are present and well-formed
+
+**Unit test:** [`test_search_help_response_structure`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T108: `search_info` — Response structure validation
+
+**Tool:** `search_info`
+
+**Scenario:** Calling `search_info` returns a well-structured JSON response containing
+index information (directory, indexes, counts).
+
+**Expected:**
+
+- Response contains `indexDirectory` string
+- Response contains `indexes` array
+- Response structure is valid JSON with expected fields
+
+**Unit test:** [`test_search_info_response_structure`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+## Parser-Level Unit Tests
+
+The following parser-level tests validate TypeScript-specific parsing corner cases in
+[`definitions_tests_typescript.rs`](../src/definitions/definitions_tests_typescript.rs).
+
+#### T-PARSER-CONST-ENUM: TypeScript `const enum` parsing
+
+**Scenario:** TypeScript `const enum` declarations (e.g., `const enum Direction { Up, Down }`)
+are correctly parsed and extracted as enum definitions.
+
+**Expected:**
+
+- `const enum` is parsed as `kind: "enum"`
+- Enum members are extracted as `kind: "enumMember"`
+- The `const` modifier does not prevent parsing
 
 **Unit test:** [`test_parse_ts_const_enum`](../src/definitions/definitions_tests_typescript.rs)
 
-**Source:** PBIClients T35
-
 ---
 
-### search_callers — Additional Unit Tests
+#### T-PARSER-INJECTION-TOKEN: TypeScript `InjectionToken` variable parsing
 
-#### T90: `search_callers` — Cycle detection (direction=up)
-
-**Tool:** `search_callers`
-
-**Scenario:** When tracing callers (`direction: "up"`) through a circular call graph
-(A calls B, B calls A), the search completes without infinite loop. This complements T84
-which covers cycle detection in the `down` direction.
+**Scenario:** TypeScript `InjectionToken<T>` variable declarations (common in Angular DI) are
+correctly parsed as variable definitions.
 
 **Expected:**
 
-- Search completes in finite time
-- No infinite recursion or stack overflow
-- Call tree represents the cycle without duplicating nodes indefinitely
-- `summary.totalNodes` is bounded
+- `InjectionToken<T>` variables are parsed as `kind: "variable"`
+- The generic type parameter does not prevent parsing
+- Variable name and signature are correctly extracted
 
-**Unit test:** [`test_search_callers_cycle_detection`](../src/mcp/handlers/handlers_tests.rs)
-
-**Source:** Shared T78
-
----
-
-#### T91: `search_callers` — Comma-split `ext` filter
-
-**Tool:** `search_callers`
-
-**Scenario:** When the server is started with `--ext cs,ts` and the `search_callers` tool is
-called with `ext: "cs"`, the ext filter is correctly parsed and applied. Previously, the ext
-filter compared against the entire comma-separated string instead of splitting on commas first.
-
-**Expected:**
-
-- `ext: "cs"` correctly filters to only `.cs` files in the call tree
-- `ext: "ts"` correctly filters to only `.ts` files
-- No false negatives from comparing `"cs"` against `"cs,ts"` as a single string
-
-**Unit test:** [`test_search_callers_ext_filter_comma_split`](../src/mcp/handlers/handlers_tests.rs)
-
-**Source:** Shared T68
-
----
-
-#### T92: Directory validation — Security boundary tests (4 tests)
-
-**Tool:** `validate_search_dir()` utility function
-
-**Scenario:** The `validate_search_dir` function enforces that user-provided `dir` parameters
-cannot escape the server's `--dir` scope. Four boundary cases are validated:
-
-1. **Subdirectory accepted** — `dir: "src/mcp"` when server started with `--dir .` → allowed
-2. **Outside directory rejected** — `dir: "C:\Windows"` when server started with `--dir .` → error
-3. **Parent traversal rejected** — `dir: "../other-repo"` → error
-4. **Exact match accepted** — `dir` equals server `--dir` exactly → allowed
-
-**Expected:**
-
-- Subdirectories within `--dir`: `Ok(resolved_path)`
-- Directories outside `--dir`: `Err` with descriptive error message
-- Path traversal attempts: `Err` with descriptive error message
-- Exact `--dir` match: `Ok(path)`
-
-**Unit tests:**
-- [`test_validate_search_dir_subdirectory`](../src/mcp/handlers/handlers_tests.rs)
-- [`test_validate_search_dir_outside_rejects`](../src/mcp/handlers/handlers_tests.rs)
-- [`test_validate_search_dir_parent_traversal`](../src/mcp/handlers/handlers_tests.rs)
-- [`test_validate_search_dir_exact_match`](../src/mcp/handlers/handlers_tests.rs)
-
-**Source:** Shared T79/T80
-
----
-
-#### T93: `search_callers` — Ambiguity warning variants (3 tests)
-
-**Tool:** `search_callers`
-
-**Scenario:** When `search_callers` is called without a `class` parameter and the method name
-matches definitions in multiple classes, the response includes a warning. Three variants are tested:
-
-1. **No ambiguity** — method exists in only 1 class → no warning
-2. **Ambiguous (few classes)** — method exists in 2-3 classes → warning lists all class names
-3. **Truncated warning** — method exists in 10+ classes → warning lists at most 10 class names
-   followed by "…" to prevent multi-KB warning strings (fixes PBIClients T55 regression where
-   `ngOnInit` in 1899 classes produced ~56KB warnings)
-
-**Expected:**
-
-- Single-class: no `warning` field in response
-- Few classes: `warning` contains all class names, advises using `class` parameter
-- Many classes: `warning` truncated to ~10 class names + "…", mentions total count
-- Warning length stays under ~500 bytes regardless of class count
-
-**Unit tests:**
-- [`test_search_callers_ambiguity_warning_none`](../src/mcp/handlers/handlers_tests.rs)
-- [`test_search_callers_ambiguity_warning_few_classes`](../src/mcp/handlers/handlers_tests.rs)
-- [`test_search_callers_ambiguity_warning_truncated`](../src/mcp/handlers/handlers_tests.rs)
-
-**Source:** PBIClients T55
+**Unit test:** [`test_parse_ts_injection_token_variable`](../src/definitions/definitions_tests_typescript.rs)
