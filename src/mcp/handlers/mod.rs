@@ -33,13 +33,13 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: "search_grep".to_string(),
-            description: "Search file contents using an inverted index with TF-IDF ranking. LANGUAGE-AGNOSTIC: works with any text file (C#, Rust, Python, JS/TS, XML, JSON, config, etc.) — just specify the extension via ext parameter or server --ext flag. Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). IMPORTANT: When searching for all usages of a class/interface, use multi-term OR search to find ALL naming variants in ONE query. Example: to find all usages of MyClass, search for 'MyClass,IMyClass,MyClassFactory' with mode='or'. This is much faster than making separate queries for each variant. Comma-separated terms with mode='or' finds files containing ANY of the terms; mode='and' finds files containing ALL terms. SUBSTRING SEARCH IS ON BY DEFAULT: compound identifiers like 'IUserService', 'm_userService', 'DeleteUserServiceCacheEntry' are automatically found when searching for 'UserService'. Uses a trigram index (~1ms). Set substring=false for exact-token-only matching. Auto-disabled when regex or phrase is used. RESPONSE TRUNCATION: Large results are auto-truncated to ~16KB (~4K tokens) to protect LLM context. If summary.responseTruncated=true, narrow your query with dir/ext/excludeDir or use countOnly=true. Server flag --max-response-kb adjusts the limit (0=unlimited).".to_string(),
+            description: "Search file contents using an inverted index with TF-IDF ranking. LANGUAGE-AGNOSTIC: works with any text file (C#, Rust, Python, JS/TS, XML, JSON, config, etc.). Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). Substring search is ON by default. Large results are auto-truncated to ~16KB (~4K tokens). Use countOnly=true or narrow with dir/ext/excludeDir for focused results.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "terms": {
                         "type": "string",
-                        "description": "Search terms. Comma-separated for multi-term search. Single token: 'HttpClient'. Multi-term OR/AND: 'HttpClient,ILogger,Task' (finds files with ANY term when mode='or', or ALL terms when mode='and'). Always use comma-separated multi-term OR search when looking for all usages of a class -- include the class name, its interface, and related types in one query. Phrase (use with phrase=true): 'new HttpClient'. Regex (use with regex=true): 'I.*Cache'"
+                        "description": "Search terms. Comma-separated for multi-term search. Single token: 'HttpClient'. Multi-term OR/AND: 'HttpClient,ILogger,Task' (finds files with ANY term when mode='or', or ALL terms when mode='and'). Phrase (use with phrase=true): 'new HttpClient'. Regex (use with regex=true): 'I.*Cache'"
                     },
                     "dir": {
                         "type": "string",
@@ -52,7 +52,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "mode": {
                         "type": "string",
                         "enum": ["or", "and"],
-                        "description": "For multi-term search: 'or' = files containing ANY of the comma-separated terms (default), 'and' = files containing ALL terms. Use 'or' mode when searching for all usages/variants of a class (e.g., 'MyCache,IMyCache,MyCacheFactory'). Use 'and' mode when searching for files that use multiple specific types together."
+                        "description": "For multi-term search: 'or' = files containing ANY of the comma-separated terms (default), 'and' = files containing ALL terms."
                     },
                     "regex": {
                         "type": "boolean",
@@ -90,7 +90,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "substring": {
                         "type": "boolean",
-                        "description": "Treat each term as a substring to match within tokens (default: true). Finds compound C# identifiers automatically: 'UserService' matches 'IUserService', 'm_userService', 'UserServiceFactory'. Uses trigram index (~1ms). Set to false for exact-token-only matching. Auto-disabled when regex or phrase is used."
+                        "description": "Treat each term as a substring to match within tokens (default: true). Set to false for exact-token-only matching. Auto-disabled when regex or phrase is used."
                     }
                 },
                 "required": ["terms"]
@@ -257,7 +257,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_callers".to_string(),
-            description: "RECOMMENDED for call chain analysis — find all callers of a method and build a call tree (up or down) in a SINGLE sub-millisecond request. Supports C# and TypeScript/TSX. Replaces 7+ sequential search_grep + read_file calls. Combines grep index with AST definition index. Returns a hierarchical call tree with method signatures, file paths, and line numbers. IMPORTANT: Always specify the 'class' parameter when you know the containing class — without it, results may mix callers from unrelated classes that have a method with the same name. DI-aware: class='UserService' automatically includes callers using IUserService. Use 'ext' parameter to filter by language (e.g., ext='cs' for C# only, ext='ts' for TypeScript only). Known TS limitations: standalone function calls without a receiver may be ambiguous (no import resolution); arrow function class properties are supported. Requires server started with --definitions flag.".to_string(),
+            description: "RECOMMENDED for call chain analysis -- find all callers of a method and build a call tree (up or down) in a SINGLE sub-millisecond request. Supports C# and TypeScript/TSX. DI-aware. Returns a hierarchical call tree with method signatures, file paths, and line numbers. Always specify the 'class' parameter to avoid mixing callers from unrelated classes. Requires server started with --definitions flag.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
