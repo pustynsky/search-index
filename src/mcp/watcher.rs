@@ -38,6 +38,11 @@ pub fn start_watcher(
                 Ok(Ok(event)) => {
                     // Collect changed files
                     for path in &event.paths {
+                        // Skip .git directory — git operations generate massive event floods
+                        // and .git/config matches the "config" extension filter
+                        if is_inside_git_dir(path) {
+                            continue;
+                        }
                         if !matches_extensions(path, &extensions) {
                             continue;
                         }
@@ -115,6 +120,17 @@ pub fn start_watcher(
                             }
                             // Mark trigram index as dirty — will be rebuilt lazily on next substring search
                             idx.trigram_dirty = true;
+
+                            // Shrink collections after retain() to release excess capacity.
+                            // retain() reduces len but not capacity — shrink_to_fit() reclaims
+                            // the dead allocations, which mimalloc/system allocator can return to OS.
+                            for postings in idx.index.values_mut() {
+                                postings.shrink_to_fit();
+                            }
+                            idx.index.shrink_to_fit();
+                            if let Some(ref mut p2id) = idx.path_to_id {
+                                p2id.shrink_to_fit();
+                            }
                         }
                         Err(e) => {
                             error!(error = %e, "Failed to acquire content index write lock");
@@ -149,6 +165,13 @@ pub fn start_watcher(
     });
 
     Ok(())
+}
+
+/// Check if a path is inside a `.git` directory.
+/// Filters out git internal files that would otherwise match extension filters
+/// (e.g., `.git/config` matches "config" extension).
+fn is_inside_git_dir(path: &Path) -> bool {
+    path.components().any(|c| c.as_os_str() == ".git")
 }
 
 fn matches_extensions(path: &Path, extensions: &[String]) -> bool {
@@ -450,6 +473,23 @@ mod tests {
         assert!(matches_extensions(Path::new("bar.RS"), &exts));
         assert!(!matches_extensions(Path::new("baz.txt"), &exts));
         assert!(!matches_extensions(Path::new("no_ext"), &exts));
+    }
+
+    #[test]
+    fn test_is_inside_git_dir() {
+        // Should detect .git directory in various positions
+        assert!(is_inside_git_dir(Path::new(".git/config")));
+        assert!(is_inside_git_dir(Path::new(".git/HEAD")));
+        assert!(is_inside_git_dir(Path::new("repo/.git/config")));
+        assert!(is_inside_git_dir(Path::new("repo/.git/modules/sub/config")));
+        assert!(is_inside_git_dir(Path::new("C:/Projects/repo/.git/objects/pack/pack-abc.idx")));
+
+        // Should NOT flag normal files
+        assert!(!is_inside_git_dir(Path::new("src/main.rs")));
+        assert!(!is_inside_git_dir(Path::new("my-git-tool/config.xml")));
+        assert!(!is_inside_git_dir(Path::new(".gitignore")));
+        assert!(!is_inside_git_dir(Path::new(".github/workflows/ci.yml")));
+        assert!(!is_inside_git_dir(Path::new("docs/git-workflow.md")));
     }
 
     #[test]
