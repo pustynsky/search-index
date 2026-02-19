@@ -8,8 +8,21 @@ use serde_json::{json, Value};
 use crate::mcp::protocol::ToolCallResult;
 use crate::definitions::{DefinitionEntry, DefinitionKind};
 
-use super::utils::inject_body_into_obj;
+use super::utils::{inject_body_into_obj, best_match_tier};
 use super::HandlerContext;
+
+/// Returns 0 for type-level definitions (class, interface, enum, struct, record),
+/// 1 for everything else. Used as a tiebreaker in relevance ranking.
+fn kind_priority(kind: &DefinitionKind) -> u8 {
+    match kind {
+        DefinitionKind::Class
+        | DefinitionKind::Interface
+        | DefinitionKind::Enum
+        | DefinitionKind::Struct
+        | DefinitionKind::Record => 0,
+        _ => 1,
+    }
+}
 
 pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index = match &ctx.def_index {
@@ -296,6 +309,23 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
 
     let total_results = results.len();
 
+    // ── Relevance ranking (only when name filter is active and not regex) ──
+    if name_filter.is_some() && !use_regex {
+        let terms: Vec<String> = name_filter.unwrap().split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        results.sort_by(|a, b| {
+            let tier_a = best_match_tier(&a.name, &terms);
+            let tier_b = best_match_tier(&b.name, &terms);
+            tier_a.cmp(&tier_b)
+                .then_with(|| kind_priority(&a.kind).cmp(&kind_priority(&b.kind)))
+                .then_with(|| a.name.len().cmp(&b.name.len()))
+                .then_with(|| a.name.cmp(&b.name))
+        });
+    }
+
     // Apply max results
     if max_results > 0 && results.len() > max_results {
         results.truncate(max_results);
@@ -366,4 +396,97 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
     });
 
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::definitions::DefinitionKind;
+
+    // ─── kind_priority tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_kind_priority_class_returns_0() {
+        assert_eq!(kind_priority(&DefinitionKind::Class), 0);
+    }
+
+    #[test]
+    fn test_kind_priority_interface_returns_0() {
+        assert_eq!(kind_priority(&DefinitionKind::Interface), 0);
+    }
+
+    #[test]
+    fn test_kind_priority_enum_returns_0() {
+        assert_eq!(kind_priority(&DefinitionKind::Enum), 0);
+    }
+
+    #[test]
+    fn test_kind_priority_struct_returns_0() {
+        assert_eq!(kind_priority(&DefinitionKind::Struct), 0);
+    }
+
+    #[test]
+    fn test_kind_priority_record_returns_0() {
+        assert_eq!(kind_priority(&DefinitionKind::Record), 0);
+    }
+
+    #[test]
+    fn test_kind_priority_method_returns_1() {
+        assert_eq!(kind_priority(&DefinitionKind::Method), 1);
+    }
+
+    #[test]
+    fn test_kind_priority_function_returns_1() {
+        assert_eq!(kind_priority(&DefinitionKind::Function), 1);
+    }
+
+    #[test]
+    fn test_kind_priority_property_returns_1() {
+        assert_eq!(kind_priority(&DefinitionKind::Property), 1);
+    }
+
+    #[test]
+    fn test_kind_priority_field_returns_1() {
+        assert_eq!(kind_priority(&DefinitionKind::Field), 1);
+    }
+
+    #[test]
+    fn test_kind_priority_constructor_returns_1() {
+        assert_eq!(kind_priority(&DefinitionKind::Constructor), 1);
+    }
+
+    #[test]
+    fn test_kind_priority_delegate_returns_1() {
+        assert_eq!(kind_priority(&DefinitionKind::Delegate), 1);
+    }
+
+    #[test]
+    fn test_kind_priority_event_returns_1() {
+        assert_eq!(kind_priority(&DefinitionKind::Event), 1);
+    }
+
+    #[test]
+    fn test_kind_priority_enum_member_returns_1() {
+        assert_eq!(kind_priority(&DefinitionKind::EnumMember), 1);
+    }
+
+    #[test]
+    fn test_kind_priority_type_alias_returns_1() {
+        assert_eq!(kind_priority(&DefinitionKind::TypeAlias), 1);
+    }
+
+    #[test]
+    fn test_kind_priority_variable_returns_1() {
+        assert_eq!(kind_priority(&DefinitionKind::Variable), 1);
+    }
+
+    #[test]
+    fn test_kind_priority_type_level_before_members() {
+        // Verify that type-level definitions sort before member-level definitions
+        assert!(kind_priority(&DefinitionKind::Class) < kind_priority(&DefinitionKind::Method));
+        assert!(kind_priority(&DefinitionKind::Interface) < kind_priority(&DefinitionKind::Property));
+        assert!(kind_priority(&DefinitionKind::Enum) < kind_priority(&DefinitionKind::Field));
+        assert!(kind_priority(&DefinitionKind::Struct) < kind_priority(&DefinitionKind::Function));
+        assert!(kind_priority(&DefinitionKind::Record) < kind_priority(&DefinitionKind::Constructor));
+    }
 }

@@ -34,7 +34,8 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Parallel filesystem walk** — uses all available CPU cores for maximum throughput
 - **File name index** — pre-built index for instant file lookups (like [Everything](https://www.voidtools.com/))
 - **Inverted content index** — language-agnostic tokenizer maps tokens to files for instant full-text search across any text file (like Elasticsearch)
-- **TF-IDF ranking** — results sorted by relevance, most relevant files first
+- **TF-IDF ranking** — content search results sorted by relevance, most relevant files first
+- **Relevance ranking** — `search_definitions` and `search_fast` results sorted by match quality: exact match → prefix → contains, with kind and name-length tiebreakers
 - **Regex support** — full Rust regex syntax for pattern matching
 - **Respects `.gitignore`** — automatically skips ignored files
 - **Extension filtering** — limit search to specific file types

@@ -9,6 +9,7 @@ use tracing::info;
 use crate::mcp::protocol::ToolCallResult;
 
 use super::HandlerContext;
+use super::utils::best_match_tier;
 
 pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
@@ -108,6 +109,29 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
                 }));
             }
         }
+    }
+
+    // ── Relevance ranking: exact match first, then prefix, then contains ──
+    if !count_only {
+        results.sort_by(|a, b| {
+            let path_a = a["path"].as_str().unwrap_or("");
+            let path_b = b["path"].as_str().unwrap_or("");
+            // Extract filename stem (without extension) for matching
+            let stem_a = std::path::Path::new(path_a)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let stem_b = std::path::Path::new(path_b)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+
+            let tier_a = best_match_tier(stem_a, &search_terms);
+            let tier_b = best_match_tier(stem_b, &search_terms);
+            tier_a.cmp(&tier_b)
+                .then_with(|| stem_a.len().cmp(&stem_b.len()))
+                .then_with(|| path_a.cmp(path_b))
+        });
     }
 
     let elapsed = start.elapsed();

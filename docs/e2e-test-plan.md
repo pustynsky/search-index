@@ -4158,3 +4158,122 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 with the same method name do not cause false positive callers.
 
 **Status:** ✅ Covered by unit test `test_search_callers_same_name_different_receiver_interface_resolution` in `handlers_tests_csharp.rs`
+
+
+---
+
+## Relevance Ranking Tests
+
+The following test scenarios validate the relevance ranking behavior added to `search_definitions`,
+`search_fast`, and `search_grep` (phrase mode). Results are sorted by match quality so that the
+most relevant result appears first.
+
+### T-RANK-01: `best_match_tier()` — Unit tests for match tier classification
+
+**Function:** [`best_match_tier()`](../src/mcp/handlers/utils.rs:527)
+
+**Scenario:** The function classifies a name against search terms into three tiers:
+- Tier 0: exact match (case-insensitive)
+- Tier 1: prefix match (name starts with term)
+- Tier 2: contains/default (name contains term or doesn't match)
+
+**Tests (9 tests in `utils.rs`):**
+
+| Test | Input | Expected |
+|------|-------|----------|
+| Exact match | `"UserService"` vs `["userservice"]` | 0 |
+| Case insensitive | `"USERSERVICE"` vs `["userservice"]` | 0 |
+| Prefix match | `"UserServiceFactory"` vs `["userservice"]` | 1 |
+| Contains only | `"IUserService"` vs `["userservice"]` | 2 |
+| No match | `"OrderProcessor"` vs `["userservice"]` | 2 |
+| Multiple terms best wins | `"UserService"` vs `["order", "userservice"]` | 0 |
+| Empty terms | `"UserService"` vs `[]` | 2 |
+| Exact beats prefix | `"IUserService"` vs `["iuserservice", "userservice"]` | 0 |
+| Prefix beats contains | `"UserService"` vs `["user"]` → 1; `"IUserService"` vs `["user"]` → 2 |
+
+**Status:** ✅ Covered by unit tests `test_best_match_tier_*` in [`utils.rs`](../src/mcp/handlers/utils.rs)
+
+---
+
+### T-RANK-02: `kind_priority()` — Unit tests for definition kind tiebreaker
+
+**Function:** [`kind_priority()`](../src/mcp/handlers/definitions.rs:16)
+
+**Scenario:** The function assigns priority 0 to type-level definitions (class, interface, enum,
+struct, record) and priority 1 to everything else (method, function, property, field, constructor,
+delegate, event, enumMember, typeAlias, variable). Used as a tiebreaker when match tier is equal.
+
+**Tests (16 tests in `definitions.rs`):**
+
+| Kind | Expected Priority |
+|------|-------------------|
+| Class, Interface, Enum, Struct, Record | 0 |
+| Method, Function, Property, Field, Constructor, Delegate, Event, EnumMember, TypeAlias, Variable | 1 |
+
+**Status:** ✅ Covered by unit tests `test_kind_priority_*` in [`definitions.rs`](../src/mcp/handlers/definitions.rs)
+
+---
+
+### T-RANK-03: `search_definitions` — Relevance ranking (exact → prefix → contains)
+
+**Tool:** `search_definitions`
+
+**Scenario:** When searching for `"UserService"`, results are sorted by:
+1. Match tier (exact=0 → prefix=1 → contains=2)
+2. Kind priority (class/interface=0 → method/property=1)
+3. Name length (shorter first)
+4. Alphabetical
+
+**Expected order:**
+1. `UserService` (class) — exact match, kind=0
+2. `UserServiceFactory` (class) — prefix match, kind=0
+3. `UserServiceHelper` (method) — prefix match, kind=1
+4. `IUserService` (interface) — contains match, kind=0
+
+**Unit tests (4 tests in `handlers_tests.rs`):**
+- [`test_search_definitions_ranking_exact_first`](../src/mcp/handlers/handlers_tests.rs) — exact match appears first
+- [`test_search_definitions_ranking_prefix_before_contains`](../src/mcp/handlers/handlers_tests.rs) — prefix matches before contains
+- [`test_search_definitions_ranking_kind_and_length_tiebreak`](../src/mcp/handlers/handlers_tests.rs) — class before method among prefix matches
+- [`test_search_definitions_ranking_not_applied_with_regex`](../src/mcp/handlers/handlers_tests.rs) — ranking not applied in regex mode
+
+**Status:** ✅ Covered by unit tests
+
+---
+
+### T-RANK-04: `search_fast` — Relevance ranking (exact stem → prefix → contains)
+
+**Tool:** `search_fast`
+
+**Scenario:** When searching for `"UserService"` with `ignoreCase: true`, file results are sorted by:
+1. Best match tier on file stem (without extension)
+2. Stem length (shorter first)
+3. Full path alphabetical
+
+**Expected order:**
+1. `UserService.cs` — exact stem match (tier 0)
+2. `UserServiceFactory.cs` — prefix match (tier 1), shorter stem
+3. `UserServiceHelpers.cs` — prefix match (tier 1), longer stem
+4. `IUserService.cs` — contains match (tier 2)
+
+**Unit tests (2 tests in `handlers_tests.rs`):**
+- [`test_search_fast_ranking_exact_stem_first`](../src/mcp/handlers/handlers_tests.rs) — exact stem match first, prefix before contains
+- [`test_search_fast_ranking_shorter_stem_first`](../src/mcp/handlers/handlers_tests.rs) — shorter stems before longer among same tier
+
+**Status:** ✅ Covered by unit tests
+
+---
+
+### T-RANK-05: `search_grep` phrase mode — Sort by occurrence count descending
+
+**Tool:** `search_grep` (phrase mode)
+
+**Scenario:** When using `phrase: true`, results are sorted by number of occurrences (matching
+lines) in descending order — files with more matches appear first.
+
+**Expected:**
+- File with 3 occurrences appears before file with 2, which appears before file with 1
+- `files[i].occurrences >= files[i+1].occurrences` for all i
+
+**Unit test:** [`test_search_grep_phrase_sort_by_occurrences`](../src/mcp/handlers/handlers_tests.rs)
+
+**Status:** ✅ Covered by unit test
