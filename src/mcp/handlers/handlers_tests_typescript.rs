@@ -2,6 +2,7 @@
 //! Split from handlers_tests.rs for maintainability. Mirrors handlers_tests_csharp.rs patterns.
 
 use super::*;
+use super::handlers_test_utils::cleanup_tmp;
 use crate::index::build_trigram_index;
 use crate::Posting;
 use crate::TrigramIndex;
@@ -12,8 +13,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
 // ─── Helpers ─────────────────────────────────────────────────────────
-
-fn cleanup_tmp(tmp_dir: &std::path::Path) { let _ = std::fs::remove_dir_all(tmp_dir); }
 
 /// Helper: create a context with both content + definition indexes (TypeScript classes/methods/functions/etc).
 fn make_ts_ctx_with_defs() -> HandlerContext {

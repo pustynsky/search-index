@@ -563,6 +563,9 @@ fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> Tool
 // all re-exported symbols.
 
 #[cfg(test)]
+mod handlers_test_utils;
+
+#[cfg(test)]
 #[path = "handlers_tests.rs"]
 mod tests;
 
