@@ -779,3 +779,135 @@ fn test_parse_ts_injection_token_variable() {
         );
     }
 }
+
+// ─── TypeScript Local Variable Type Extraction Tests ─────────────────
+
+#[test]
+fn test_ts_local_var_explicit_type_annotation() {
+    let source = r#"class UserService {
+    private repo: UserRepository;
+
+    getUser(id: number): void {
+        const result: UserResult = this.repo.findById(id);
+        result.validate();
+    }
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let gi = defs.iter().position(|d| d.name == "getUser").unwrap();
+    let gc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == gi).collect();
+    assert!(!gc.is_empty(), "Expected call sites for 'getUser'");
+
+    let validate = gc[0].1.iter().find(|c| c.method_name == "validate");
+    assert!(validate.is_some(), "Expected call to 'validate'");
+    assert_eq!(
+        validate.unwrap().receiver_type.as_deref(),
+        Some("UserResult"),
+        "Local var 'result' with explicit type annotation ':UserResult' should resolve receiver_type"
+    );
+}
+
+#[test]
+fn test_ts_local_var_new_expression() {
+    let source = r#"class OrderService {
+    processOrder(): void {
+        const validator = new OrderValidator();
+        validator.check();
+    }
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "processOrder").unwrap();
+    let pc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'processOrder'");
+
+    let check = pc[0].1.iter().find(|c| c.method_name == "check");
+    assert!(check.is_some(), "Expected call to 'check'");
+    assert_eq!(
+        check.unwrap().receiver_type.as_deref(),
+        Some("OrderValidator"),
+        "Local var 'validator' assigned from 'new OrderValidator()' should resolve receiver_type"
+    );
+}
+
+#[test]
+fn test_ts_local_var_new_expression_with_generics() {
+    let source = r#"class DataService {
+    loadData(): void {
+        const cache = new DataCache<string>();
+        cache.get("key");
+    }
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let li = defs.iter().position(|d| d.name == "loadData").unwrap();
+    let lc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == li).collect();
+    assert!(!lc.is_empty(), "Expected call sites for 'loadData'");
+
+    let get = lc[0].1.iter().find(|c| c.method_name == "get");
+    assert!(get.is_some(), "Expected call to 'get'");
+    assert_eq!(
+        get.unwrap().receiver_type.as_deref(),
+        Some("DataCache"),
+        "Local var 'cache' from 'new DataCache<string>()' should resolve receiver_type to 'DataCache' (stripped generics)"
+    );
+}
+
+#[test]
+fn test_ts_local_var_no_type_annotation() {
+    let source = r#"class SomeService {
+    doWork(): void {
+        const result = this.calculate();
+        result.process();
+    }
+    calculate(): any { return null; }
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let di = defs.iter().position(|d| d.name == "doWork").unwrap();
+    let dc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == di).collect();
+    assert!(!dc.is_empty(), "Expected call sites for 'doWork'");
+
+    let process = dc[0].1.iter().find(|c| c.method_name == "process");
+    assert!(process.is_some(), "Expected call to 'process'");
+    assert_eq!(
+        process.unwrap().receiver_type,
+        None,
+        "Local var 'result' with no type annotation and no new expression should have receiver_type = None"
+    );
+}
+
+#[test]
+fn test_ts_local_var_field_types_take_precedence() {
+    let source = r#"class MyComponent {
+    private result: FieldType;
+
+    doWork(): void {
+        const result: LocalType = getValue();
+        this.result.fieldMethod();
+    }
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let di = defs.iter().position(|d| d.name == "doWork").unwrap();
+    let dc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == di).collect();
+    assert!(!dc.is_empty(), "Expected call sites for 'doWork'");
+
+    let field_method = dc[0].1.iter().find(|c| c.method_name == "fieldMethod");
+    assert!(field_method.is_some(), "Expected call to 'fieldMethod'");
+    assert_eq!(
+        field_method.unwrap().receiver_type.as_deref(),
+        Some("FieldType"),
+        "this.result.fieldMethod() should resolve to field type 'FieldType', not local var type 'LocalType'"
+    );
+}

@@ -3682,3 +3682,145 @@ The following internal optimizations are covered by unit tests in `src/mcp/watch
 |--------|-----------|-------------|
 | `.git/` directory filtering in watcher | `test_is_inside_git_dir` | Watcher now skips files inside `.git/` directories to avoid indexing git internals (e.g., `.git/config` matching "config" extension) |
 | `shrink_to_fit()` after `retain()` | (behavioral — no dedicated test) | After incremental updates, all `HashMap`/`Vec` collections call `shrink_to_fit()` to release excess capacity from `retain()` operations |
+
+
+---
+
+### T65: Local Variable Type Extraction — TypeScript
+
+**Background:** The TypeScript parser extracts type information from local variable declarations to resolve `receiver_type` on call sites. This covers:
+1. Explicit type annotations: `const result: UserResult = ...` → `result.validate()` has `receiver_type = "UserResult"`
+2. `new` expressions: `const v = new OrderValidator()` → `v.check()` has `receiver_type = "OrderValidator"`
+3. Generic `new` expressions: `const c = new DataCache<string>()` → `c.get()` has `receiver_type = "DataCache"` (generics stripped)
+4. No type info: `const r = this.calculate()` → `r.process()` has `receiver_type = None`
+5. Field types take precedence: `this.result.fieldMethod()` resolves to field type, not local var with same name
+
+**Validates:** Local variable type extraction in TypeScript parser, `receiver_type` resolution for call sites using local variables.
+
+**Status:** ✅ Covered by unit tests: `test_ts_local_var_explicit_type_annotation`, `test_ts_local_var_new_expression`, `test_ts_local_var_new_expression_with_generics`, `test_ts_local_var_no_type_annotation`, `test_ts_local_var_field_types_take_precedence`
+
+---
+
+### T66: Local Variable Type Extraction — C#
+
+**Background:** The C# parser extracts type information from local variable declarations to resolve `receiver_type` on call sites. This covers:
+1. Explicit type: `UserResult result = ...` → `result.Validate()` has `receiver_type = "UserResult"`
+2. `var = new`: `var v = new OrderValidator()` → `v.Check()` has `receiver_type = "OrderValidator"`
+3. `var` without `new`: `var r = Calculate()` → `r.Process()` has `receiver_type = None`
+4. Generic types: `List<User> users = ...` → `users.Add()` has `receiver_type = "List"` (generics stripped)
+
+**Parser fix:** tree-sitter C# 0.23 places `object_creation_expression` as a direct child of `variable_declarator` (not wrapped in `equals_value_clause`). The parser now checks both locations.
+
+**Validates:** Local variable type extraction in C# parser, `receiver_type` resolution for call sites using local variables, `var = new X()` inference.
+
+**Status:** ✅ Covered by unit tests: `test_csharp_local_var_explicit_type`, `test_csharp_local_var_new_expression`, `test_csharp_local_var_var_without_new`, `test_csharp_local_var_generic_type`
+
+
+---
+
+### T67: Direction=up — False Positive Filtering with Receiver Type Mismatch
+
+**Background:** When `search_callers` runs with `direction=up`, the `verify_call_site_target()` function filters out false positive callers where the `receiver_type` on a call site doesn't match the target class. For example, if searching for callers of `TaskRunner.resolve()`, a file containing `path.resolve()` should NOT appear as a caller because the `receiver_type` is `"Path"`, not `"TaskRunner"`.
+
+**Setup:** Create TypeScript files:
+- `task.ts`: `export class TaskRunner { resolve() { return true; } }`
+- `caller_good.ts`: `import { TaskRunner } from './task'; const t = new TaskRunner(); t.resolve();` (inside a function/method)
+- `caller_false.ts`: `import * as path from 'path'; function build() { path.resolve('/tmp'); }` (unrelated `resolve()` call)
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"resolve","class":"TaskRunner","direction":"up","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
+```
+
+**Expected:**
+
+- `callTree` does NOT include `caller_false.ts` (receiver_type mismatch: `path` ≠ `TaskRunner`)
+- `callTree` includes `caller_good.ts` (receiver_type matches or is compatible with `TaskRunner`)
+- `summary.totalNodes` reflects only verified callers
+
+**Validates:** `verify_call_site_target()` in up-direction correctly filters out false positives based on `receiver_type` mismatch.
+
+**Status:** ✅ Covered by unit tests: `test_ts_search_callers_up_filters_false_positives` (planned), parser-level tests for local var type extraction
+
+---
+
+### T68: Direction=up — Graceful Fallback When No Call-Site Data
+
+**Background:** When `verify_call_site_target()` encounters a caller file that has no call-site data (e.g., the file was not parsed by tree-sitter, or the method call was in a pattern not recognized by the parser), the verification should gracefully fall back to including the caller (no false negatives from missing data).
+
+**Setup:** Create TypeScript files:
+- `service.ts`: `export class DataService { fetch() { return []; } }`
+- `consumer.ts`: Contains a call to `fetch()` but in a pattern where call-site data may not have `receiver_type` (e.g., via destructuring or dynamic dispatch)
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"fetch","class":"DataService","direction":"up","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
+```
+
+**Expected:**
+
+- `callTree` includes callers even when `receiver_type` is `None` (graceful fallback)
+- No false negatives: callers without call-site data are NOT filtered out
+- No errors or crashes from missing data
+
+**Validates:** `verify_call_site_target()` gracefully handles missing `receiver_type` (None) — no false negatives from incomplete call-site data.
+
+**Status:** ✅ Covered by unit tests in `handlers_tests_typescript.rs`
+
+
+---
+
+### T69: Direction=up — Comment-Line False Positive Filtered
+
+**Background:** When the content index matches a method name appearing in a **comment** (not a real call), `verify_call_site_target()` should filter it out. This is language-agnostic (affects both C# and TypeScript). Before the fix, comment lines containing the method name were incorrectly treated as valid call sites, producing false positive callers.
+
+**Setup:** Create TypeScript files:
+- `task-runner.ts`: `export class TaskRunner { resolve(): void { console.log("resolved"); } }`
+- `consumer.ts`: Contains "resolve" in comments (lines 5-6) AND a real call `runner.resolve()` (line 8)
+
+```typescript
+// consumer.ts
+import { TaskRunner } from "./task-runner";
+
+export class Consumer {
+    processData(): void {
+        // We need to resolve the task before proceeding
+        // The resolve method handles cleanup
+        const runner = new TaskRunner();
+        runner.resolve();
+    }
+}
+```
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"resolve","class":"TaskRunner","direction":"up","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
+```
+
+**Expected:**
+
+- `callTree` includes `Consumer.processData` (real call at `runner.resolve()`)
+- Result count is exactly 1 — comment lines containing "resolve" are NOT false positives
+- No errors or crashes
+
+**Validates:** `verify_call_site_target()` correctly filters comment-line matches from the content index. The content index matches multiple lines containing "resolve" (comments + real call), but only the real call site survives verification.
+
+**Status:** ✅ Covered by E2E test in `e2e-test.ps1` and unit tests in `handlers_tests_typescript.rs`
