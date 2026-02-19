@@ -260,6 +260,20 @@ fn find_child_by_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tre
     None
 }
 
+fn find_descendant_by_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if child.kind() == kind {
+                return Some(child);
+            }
+            if let Some(found) = find_descendant_by_kind(child, kind) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 fn find_child_by_field<'a>(node: tree_sitter::Node<'a>, field: &str) -> Option<tree_sitter::Node<'a>> {
     node.child_by_field_name(field)
 }
@@ -1076,6 +1090,121 @@ fn extract_ts_constructor_param_types(sig: &str) -> Vec<(String, String)> {
     result
 }
 
+/// Extracts type annotations from local variable declarations in a method body.
+/// Handles two patterns:
+/// 1. Explicit type annotation: const x: Foo = ...
+/// 2. Constructor inference: const x = new Foo(...)
+/// Returns a map of variable_name -> base_type.
+fn extract_ts_local_var_types(
+    body_node: tree_sitter::Node,
+    source: &str,
+) -> HashMap<String, String> {
+    let mut vars = HashMap::new();
+    collect_ts_local_var_types(body_node, source, &mut vars);
+    vars
+}
+
+fn collect_ts_local_var_types(
+    node: tree_sitter::Node,
+    source: &str,
+    vars: &mut HashMap<String, String>,
+) {
+    match node.kind() {
+        "lexical_declaration" | "variable_declaration" => {
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i) {
+                    if child.kind() == "variable_declarator" {
+                        extract_ts_var_declarator_type(child, source, vars);
+                    }
+                }
+            }
+        }
+        // Don't recurse into nested functions/classes/arrow functions
+        "function_declaration" | "arrow_function" | "class_declaration"
+        | "method_definition" => return,
+        _ => {}
+    }
+
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            collect_ts_local_var_types(child, source, vars);
+        }
+    }
+}
+
+fn extract_ts_var_declarator_type(
+    node: tree_sitter::Node,
+    source: &str,
+    vars: &mut HashMap<String, String>,
+) {
+    // Get variable name
+    let name_node = match node.child_by_field_name("name") {
+        Some(n) => n,
+        None => return,
+    };
+    let name = node_text(name_node, source).trim().to_string();
+    if name.is_empty() { return; }
+
+    // Path 1: explicit type annotation — const x: Foo = ...
+    if let Some(type_node) = find_child_by_kind(node, "type_annotation") {
+        let type_text = node_text(type_node, source).trim();
+        let type_str = type_text.strip_prefix(':').unwrap_or(type_text).trim();
+        let base_type = type_str
+            .split('<')
+            .next()
+            .unwrap_or(type_str)
+            .trim()
+            .to_string();
+        if !base_type.is_empty() && base_type.chars().next().is_some_and(|c| c.is_uppercase()) {
+            vars.insert(name, base_type);
+            return;
+        }
+    }
+
+    // Path 2: infer from new expression — const x = new Foo(...)
+    if let Some(value_node) = node.child_by_field_name("value") {
+        if let Some(new_type) = extract_type_from_new_expr(value_node, source) {
+            vars.insert(name, new_type);
+        }
+    }
+}
+
+/// Extracts the constructor name from a `new_expression` node or its wrapper.
+/// Handles: new Foo(), new Foo<T>(), new ns.Foo()
+/// Returns the simple class name (last segment, without generics).
+fn extract_type_from_new_expr(
+    node: tree_sitter::Node,
+    source: &str,
+) -> Option<String> {
+    let new_expr = if node.kind() == "new_expression" {
+        Some(node)
+    } else {
+        find_descendant_by_kind(node, "new_expression")
+    };
+
+    let new_expr = new_expr?;
+    // In tree-sitter-typescript, new_expression children:
+    // child(0) = "new" keyword, child(1) = constructor identifier/member_expression
+    let constructor_node = new_expr.child(1)?;
+    let text = node_text(constructor_node, source).trim().to_string();
+
+    // Handle ns.Foo → take "Foo" (last segment)
+    let simple_name = text.rsplit('.').next().unwrap_or(&text);
+    // Strip generics: Foo<T> → Foo
+    let base = simple_name
+        .split('<')
+        .next()
+        .unwrap_or(simple_name)
+        .trim()
+        .to_string();
+
+    if !base.is_empty() && base.chars().next().is_some_and(|c| c.is_uppercase()) {
+        Some(base)
+    } else {
+        None
+    }
+}
+
 /// Extract call sites from a method/function body node.
 fn extract_ts_call_sites(
     method_node: tree_sitter::Node,
@@ -1090,7 +1219,14 @@ fn extract_ts_call_sites(
         .or_else(|| find_child_by_kind(method_node, "arrow_function"))
         .unwrap_or(method_node);
 
-    walk_ts_for_invocations(body, source, class_name, field_types, &mut calls);
+    // Extract local variable types and merge with field types
+    let local_vars = extract_ts_local_var_types(body, source);
+    let mut combined_types = field_types.clone();
+    for (name, type_name) in local_vars {
+        combined_types.entry(name).or_insert(type_name);
+    }
+
+    walk_ts_for_invocations(body, source, class_name, &combined_types, &mut calls);
 
     calls.sort_by(|a, b| {
         a.line

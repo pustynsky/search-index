@@ -497,3 +497,117 @@ namespace TestApp
     let ctor_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Constructor).collect();
     assert_eq!(ctor_defs.len(), 1, "Should find constructor");
 }
+
+// ─── C# Local Variable Type Extraction Tests ────────────────────────
+
+#[test]
+fn test_csharp_local_var_explicit_type() {
+    let source = r#"
+public class UserService {
+    private UserRepository _repo;
+
+    public void GetUser(int id) {
+        UserResult result = _repo.FindById(id);
+        result.Validate();
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let gi = defs.iter().position(|d| d.name == "GetUser").unwrap();
+    let gc: Vec<_> = cs.iter().filter(|(i, _)| *i == gi).collect();
+    assert!(!gc.is_empty(), "Expected call sites for 'GetUser'");
+
+    let validate = gc[0].1.iter().find(|c| c.method_name == "Validate");
+    assert!(validate.is_some(), "Expected call to 'Validate'");
+    assert_eq!(
+        validate.unwrap().receiver_type.as_deref(),
+        Some("UserResult"),
+        "Local var 'result' with explicit type 'UserResult' should resolve receiver_type"
+    );
+}
+
+#[test]
+fn test_csharp_local_var_new_expression() {
+    let source = r#"
+public class OrderService {
+    public void ProcessOrder() {
+        var validator = new OrderValidator();
+        validator.Check();
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "ProcessOrder").unwrap();
+    let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'ProcessOrder'");
+
+    let check = pc[0].1.iter().find(|c| c.method_name == "Check");
+    assert!(check.is_some(), "Expected call to 'Check'");
+    assert_eq!(
+        check.unwrap().receiver_type.as_deref(),
+        Some("OrderValidator"),
+        "Local var 'validator' with 'var = new OrderValidator()' should infer receiver_type from new expression"
+    );
+}
+
+#[test]
+fn test_csharp_local_var_var_without_new() {
+    let source = r#"
+public class SomeService {
+    public void DoWork() {
+        var result = Calculate();
+        result.Process();
+    }
+    private object Calculate() { return null; }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let di = defs.iter().position(|d| d.name == "DoWork").unwrap();
+    let dc: Vec<_> = cs.iter().filter(|(i, _)| *i == di).collect();
+    assert!(!dc.is_empty(), "Expected call sites for 'DoWork'");
+
+    let process = dc[0].1.iter().find(|c| c.method_name == "Process");
+    assert!(process.is_some(), "Expected call to 'Process'");
+    assert_eq!(
+        process.unwrap().receiver_type,
+        None,
+        "Local var 'result' with 'var' and no 'new' expression should have receiver_type = None"
+    );
+}
+
+#[test]
+fn test_csharp_local_var_generic_type() {
+    let source = r#"
+public class DataService {
+    public void LoadData() {
+        List<User> users = GetUsers();
+        users.Add(new User());
+    }
+    private List<User> GetUsers() { return null; }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let li = defs.iter().position(|d| d.name == "LoadData").unwrap();
+    let lc: Vec<_> = cs.iter().filter(|(i, _)| *i == li).collect();
+    assert!(!lc.is_empty(), "Expected call sites for 'LoadData'");
+
+    let add = lc[0].1.iter().find(|c| c.method_name == "Add");
+    assert!(add.is_some(), "Expected call to 'Add'");
+    assert_eq!(
+        add.unwrap().receiver_type.as_deref(),
+        Some("List"),
+        "Local var 'users' with generic type 'List<User>' should resolve receiver_type to 'List' (stripped generics)"
+    );
+}

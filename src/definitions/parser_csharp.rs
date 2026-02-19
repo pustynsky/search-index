@@ -161,7 +161,14 @@ fn extract_call_sites(
         .or_else(|| find_child_by_kind(method_node, "arrow_expression_clause"));
 
     if let Some(body_node) = body {
-        walk_for_invocations(body_node, source, class_name, field_types, base_types, &mut calls);
+        // Extract local variable types and merge with field types
+        let local_vars = extract_csharp_local_var_types(body_node, source);
+        let mut combined_types = field_types.clone();
+        for (name, type_name) in local_vars {
+            combined_types.entry(name).or_insert(type_name);
+        }
+
+        walk_for_invocations(body_node, source, class_name, &combined_types, base_types, &mut calls);
     }
 
     calls.sort_by(|a, b| a.line.cmp(&b.line)
@@ -451,6 +458,20 @@ fn find_child_by_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tre
     None
 }
 
+fn find_descendant_by_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if child.kind() == kind {
+                return Some(child);
+            }
+            if let Some(found) = find_descendant_by_kind(child, kind) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 fn find_child_by_field<'a>(node: tree_sitter::Node<'a>, field: &str) -> Option<tree_sitter::Node<'a>> {
     node.child_by_field_name(field)
 }
@@ -682,6 +703,134 @@ fn extract_csharp_event_def(
         parent: parent_name.map(|s| s.to_string()),
         signature: None, modifiers, attributes, base_types: Vec::new(),
     })
+}
+
+// ─── Local variable type extraction ─────────────────────────────────
+
+/// Extracts type annotations from local variable declarations in a C# method body.
+/// Handles two patterns:
+/// 1. Explicit type: `UserResult result = ...`
+/// 2. Constructor inference: `var result = new UserResult(...)`
+fn extract_csharp_local_var_types(
+    body_node: tree_sitter::Node,
+    source: &[u8],
+) -> HashMap<String, String> {
+    let mut vars = HashMap::new();
+    collect_csharp_local_var_types(body_node, source, &mut vars);
+    vars
+}
+
+fn collect_csharp_local_var_types(
+    node: tree_sitter::Node,
+    source: &[u8],
+    vars: &mut HashMap<String, String>,
+) {
+    match node.kind() {
+        "local_declaration_statement" => {
+            if let Some(var_decl) = find_child_by_kind(node, "variable_declaration") {
+                extract_csharp_var_declaration_types(var_decl, source, vars);
+            }
+        }
+        // Don't recurse into nested methods/lambdas
+        "local_function_statement" | "lambda_expression"
+        | "anonymous_method_expression" => return,
+        _ => {}
+    }
+
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            collect_csharp_local_var_types(child, source, vars);
+        }
+    }
+}
+
+fn extract_csharp_var_declaration_types(
+    var_decl: tree_sitter::Node,
+    source: &[u8],
+    vars: &mut HashMap<String, String>,
+) {
+    // Get the type node — first child of variable_declaration
+    let type_node = match var_decl.child(0) {
+        Some(n) => n,
+        None => return,
+    };
+    let type_text = node_text(type_node, source).trim().to_string();
+
+    let is_var_or_dynamic = type_text == "var" || type_text == "dynamic";
+
+    // For explicit types (not var/dynamic), extract the base type
+    let explicit_base_type = if !is_var_or_dynamic {
+        let base = type_text.split('<').next().unwrap_or(&type_text).trim().to_string();
+        if !base.is_empty() && base.chars().next().is_some_and(|c| c.is_uppercase()) {
+            Some(base)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // Iterate over variable_declarator children
+    for i in 0..var_decl.child_count() {
+        if let Some(child) = var_decl.child(i) {
+            if child.kind() == "variable_declarator" {
+                // Get variable name — try field "name" first, then first child
+                let name_node = find_child_by_field(child, "name")
+                    .or_else(|| child.child(0));
+                if let Some(name_n) = name_node {
+                    if name_n.kind() == "identifier" {
+                        let name = node_text(name_n, source).trim().to_string();
+                        if name.is_empty() { continue; }
+
+                        if let Some(ref base_type) = explicit_base_type {
+                            // Path 1: explicit type
+                            vars.insert(name, base_type.clone());
+                        } else if is_var_or_dynamic {
+                            // Path 2: try to infer from new expression
+                            // Try equals_value_clause first, then direct child (tree-sitter C# 0.23
+                            // puts object_creation_expression as a direct child of variable_declarator)
+                            let new_type = find_child_by_kind(child, "equals_value_clause")
+                                .and_then(|eq| extract_csharp_type_from_new_expr(eq, source))
+                                .or_else(|| extract_csharp_type_from_new_expr(child, source));
+                            if let Some(t) = new_type {
+                                vars.insert(name, t);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Extracts the type name from a C# object creation expression.
+/// Handles: `new Foo()`, `new Foo<T>()`, `new ns.Foo(args)`
+fn extract_csharp_type_from_new_expr(
+    node: tree_sitter::Node,
+    source: &[u8],
+) -> Option<String> {
+    // Look for object_creation_expression (C# equivalent of TS new_expression)
+    let new_expr = if node.kind() == "object_creation_expression" {
+        Some(node)
+    } else {
+        find_descendant_by_kind(node, "object_creation_expression")
+    };
+
+    let new_expr = new_expr?;
+
+    // In C# tree-sitter, object_creation_expression: child(0) = "new", child(1) = type
+    let type_node = new_expr.child(1)?;
+    let text = node_text(type_node, source).trim().to_string();
+
+    // Strip namespaces (ns.Foo → Foo) and generics (Foo<T> → Foo)
+    let simple_name = text.rsplit('.').next().unwrap_or(&text);
+    let base = simple_name.split('<').next().unwrap_or(simple_name).trim().to_string();
+
+    if !base.is_empty() && base.chars().next().is_some_and(|c| c.is_uppercase()) {
+        Some(base)
+    } else {
+        None
+    }
 }
 
 fn extract_csharp_enum_member(

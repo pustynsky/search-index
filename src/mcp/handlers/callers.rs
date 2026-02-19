@@ -290,6 +290,169 @@ fn collect_substring_file_ids(
     }
 }
 
+/// Finds the definition index for a method/function/constructor at a given file_id and line_start.
+/// Uses file_index for fast lookup instead of scanning all definitions.
+fn find_method_def_index(
+    def_idx: &DefinitionIndex,
+    file_id: u32,
+    method_line_start: u32,
+) -> Option<u32> {
+    let file_defs = def_idx.file_index.get(&file_id)?;
+    file_defs.iter().find_map(|&di| {
+        let d = def_idx.definitions.get(di as usize)?;
+        if d.line_start == method_line_start
+            && matches!(
+                d.kind,
+                DefinitionKind::Method | DefinitionKind::Function | DefinitionKind::Constructor
+            )
+        {
+            Some(di)
+        } else {
+            None
+        }
+    })
+}
+
+/// Verifies that a call on a specific line actually targets the expected class.
+/// Uses pre-computed call-site data from the definition index.
+///
+/// Returns true if:
+/// - The call-site has a receiver_type matching target_class (direct, interface I-prefix, or inheritance)
+/// - The call-site has no receiver_type AND the caller is in the same class or inherits from target
+/// - No call-site data exists (graceful fallback — don't filter what we can't verify)
+/// - target_class is None (no filtering needed)
+///
+/// Returns false if:
+/// - The call-site has a receiver_type that does NOT match target_class
+fn verify_call_site_target(
+    def_idx: &DefinitionIndex,
+    caller_di: u32,
+    call_line: u32,
+    method_name: &str,
+    target_class: Option<&str>,
+) -> bool {
+    // If no target class specified, accept everything
+    let target_class = match target_class {
+        Some(tc) => tc,
+        None => return true,
+    };
+
+    // Get call sites for the caller method from the definition index
+    let call_sites = match def_idx.method_calls.get(&caller_di) {
+        Some(cs) => cs,
+        None => return true, // graceful fallback: no call-site data available
+    };
+
+    // Find call sites on the specified line with the matching method name
+    let method_name_lower = method_name.to_lowercase();
+    let matching_calls: Vec<&CallSite> = call_sites
+        .iter()
+        .filter(|cs| cs.line == call_line && cs.method_name.to_lowercase() == method_name_lower)
+        .collect();
+
+    // If no call-site data found on this line:
+    // Method has call-site data but no call at this line →
+    // content index matched a comment or non-code text → filter out
+    if matching_calls.is_empty() {
+        return call_sites.is_empty(); // true only if method has zero call data (shouldn't happen but safe)
+    }
+
+    let target_lower = target_class.to_lowercase();
+    // Also prepare interface variant: "IFoo" for "Foo"
+    let target_interface = format!("i{}", target_lower);
+
+    // Get the caller method's definition to check parent class
+    let caller_def = match def_idx.definitions.get(caller_di as usize) {
+        Some(d) => d,
+        None => return true,
+    };
+    let caller_parent = caller_def.parent.as_deref();
+
+    // Get target class's base_types for inheritance check
+    let target_base_types: Vec<String> = def_idx
+        .name_index
+        .get(&target_lower)
+        .map(|indices| {
+            indices
+                .iter()
+                .filter_map(|&di| def_idx.definitions.get(di as usize))
+                .filter(|d| {
+                    matches!(
+                        d.kind,
+                        DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record
+                    )
+                })
+                .flat_map(|d| d.base_types.iter().map(|bt| bt.to_lowercase()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Check if ANY matching call-site passes verification
+    for cs in &matching_calls {
+        match &cs.receiver_type {
+            Some(rt) => {
+                let rt_lower = rt.to_lowercase();
+                // Direct match
+                if rt_lower == target_lower {
+                    return true;
+                }
+                // Interface match: receiver is IFoo, target is Foo
+                if rt_lower == target_interface {
+                    return true;
+                }
+                // Reverse interface: receiver is Foo, target is IFoo
+                if target_lower.starts_with('i')
+                    && rt_lower == target_lower[1..]
+                {
+                    return true;
+                }
+                // Inheritance: target class has base_types containing the receiver_type
+                if target_base_types.iter().any(|bt| *bt == rt_lower) {
+                    return true;
+                }
+            }
+            None => {
+                // No receiver type — accept if caller is in the same class or a subclass
+                if let Some(cp) = caller_parent {
+                    let cp_lower = cp.to_lowercase();
+                    if cp_lower == target_lower || cp_lower == target_interface {
+                        return true;
+                    }
+                    // Check if caller's class inherits from target
+                    let caller_inherits = def_idx
+                        .name_index
+                        .get(&cp_lower)
+                        .map(|indices| {
+                            indices.iter().any(|&di| {
+                                def_idx
+                                    .definitions
+                                    .get(di as usize)
+                                    .is_some_and(|d| {
+                                        matches!(
+                                            d.kind,
+                                            DefinitionKind::Class
+                                                | DefinitionKind::Struct
+                                                | DefinitionKind::Record
+                                        ) && d
+                                            .base_types
+                                            .iter()
+                                            .any(|bt| bt.to_lowercase() == target_lower)
+                                    })
+                            })
+                        })
+                        .unwrap_or(false);
+                    if caller_inherits {
+                        return true;
+                    }
+                }
+                // No receiver + different class + no inheritance → false positive
+            }
+        }
+    }
+
+    false
+}
+
 /// Build a caller tree recursively (direction = "up").
 /// `parent_class` is used to disambiguate common method names -- when recursing,
 /// we pass the parent class of the method being searched so that we only find
@@ -437,6 +600,22 @@ fn build_caller_tree(
             if let Some((caller_name, caller_parent, caller_line)) =
                 find_containing_method(def_idx, def_fid, line)
             {
+                // Verify the call on this line actually targets the expected class
+                // using pre-computed call-site data from the AST
+                if parent_class.is_some() {
+                    if let Some(caller_di) = find_method_def_index(def_idx, def_fid, caller_line) {
+                        if !verify_call_site_target(
+                            def_idx,
+                            caller_di,
+                            line,
+                            &method_lower,
+                            parent_class,
+                        ) {
+                            continue;
+                        }
+                    }
+                }
+
                 let caller_key = format!("{}.{}",
                     caller_parent.as_deref().unwrap_or("?"),
                     &caller_name
@@ -759,4 +938,290 @@ pub(crate) fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex) -> V
     }
 
     resolved
+}
+
+// ─── Unit tests for verify_call_site_target ─────────────────────────
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionKind};
+    use std::collections::HashMap;
+
+
+    /// Helper: build a minimal DefinitionIndex with given definitions and method_calls.
+    fn make_def_index(
+        definitions: Vec<DefinitionEntry>,
+        method_calls: HashMap<u32, Vec<CallSite>>,
+    ) -> DefinitionIndex {
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+        }
+
+        DefinitionIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            extensions: vec!["ts".to_string()],
+            files: vec!["src/OrderController.ts".to_string(), "src/OrderValidator.ts".to_string()],
+            definitions,
+            name_index,
+            kind_index,
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index,
+            path_to_id: HashMap::new(),
+            method_calls,
+            parse_errors: 0,
+            lossy_file_count: 0,
+            empty_file_ids: Vec::new(),
+        }
+    }
+
+    /// Helper: create a DefinitionEntry for a class.
+    fn class_def(file_id: u32, name: &str, base_types: Vec<&str>) -> DefinitionEntry {
+        DefinitionEntry {
+            file_id,
+            name: name.to_string(),
+            kind: DefinitionKind::Class,
+            line_start: 1,
+            line_end: 100,
+            parent: None,
+            signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: base_types.into_iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// Helper: create a DefinitionEntry for a method inside a class.
+    fn method_def(file_id: u32, name: &str, parent: &str, line_start: u32, line_end: u32) -> DefinitionEntry {
+        DefinitionEntry {
+            file_id,
+            name: name.to_string(),
+            kind: DefinitionKind::Method,
+            line_start,
+            line_end,
+            parent: Some(parent.to_string()),
+            signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        }
+    }
+
+    // ─── Test 1: Direct receiver match ──────────────────────────────
+
+    #[test]
+    fn test_verify_call_site_target_direct_match() {
+        // OrderController.processOrder() calls validator.validate() at line 25
+        // receiver_type = "OrderValidator"
+        let definitions = vec![
+            class_def(0, "OrderController", vec![]),              // idx 0
+            method_def(0, "processOrder", "OrderController", 20, 40), // idx 1
+            class_def(1, "OrderValidator", vec![]),                // idx 2
+            method_def(1, "validate", "OrderValidator", 10, 30),  // idx 3
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(1u32, vec![
+            CallSite {
+                method_name: "validate".to_string(),
+                receiver_type: Some("OrderValidator".to_string()),
+                line: 25,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        // caller_di=1 (processOrder), call_line=25, method="validate", target="OrderValidator"
+        assert!(verify_call_site_target(&def_idx, 1, 25, "validate", Some("OrderValidator")));
+    }
+
+    // ─── Test 2: Different receiver → should reject ─────────────────
+
+    #[test]
+    fn test_verify_call_site_target_different_receiver() {
+        // OrderController.processOrder() calls path.resolve() at line 25
+        // receiver_type = "Path" — target is "DependencyTask", should NOT match
+        let definitions = vec![
+            class_def(0, "OrderController", vec![]),              // idx 0
+            method_def(0, "processOrder", "OrderController", 20, 40), // idx 1
+            class_def(1, "DependencyTask", vec![]),               // idx 2
+            method_def(1, "resolve", "DependencyTask", 10, 30),  // idx 3
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(1u32, vec![
+            CallSite {
+                method_name: "resolve".to_string(),
+                receiver_type: Some("Path".to_string()),
+                line: 25,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        // receiver is "Path" but target class is "DependencyTask" — should return false
+        assert!(!verify_call_site_target(&def_idx, 1, 25, "resolve", Some("DependencyTask")));
+    }
+
+    // ─── Test 3: No receiver, same class (implicit this) ────────────
+
+    #[test]
+    fn test_verify_call_site_target_no_receiver_same_class() {
+        // OrderValidator.check() calls this.validate() at line 55
+        // receiver_type = None (implicit this), caller is in OrderValidator
+        let definitions = vec![
+            class_def(1, "OrderValidator", vec![]),                // idx 0
+            method_def(1, "check", "OrderValidator", 50, 70),     // idx 1
+            method_def(1, "validate", "OrderValidator", 10, 30),  // idx 2
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(1u32, vec![
+            CallSite {
+                method_name: "validate".to_string(),
+                receiver_type: None,
+                line: 55,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        // caller is in OrderValidator, target is OrderValidator, no receiver → true
+        assert!(verify_call_site_target(&def_idx, 1, 55, "validate", Some("OrderValidator")));
+    }
+
+    // ─── Test 4: No receiver, different class ───────────────────────
+
+    #[test]
+    fn test_verify_call_site_target_no_receiver_different_class() {
+        // OrderController.processOrder() calls validate() at line 25
+        // receiver_type = None, caller is in OrderController, target is OrderValidator
+        let definitions = vec![
+            class_def(0, "OrderController", vec![]),              // idx 0
+            method_def(0, "processOrder", "OrderController", 20, 40), // idx 1
+            class_def(1, "OrderValidator", vec![]),                // idx 2
+            method_def(1, "validate", "OrderValidator", 10, 30),  // idx 3
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(1u32, vec![
+            CallSite {
+                method_name: "validate".to_string(),
+                receiver_type: None,
+                line: 25,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        // caller is in OrderController, target is OrderValidator, no receiver → false
+        assert!(!verify_call_site_target(&def_idx, 1, 25, "validate", Some("OrderValidator")));
+    }
+
+    // ─── Test 5: No target class → always accept ────────────────────
+
+    #[test]
+    fn test_verify_call_site_target_no_target_class() {
+        let definitions = vec![
+            class_def(0, "OrderController", vec![]),              // idx 0
+            method_def(0, "processOrder", "OrderController", 20, 40), // idx 1
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(1u32, vec![
+            CallSite {
+                method_name: "validate".to_string(),
+                receiver_type: Some("SomeRandomClass".to_string()),
+                line: 25,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        // target_class = None → should always return true (no filtering)
+        assert!(verify_call_site_target(&def_idx, 1, 25, "validate", None));
+    }
+
+    // ─── Test 6: No call-site data → graceful fallback (true) ───────
+
+    #[test]
+    fn test_verify_call_site_target_no_call_site_data() {
+        let definitions = vec![
+            class_def(0, "OrderController", vec![]),              // idx 0
+            method_def(0, "processOrder", "OrderController", 20, 40), // idx 1
+        ];
+
+        // Empty method_calls — no call-site data for any method
+        let method_calls = HashMap::new();
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        // No call-site data → graceful fallback, should return true
+        assert!(verify_call_site_target(&def_idx, 1, 25, "validate", Some("OrderValidator")));
+    }
+
+    // ─── Test 7: Interface match (IOrderValidator → OrderValidator) ─
+
+    #[test]
+    fn test_verify_call_site_target_interface_match() {
+        // OrderController.processOrder() calls validator.validate() at line 25
+        // receiver_type = "IOrderValidator", target_class = "OrderValidator"
+        // Should match via interface I-prefix convention
+        let definitions = vec![
+            class_def(0, "OrderController", vec![]),              // idx 0
+            method_def(0, "processOrder", "OrderController", 20, 40), // idx 1
+            class_def(1, "OrderValidator", vec!["IOrderValidator"]), // idx 2
+            method_def(1, "validate", "OrderValidator", 10, 30),  // idx 3
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(1u32, vec![
+            CallSite {
+                method_name: "validate".to_string(),
+                receiver_type: Some("IOrderValidator".to_string()),
+                line: 25,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        // receiver is "IOrderValidator", target is "OrderValidator" → should match via I-prefix
+        assert!(verify_call_site_target(&def_idx, 1, 25, "validate", Some("OrderValidator")));
+    }
+
+    // ─── Test 8: Comment line — method has call sites but not at queried line ─
+
+    #[test]
+    fn test_verify_call_site_target_comment_line_not_real_call() {
+        // OrderController.processOrder() has a call to endsWith() at line 10
+        // but we query for "resolve" at line 5 where no call site exists
+        // → content index matched a comment or non-code text → should return false
+        let definitions = vec![
+            class_def(0, "OrderController", vec![]),              // idx 0
+            method_def(0, "processOrder", "OrderController", 1, 20), // idx 1
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(1u32, vec![
+            CallSite {
+                method_name: "endsWith".to_string(),
+                receiver_type: Some("String".to_string()),
+                line: 10,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        // Method has call-site data (endsWith at line 10), but no call at line 5
+        // → this is a false positive from content index → should return false
+        assert!(!verify_call_site_target(&def_idx, 1, 5, "resolve", Some("PathUtils")));
+    }
 }

@@ -231,6 +231,396 @@ catch {
     Remove-Item -Recurse -Force $t59dir -ErrorAction SilentlyContinue
 }
 
+# ─── T65-T66 + T67-T68: search_callers E2E tests (local var types + false positive filtering) ───
+
+# Helper: find the search binary (installed or debug build)
+$searchBin = (Get-Command search.exe -ErrorAction SilentlyContinue).Source
+if (-not $searchBin) { $searchBin = ".\target\debug\search.exe" }
+
+# --- T65-T66: Local var type extraction (direction=down) ---
+Write-Host -NoNewline "  T65-66 callers-local-var-types-down ... "
+$total++
+try {
+    $callerDir = Join-Path $env:TEMP "search_e2e_callers_down_$PID"
+    if (Test-Path $callerDir) { Remove-Item -Recurse -Force $callerDir }
+    New-Item -ItemType Directory -Path $callerDir | Out-Null
+
+    # Create OrderValidator class with check() method
+    $validatorTs = @"
+export class OrderValidator {
+    check(): boolean {
+        return true;
+    }
+}
+"@
+    Set-Content -Path (Join-Path $callerDir "validator.ts") -Value $validatorTs
+
+    # Create a consumer that uses local var: const v = new OrderValidator(); v.check();
+    $consumerTs = @"
+import { OrderValidator } from './validator';
+
+export class OrderService {
+    processOrder(): void {
+        const validator = new OrderValidator();
+        validator.check();
+    }
+}
+"@
+    Set-Content -Path (Join-Path $callerDir "service.ts") -Value $consumerTs
+
+    # Build content-index and def-index
+    $ErrorActionPreference = "Continue"
+    & $searchBin content-index -d $callerDir -e ts 2>&1 | Out-Null
+    & $searchBin def-index -d $callerDir -e ts 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+
+    # Query search_callers direction=down for OrderService.processOrder
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"processOrder","class":"OrderService","direction":"down","depth":1}}}'
+    ) -join "`n"
+
+    $ErrorActionPreference = "Continue"
+    $output = ($msgs | & $searchBin serve --dir $callerDir --ext ts --definitions 2>$null) | Out-String
+    $ErrorActionPreference = "Stop"
+
+    # Extract the JSON-RPC response (id=5)
+    $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+    if ($jsonLine) {
+        # Check that 'check' appears in callTree (callee found via local var type)
+        # Note: output is double-escaped JSON (\"method\":\"check\")
+        if ($jsonLine -match 'check') {
+            Write-Host "OK" -ForegroundColor Green
+            $passed++
+        }
+        else {
+            Write-Host "FAILED (check() not found in callTree)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $failed++
+        }
+    }
+    else {
+        Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
+        Write-Host "    output: $output" -ForegroundColor Yellow
+        $failed++
+    }
+
+    # Cleanup
+    $ErrorActionPreference = "Continue"
+    & $searchBin cleanup --dir $callerDir 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $callerDir -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+    if (Test-Path $callerDir) {
+        $ErrorActionPreference = "Continue"
+        & $searchBin cleanup --dir $callerDir 2>&1 | Out-Null
+        $ErrorActionPreference = "Stop"
+        Remove-Item -Recurse -Force $callerDir -ErrorAction SilentlyContinue
+    }
+}
+
+# --- T67: Direction=up — false positive filtering with receiver type mismatch ---
+Write-Host -NoNewline "  T67 callers-up-false-positive-filter ... "
+$total++
+try {
+    $filterDir = Join-Path $env:TEMP "search_e2e_callers_up_$PID"
+    if (Test-Path $filterDir) { Remove-Item -Recurse -Force $filterDir }
+    New-Item -ItemType Directory -Path $filterDir | Out-Null
+
+    # Create TaskRunner class with resolve() method
+    $taskTs = @"
+export class TaskRunner {
+    resolve(): boolean {
+        return true;
+    }
+}
+"@
+    Set-Content -Path (Join-Path $filterDir "task.ts") -Value $taskTs
+
+    # Good caller: uses TaskRunner.resolve()
+    $goodCallerTs = @"
+import { TaskRunner } from './task';
+
+export class Orchestrator {
+    run(): void {
+        const task = new TaskRunner();
+        task.resolve();
+    }
+}
+"@
+    Set-Content -Path (Join-Path $filterDir "orchestrator.ts") -Value $goodCallerTs
+
+    # False positive caller: uses path.resolve() (unrelated)
+    $falseCallerTs = @"
+import * as path from 'path';
+
+export class PathHelper {
+    getFullPath(): string {
+        return path.resolve('/tmp');
+    }
+}
+"@
+    Set-Content -Path (Join-Path $filterDir "pathhelper.ts") -Value $falseCallerTs
+
+    # Build content-index and def-index
+    $ErrorActionPreference = "Continue"
+    & $searchBin content-index -d $filterDir -e ts 2>&1 | Out-Null
+    & $searchBin def-index -d $filterDir -e ts 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+
+    # Query search_callers direction=up for TaskRunner.resolve
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"resolve","class":"TaskRunner","direction":"up","depth":1}}}'
+    ) -join "`n"
+
+    $ErrorActionPreference = "Continue"
+    $output = ($msgs | & $searchBin serve --dir $filterDir --ext ts --definitions 2>$null) | Out-String
+    $ErrorActionPreference = "Stop"
+
+    # Extract the JSON-RPC response (id=5)
+    $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+    $testPassed = $true
+    if ($jsonLine) {
+        # GOOD: orchestrator.ts should appear (calls TaskRunner.resolve())
+        if ($jsonLine -notmatch 'orchestrator') {
+            Write-Host "FAILED (orchestrator.ts not found in callers)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $testPassed = $false
+        }
+        # BAD: pathhelper.ts should NOT appear (calls path.resolve(), not TaskRunner.resolve())
+        if ($jsonLine -match 'pathhelper') {
+            Write-Host "FAILED (pathhelper.ts should be filtered out as false positive)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $testPassed = $false
+        }
+        if ($testPassed) {
+            Write-Host "OK" -ForegroundColor Green
+            $passed++
+        }
+        else {
+            $failed++
+        }
+    }
+    else {
+        Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
+        Write-Host "    output: $output" -ForegroundColor Yellow
+        $failed++
+    }
+
+    # Cleanup
+    $ErrorActionPreference = "Continue"
+    & $searchBin cleanup --dir $filterDir 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $filterDir -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+    if (Test-Path $filterDir) {
+        $ErrorActionPreference = "Continue"
+        & $searchBin cleanup --dir $filterDir 2>&1 | Out-Null
+        $ErrorActionPreference = "Stop"
+        Remove-Item -Recurse -Force $filterDir -ErrorAction SilentlyContinue
+    }
+}
+
+# --- T68: Direction=up — graceful fallback when no call-site data ---
+Write-Host -NoNewline "  T68 callers-up-graceful-fallback ... "
+$total++
+try {
+    $fallbackDir = Join-Path $env:TEMP "search_e2e_callers_fallback_$PID"
+    if (Test-Path $fallbackDir) { Remove-Item -Recurse -Force $fallbackDir }
+    New-Item -ItemType Directory -Path $fallbackDir | Out-Null
+
+    # Create DataService class with fetch() method
+    $serviceTs = @"
+export class DataService {
+    fetch(): any[] {
+        return [];
+    }
+}
+"@
+    Set-Content -Path (Join-Path $fallbackDir "dataservice.ts") -Value $serviceTs
+
+    # Consumer that calls fetch() without explicit type annotation (receiver_type may be None)
+    $consumerTs = @"
+import { DataService } from './dataservice';
+
+export class Consumer {
+    load(): void {
+        const svc = new DataService();
+        const result = svc.fetch();
+    }
+}
+"@
+    Set-Content -Path (Join-Path $fallbackDir "consumer.ts") -Value $consumerTs
+
+    # Build content-index and def-index
+    $ErrorActionPreference = "Continue"
+    & $searchBin content-index -d $fallbackDir -e ts 2>&1 | Out-Null
+    & $searchBin def-index -d $fallbackDir -e ts 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+
+    # Query search_callers direction=up for DataService.fetch
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"fetch","class":"DataService","direction":"up","depth":1}}}'
+    ) -join "`n"
+
+    $ErrorActionPreference = "Continue"
+    $output = ($msgs | & $searchBin serve --dir $fallbackDir --ext ts --definitions 2>$null) | Out-String
+    $ErrorActionPreference = "Stop"
+
+    # Extract the JSON-RPC response (id=5)
+    $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+    if ($jsonLine) {
+        # Consumer should appear as a caller (graceful fallback - not filtered out)
+        if ($jsonLine -match 'consumer') {
+            Write-Host "OK" -ForegroundColor Green
+            $passed++
+        }
+        else {
+            Write-Host "FAILED (consumer.ts not found - false negative from missing call-site data)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $failed++
+        }
+    }
+    else {
+        Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
+        Write-Host "    output: $output" -ForegroundColor Yellow
+        $failed++
+    }
+
+    # Cleanup
+    $ErrorActionPreference = "Continue"
+    & $searchBin cleanup --dir $fallbackDir 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $fallbackDir -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+    if (Test-Path $fallbackDir) {
+        $ErrorActionPreference = "Continue"
+        & $searchBin cleanup --dir $fallbackDir 2>&1 | Out-Null
+        $ErrorActionPreference = "Stop"
+        Remove-Item -Recurse -Force $fallbackDir -ErrorAction SilentlyContinue
+    }
+}
+# --- T69: Direction=up — comment-line false positive filtered ---
+Write-Host -NoNewline "  T69 callers-up-comment-false-positive ... "
+$total++
+try {
+    $commentDir = Join-Path $env:TEMP "search_e2e_callers_comment_$PID"
+    if (Test-Path $commentDir) { Remove-Item -Recurse -Force $commentDir }
+    New-Item -ItemType Directory -Path $commentDir | Out-Null
+
+    # Create TaskRunner class with resolve() method
+    $taskRunnerTs = @"
+export class TaskRunner {
+    resolve(): void {
+        console.log("resolved");
+    }
+}
+"@
+    Set-Content -Path (Join-Path $commentDir "task-runner.ts") -Value $taskRunnerTs
+
+    # Consumer: "resolve" appears in comments (lines 5-6) AND as a real call (line 8)
+    $consumerTs = @"
+import { TaskRunner } from "./task-runner";
+
+export class Consumer {
+    processData(): void {
+        // We need to resolve the task before proceeding
+        // The resolve method handles cleanup
+        const runner = new TaskRunner();
+        runner.resolve();
+    }
+}
+"@
+    Set-Content -Path (Join-Path $commentDir "consumer.ts") -Value $consumerTs
+
+    # Build content-index and def-index
+    $ErrorActionPreference = "Continue"
+    & $searchBin content-index -d $commentDir -e ts 2>&1 | Out-Null
+    & $searchBin def-index -d $commentDir -e ts 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+
+    # Query search_callers direction=up for TaskRunner.resolve
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"resolve","class":"TaskRunner","direction":"up","depth":1}}}'
+    ) -join "`n"
+
+    $ErrorActionPreference = "Continue"
+    $output = ($msgs | & $searchBin serve --dir $commentDir --ext ts --definitions 2>$null) | Out-String
+    $ErrorActionPreference = "Stop"
+
+    # Extract the JSON-RPC response (id=5)
+    $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+    $testPassed = $true
+    if ($jsonLine) {
+        # GOOD: Consumer.processData should appear (real call at runner.resolve())
+        if ($jsonLine -notmatch 'processData') {
+            Write-Host "FAILED (Consumer.processData not found in callers)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $testPassed = $false
+        }
+        # Verify exactly 1 caller (comment lines with "resolve" should NOT be false positives)
+        # The output is double-escaped JSON; count occurrences of processData in the call tree
+        $methodMatches = [regex]::Matches($jsonLine, 'processData')
+        if ($methodMatches.Count -lt 1) {
+            Write-Host "FAILED (expected exactly 1 caller, got 0)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $testPassed = $false
+        }
+        # Check totalNodes=1 in summary to confirm exactly 1 caller
+        # Note: JSON output has escaped quotes (\"totalNodes\":1), so match flexibly
+        if ($jsonLine -notmatch 'totalNodes[^0-9]+1[^0-9]') {
+            Write-Host "FAILED (expected totalNodes=1, comment lines created false positives)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $testPassed = $false
+        }
+        if ($testPassed) {
+            Write-Host "OK" -ForegroundColor Green
+            $passed++
+        }
+        else {
+            $failed++
+        }
+    }
+    else {
+        Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
+        Write-Host "    output: $output" -ForegroundColor Yellow
+        $failed++
+    }
+
+    # Cleanup
+    $ErrorActionPreference = "Continue"
+    & $searchBin cleanup --dir $commentDir 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $commentDir -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+    if (Test-Path $commentDir) {
+        $ErrorActionPreference = "Continue"
+        & $searchBin cleanup --dir $commentDir 2>&1 | Out-Null
+        $ErrorActionPreference = "Stop"
+        Remove-Item -Recurse -Force $commentDir -ErrorAction SilentlyContinue
+    }
+}
+
+
 # T25-T52: serve (MCP)
 Write-Host "  T25-T52: MCP serve tests - run manually (see e2e-test-plan.md)"
 
@@ -240,7 +630,7 @@ Write-Host "  T53-T58: TypeScript callers MCP tests - run manually (see e2e-test
 # Cleanup: remove index files created during E2E tests
 Write-Host "`nCleaning up test indexes..."
 $ErrorActionPreference = "Continue"
-# Remove indexes for the test directory (targeted — won't touch other projects)
+# Remove indexes for the test directory (targeted -- does not touch other projects)
 Invoke-Expression "$Binary cleanup --dir $TestDir 2>&1" | Out-Null
 # Remove orphaned indexes (e.g. T-SHUTDOWN temp dir that was already deleted)
 Invoke-Expression "$Binary cleanup 2>&1" | Out-Null
