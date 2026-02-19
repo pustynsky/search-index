@@ -56,7 +56,7 @@ cd search
 cargo build --release
 ```
 
-Requires [Rust](https://rustup.rs/) 1.70+. Binary: `target/release/search.exe` (Windows) or `target/release/search` (Linux/Mac).
+Requires [Rust](https://rustup.rs/) 1.85+. Binary: `target/release/search.exe` (Windows) or `target/release/search` (Linux/Mac).
 
 ### CLI Usage
 

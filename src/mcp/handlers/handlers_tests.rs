@@ -1590,7 +1590,7 @@ fn test_search_definitions_file_filter_slash_normalization() {
     for (i, def) in definitions.iter().enumerate() {
         let idx = i as u32;
         name_index.entry(def.name.to_lowercase()).or_default().push(idx);
-        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
     path_to_id.insert(PathBuf::from("C:\\src\\Models\\User.cs"), 0);
