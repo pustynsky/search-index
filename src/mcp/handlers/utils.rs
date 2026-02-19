@@ -201,33 +201,10 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
 
     let mut reasons: Vec<String> = Vec::new();
 
-    // Phase 1: Cap `lines` arrays per file
-    if let Some(files) = output.get_mut("files").and_then(|f| f.as_array_mut()) {
-        for file_entry in files.iter_mut() {
-            if let Some(lines) = file_entry.get_mut("lines").and_then(|l| l.as_array_mut()) {
-                if lines.len() > MAX_LINES_PER_FILE {
-                    let omitted = lines.len() - MAX_LINES_PER_FILE;
-                    lines.truncate(MAX_LINES_PER_FILE);
-                    file_entry["linesOmitted"] = json!(omitted);
-                }
-            }
-            // Remove lineContent entirely if present — it's the biggest space consumer
-            if file_entry.get("lineContent").is_some() {
-                file_entry.as_object_mut().map(|o| o.remove("lineContent"));
-                file_entry["lineContentOmitted"] = json!(true);
-            }
-        }
-        reasons.push(format!("capped lines per file to {}, removed lineContent", MAX_LINES_PER_FILE));
-    }
-
-    // Check size after phase 1
-    let size_after_p1 = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
-    if size_after_p1 <= max_bytes {
-        inject_truncation_metadata(&mut output, &reasons, initial_size);
-        return output;
-    }
-
-    // Phase 2: Cap `matchedTokens` in summary
+    // Phase 1: Drop `matchedTokens` in summary (diagnostic metadata, not user-requested).
+    // This is done FIRST because matchedTokens can be very large (50KB+) for substring
+    // queries, and it's never user-requested data — unlike lineContent which the user
+    // explicitly asked for via showLines=true.
     if let Some(summary) = output.get_mut("summary") {
         if let Some(tokens) = summary.get_mut("matchedTokens").and_then(|t| t.as_array_mut()) {
             if tokens.len() > MAX_MATCHED_TOKENS {
@@ -237,6 +214,55 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
                 reasons.push(format!("capped matchedTokens to {}", MAX_MATCHED_TOKENS));
             }
         }
+    }
+
+    // Check size after phase 1
+    let size_after_p1 = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
+    if size_after_p1 <= max_bytes {
+        inject_truncation_metadata(&mut output, &reasons, initial_size);
+        return output;
+    }
+
+    // Phase 1b: If still over budget, remove matchedTokens entirely
+    if let Some(summary) = output.get_mut("summary") {
+        if summary.get("matchedTokens").is_some() {
+            let omitted = summary.get("matchedTokens")
+                .and_then(|t| t.as_array())
+                .map(|a| a.len())
+                .unwrap_or(0);
+            summary.as_object_mut().map(|o| o.remove("matchedTokens"));
+            if omitted > 0 {
+                summary["matchedTokensOmitted"] = json!(omitted);
+            }
+            reasons.push("removed matchedTokens entirely".to_string());
+        }
+    }
+
+    // Check size after phase 1b
+    let size_after_p1b = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
+    if size_after_p1b <= max_bytes {
+        inject_truncation_metadata(&mut output, &reasons, initial_size);
+        return output;
+    }
+
+    // Phase 2: Cap `lines` arrays per file and remove lineContent
+    // (user-requested data — removed only after diagnostic data is already gone)
+    if let Some(files) = output.get_mut("files").and_then(|f| f.as_array_mut()) {
+        for file_entry in files.iter_mut() {
+            if let Some(lines) = file_entry.get_mut("lines").and_then(|l| l.as_array_mut()) {
+                if lines.len() > MAX_LINES_PER_FILE {
+                    let omitted = lines.len() - MAX_LINES_PER_FILE;
+                    lines.truncate(MAX_LINES_PER_FILE);
+                    file_entry["linesOmitted"] = json!(omitted);
+                }
+            }
+            // Remove lineContent if present — only after matchedTokens is already gone
+            if file_entry.get("lineContent").is_some() {
+                file_entry.as_object_mut().map(|o| o.remove("lineContent"));
+                file_entry["lineContentOmitted"] = json!(true);
+            }
+        }
+        reasons.push(format!("capped lines per file to {}, removed lineContent", MAX_LINES_PER_FILE));
     }
 
     // Check size after phase 2

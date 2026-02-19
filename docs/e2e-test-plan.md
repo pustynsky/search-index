@@ -4396,3 +4396,75 @@ lines) in descending order — files with more matches appear first.
 **Unit test:** [`test_search_grep_phrase_sort_by_occurrences`](../src/mcp/handlers/handlers_tests.rs)
 
 **Status:** ✅ Covered by unit test
+
+
+## Response Bloat Fixes (countOnly matchedTokens, truncation priority, ext warning)
+
+### T-BLOAT-1: countOnly=true suppresses matchedTokens in substring search
+
+**MCP request:**
+```json
+{"terms": "import", "substring": true, "countOnly": true}
+```
+
+**Expected:** Response summary contains `totalFiles`, `totalOccurrences`, `termsSearched`, `searchMode` but does NOT contain `matchedTokens`. Response should be < 500 bytes.
+
+**Validates:** Fix 1 — matchedTokens was previously included even with countOnly=true, causing 53KB+ responses.
+
+---
+
+### T-BLOAT-2: countOnly=false still includes matchedTokens
+
+**MCP request:**
+```json
+{"terms": "import", "substring": true, "maxResults": 2}
+```
+
+**Expected:** Response summary contains `matchedTokens` array with matched token strings.
+
+**Validates:** Fix 1 regression guard — matchedTokens should still appear in non-countOnly responses.
+
+---
+
+### T-BLOAT-3: Truncation drops matchedTokens before lineContent
+
+**MCP request (large response):**
+```json
+{"terms": "import", "substring": true, "showLines": true, "contextLines": 3, "maxResults": 50}
+```
+
+**Expected:** If response is truncated:
+1. `matchedTokens` should be capped/removed FIRST
+2. `lineContent` should be preserved if possible (removed only after matchedTokens is gone)
+3. Summary should have `responseTruncated: true` and `truncationReason` mentioning matchedTokens
+
+**Validates:** Fix 2 — truncation priority was inverted (lineContent removed before matchedTokens).
+
+---
+
+### T-BLOAT-4: ext filter warning for non-indexed extension
+
+**MCP request:**
+```json
+{"terms": "tsx", "ext": "tsx", "countOnly": true}
+```
+(where content index covers `rs` or `cs`, not `tsx`)
+
+**Expected:** Response summary contains `warning` field with text like:
+`"Extension 'tsx' is not indexed. Content index covers: rs"`
+
+**Validates:** Fix 3 — previously returned `totalFiles: 0` with no explanation.
+
+---
+
+### T-BLOAT-5: No ext warning when extension IS indexed
+
+**MCP request:**
+```json
+{"terms": "fn", "ext": "rs", "countOnly": true}
+```
+(where content index covers `rs`)
+
+**Expected:** Response summary does NOT contain `warning` field.
+
+**Validates:** Fix 3 regression guard — warning should only appear for non-indexed extensions.

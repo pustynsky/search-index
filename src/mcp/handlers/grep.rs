@@ -105,10 +105,26 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
         Err(e) => return ToolCallResult::error(format!("Failed to acquire index lock: {}", e)),
     };
 
+    // --- Check ext filter against indexed extensions ---
+    let ext_warning: Option<String> = ext_filter.as_ref().and_then(|ext| {
+        let ext_lower = ext.to_lowercase();
+        let is_indexed = index.extensions.iter().any(|e| e.to_lowercase() == ext_lower);
+        if !is_indexed && !index.extensions.is_empty() {
+            Some(format!(
+                "Extension '{}' is not indexed. Content index covers: {}",
+                ext,
+                index.extensions.join(", ")
+            ))
+        } else {
+            None
+        }
+    });
+
     // --- Substring search mode ------------------------------
     if use_substring {
         return handle_substring_search(ctx, &index, &terms_str, &ext_filter, &exclude_dir, &exclude,
-            show_lines, context_lines, max_results, mode_and, count_only, search_start, &dir_filter);
+            show_lines, context_lines, max_results, mode_and, count_only, search_start, &dir_filter,
+            &ext_warning);
     }
 
     // --- Phrase search mode ---------------------------------
@@ -116,6 +132,7 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
         return handle_phrase_search(
             &index, &terms_str, &ext_filter, &exclude_dir, &exclude,
             show_lines, context_lines, max_results, count_only, search_start, &dir_filter,
+            &ext_warning,
         );
     }
 
@@ -238,18 +255,20 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
     let search_elapsed = search_start.elapsed();
 
     if count_only {
-        let output = json!({
-            "summary": {
-                "totalFiles": total_files,
-                "totalOccurrences": total_occurrences,
-                "termsSearched": terms,
-                "searchMode": search_mode,
-                "indexFiles": index.files.len(),
-                "indexTokens": index.index.len(),
-                "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-                "indexLoadTimeMs": 0.0
-            }
+        let mut summary = json!({
+            "totalFiles": total_files,
+            "totalOccurrences": total_occurrences,
+            "termsSearched": terms,
+            "searchMode": search_mode,
+            "indexFiles": index.files.len(),
+            "indexTokens": index.index.len(),
+            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+            "indexLoadTimeMs": 0.0
         });
+        if let Some(w) = ext_warning {
+            summary["warning"] = json!(w);
+        }
+        let output = json!({ "summary": summary });
         return ToolCallResult::success(serde_json::to_string(&output).unwrap());
     }
 
@@ -271,18 +290,22 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
         file_obj
     }).collect();
 
+    let mut summary = json!({
+        "totalFiles": total_files,
+        "totalOccurrences": total_occurrences,
+        "termsSearched": terms,
+        "searchMode": search_mode,
+        "indexFiles": index.files.len(),
+        "indexTokens": index.index.len(),
+        "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+        "indexLoadTimeMs": 0.0
+    });
+    if let Some(w) = ext_warning {
+        summary["warning"] = json!(w);
+    }
     let output = json!({
         "files": files_json,
-        "summary": {
-            "totalFiles": total_files,
-            "totalOccurrences": total_occurrences,
-            "termsSearched": terms,
-            "searchMode": search_mode,
-            "indexFiles": index.files.len(),
-            "indexTokens": index.index.len(),
-            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-            "indexLoadTimeMs": 0.0
-        }
+        "summary": summary
     });
 
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
@@ -303,6 +326,7 @@ fn handle_substring_search(
     count_only: bool,
     _search_start: Instant,
     dir_filter: &Option<String>,
+    ext_warning: &Option<String>,
 ) -> ToolCallResult {
     let max_results = if max_results_param == 0 { 0 } else { max_results_param };
 
@@ -322,6 +346,9 @@ fn handle_substring_search(
 
     // Track warnings
     let mut warnings: Vec<String> = Vec::new();
+    if let Some(w) = ext_warning {
+        warnings.push(w.clone());
+    }
     let has_short_query = raw_terms.iter().any(|t| t.len() < 4);
     if has_short_query {
         warnings.push("Short substring query (<4 chars) may return broad results".to_string());
@@ -487,10 +514,9 @@ fn handle_substring_search(
             "totalOccurrences": total_occurrences,
             "termsSearched": raw_terms,
             "searchMode": format!("substring-{}", search_mode),
-            "matchedTokens": all_matched_tokens,
         });
         if !warnings.is_empty() {
-            summary["warning"] = json!(warnings[0]);
+            summary["warning"] = json!(warnings.join("; "));
         }
         let output = json!({
             "summary": summary
@@ -524,7 +550,7 @@ fn handle_substring_search(
         "matchedTokens": all_matched_tokens,
     });
     if !warnings.is_empty() {
-        summary["warning"] = json!(warnings[0]);
+        summary["warning"] = json!(warnings.join("; "));
     }
     let output = json!({
         "files": files_json,
@@ -547,6 +573,7 @@ fn handle_phrase_search(
     count_only: bool,
     search_start: Instant,
     dir_filter: &Option<String>,
+    ext_warning: &Option<String>,
 ) -> ToolCallResult {
     let phrase_lower = phrase.to_lowercase();
     let phrase_tokens = tokenize(&phrase_lower, 2);
@@ -666,18 +693,20 @@ fn handle_phrase_search(
     let search_elapsed = search_start.elapsed();
 
     if count_only {
-        let output = json!({
-            "summary": {
-                "totalFiles": total_files,
-                "totalOccurrences": total_occurrences,
-                "termsSearched": [phrase],
-                "searchMode": "phrase",
-                "indexFiles": index.files.len(),
-                "indexTokens": index.index.len(),
-                "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-                "indexLoadTimeMs": 0.0
-            }
+        let mut summary = json!({
+            "totalFiles": total_files,
+            "totalOccurrences": total_occurrences,
+            "termsSearched": [phrase],
+            "searchMode": "phrase",
+            "indexFiles": index.files.len(),
+            "indexTokens": index.index.len(),
+            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+            "indexLoadTimeMs": 0.0
         });
+        if let Some(w) = ext_warning {
+            summary["warning"] = json!(w);
+        }
+        let output = json!({ "summary": summary });
         return ToolCallResult::success(serde_json::to_string(&output).unwrap());
     }
 
@@ -698,18 +727,22 @@ fn handle_phrase_search(
         file_obj
     }).collect();
 
+    let mut summary = json!({
+        "totalFiles": total_files,
+        "totalOccurrences": total_occurrences,
+        "termsSearched": [phrase],
+        "searchMode": "phrase",
+        "indexFiles": index.files.len(),
+        "indexTokens": index.index.len(),
+        "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+        "indexLoadTimeMs": 0.0
+    });
+    if let Some(w) = ext_warning {
+        summary["warning"] = json!(w);
+    }
     let output = json!({
         "files": files_json,
-        "summary": {
-            "totalFiles": total_files,
-            "totalOccurrences": total_occurrences,
-            "termsSearched": [phrase],
-            "searchMode": "phrase",
-            "indexFiles": index.files.len(),
-            "indexTokens": index.index.len(),
-            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-            "indexLoadTimeMs": 0.0
-        }
+        "summary": summary
     });
 
     ToolCallResult::success(serde_json::to_string(&output).unwrap())

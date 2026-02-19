@@ -239,13 +239,13 @@ Total: <3 milliseconds
 
 ### ⚡ Time Savings Summary
 
-| Scenario | Without | With | Speedup |
+| Scenario | ❌ Without | ✅ With | Speedup |
 |---|---|---|---|
-| Single task (20 searches) | ~17 min | ~0.2 sec | **5,000×** |
-| Stack trace (1 frame) | ~5 min | ~3 sec | **100×** |
-| Code review (10 questions) | ~8 min | ~0.1 sec | **5,000×** |
-| Architecture doc | ~40 min | ~2 min | **20×** |
-| Task scope estimation | ~5 min | ~30 sec | **10×** |
+| Single task (20 searches) | 🔴 ~17 min | 🟢 ~0.2 sec | **5,000×** |
+| Stack trace (1 frame) | 🔴 ~5 min | 🟢 ~3 sec | **100×** |
+| Code review (10 questions) | 🔴 ~8 min | 🟢 ~0.1 sec | **5,000×** |
+| Architecture doc | 🟠 ~40 min | 🟢 ~2 min | **20×** |
+| Task scope estimation | 🟠 ~5 min | 🟢 ~30 sec | **10×** |
 
 **In a typical workday:** 5–10 tasks × 15 min saved = **1–2.5 hours saved daily** per developer.
 

@@ -2439,3 +2439,245 @@ fn test_search_grep_phrase_sort_by_occurrences() {
 
     cleanup_tmp(&tmp_dir);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// BUG-search-grep-countonly-matchedtokens: Fix verification tests
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Fix 1: countOnly=true should NOT include matchedTokens in substring search.
+#[test]
+fn test_substring_count_only_no_matched_tokens() {
+    let ctx = make_substring_ctx(
+        vec![("httpclient", 0, vec![5, 12]), ("httphandler", 1, vec![3])],
+        vec!["C:\\test\\Client.cs", "C:\\test\\Handler.cs"],
+    );
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "http",
+        "substring": true,
+        "countOnly": true
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], 2);
+    assert!(output.get("files").is_none(),
+        "countOnly should not include 'files' array");
+    assert!(output["summary"].get("matchedTokens").is_none(),
+        "countOnly=true should NOT include matchedTokens in response. Got: {}",
+        serde_json::to_string_pretty(&output["summary"]).unwrap());
+}
+
+/// Fix 1: countOnly=false SHOULD still include matchedTokens in substring search.
+#[test]
+fn test_substring_non_count_still_has_matched_tokens() {
+    let ctx = make_substring_ctx(
+        vec![("httpclient", 0, vec![5, 12]), ("httphandler", 1, vec![3])],
+        vec!["C:\\test\\Client.cs", "C:\\test\\Handler.cs"],
+    );
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "http",
+        "substring": true
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"].get("matchedTokens").is_some(),
+        "Non-countOnly substring search should include matchedTokens");
+    let tokens = output["summary"]["matchedTokens"].as_array().unwrap();
+    assert!(tokens.len() >= 2,
+        "Should have at least 2 matched tokens (httpclient, httphandler), got {}", tokens.len());
+}
+
+/// Fix 2: Truncation should drop matchedTokens BEFORE lineContent.
+/// When response is over budget, matchedTokens (diagnostic) should be removed
+/// before lineContent (user-requested data).
+#[test]
+fn test_truncation_drops_matched_tokens_before_line_content() {
+    use super::utils::truncate_large_response;
+
+    // Build a response with both lineContent and matchedTokens that exceeds budget
+    let many_tokens: Vec<String> = (0..200).map(|i| format!("long_matched_token_name_{}_with_extra_padding", i)).collect();
+    let mut files = Vec::new();
+    for i in 0..5 {
+        files.push(json!({
+            "path": format!("/path/file_{}.cs", i),
+            "lines": [1, 2, 3],
+            "lineContent": [{
+                "startLine": 1,
+                "lines": ["line 1", "line 2", "line 3"],
+                "matchIndices": [0]
+            }],
+        }));
+    }
+    let output = json!({
+        "files": files,
+        "summary": {
+            "totalFiles": 5,
+            "matchedTokens": many_tokens,
+        }
+    });
+
+    // Use a budget that forces truncation but is large enough for files+lineContent without matchedTokens
+    let budget = 2000;
+    let result = truncate_large_response(output, budget);
+
+    // matchedTokens should be capped or removed
+    let summary = result.get("summary").unwrap();
+    let matched_tokens_gone = summary.get("matchedTokens").is_none()
+        || summary["matchedTokens"].as_array().map(|a| a.len()).unwrap_or(0) <= 20;
+    assert!(matched_tokens_gone,
+        "matchedTokens should be capped/removed before lineContent. Summary: {}",
+        serde_json::to_string_pretty(summary).unwrap());
+
+    // Check that truncation was flagged
+    assert_eq!(summary.get("responseTruncated").and_then(|v| v.as_bool()), Some(true));
+}
+
+/// Fix 3: ext filter warning when extension is not in the index.
+#[test]
+fn test_ext_not_indexed_warning() {
+    let mut idx = HashMap::new();
+    idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
+    let index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec!["C:\\test\\Program.cs".to_string()],
+        index: idx, total_tokens: 100,
+        extensions: vec!["cs".to_string(), "xml".to_string()],
+        file_token_counts: vec![50],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(index)), def_index: None,
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // Search with ext=tsx which is NOT in the index
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "httpclient",
+        "ext": "tsx",
+        "substring": false
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], 0,
+        "Should find 0 files since tsx is not indexed");
+    let warning = output["summary"]["warning"].as_str();
+    assert!(warning.is_some(),
+        "Should have a warning about unindexed extension. Got summary: {}",
+        serde_json::to_string_pretty(&output["summary"]).unwrap());
+    let w = warning.unwrap();
+    assert!(w.contains("tsx") && w.contains("not indexed"),
+        "Warning should mention 'tsx' and 'not indexed', got: {}", w);
+    assert!(w.contains("cs") && w.contains("xml"),
+        "Warning should list indexed extensions, got: {}", w);
+}
+
+/// Fix 3: ext filter warning should NOT appear when extension IS in the index.
+#[test]
+fn test_ext_indexed_no_warning() {
+    let mut idx = HashMap::new();
+    idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
+    let index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec!["C:\\test\\Program.cs".to_string()],
+        index: idx, total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(index)), def_index: None,
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // Search with ext=cs which IS in the index
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "httpclient",
+        "ext": "cs",
+        "substring": false
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"].get("warning").is_none(),
+        "Should NOT have a warning when extension IS indexed. Got: {}",
+        serde_json::to_string_pretty(&output["summary"]).unwrap());
+}
+
+/// Fix 3: ext warning appears in substring search mode too.
+#[test]
+fn test_ext_not_indexed_warning_substring_mode() {
+    let ctx = make_substring_ctx(
+        vec![("httpclient", 0, vec![5])],
+        vec!["C:\\test\\Program.cs"],
+    );
+    // Override extensions in the index to include "cs"
+    {
+        let mut idx = ctx.index.write().unwrap();
+        idx.extensions = vec!["cs".to_string()];
+    }
+
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "http",
+        "ext": "tsx",
+        "substring": true
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let warning = output["summary"]["warning"].as_str();
+    assert!(warning.is_some(),
+        "Substring search should also show ext warning. Got: {}",
+        serde_json::to_string_pretty(&output["summary"]).unwrap());
+    let w = warning.unwrap();
+    assert!(w.contains("tsx") && w.contains("not indexed"),
+        "Warning should mention unindexed extension, got: {}", w);
+}
+
+/// Fix 3: ext warning appears in phrase search mode too.
+#[test]
+fn test_ext_not_indexed_warning_phrase_mode() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_ext_warn_phrase_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("test.cs")).unwrap();
+        writeln!(f, "using System;").unwrap();
+        writeln!(f, "public class Foo {{ }}").unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(), ext: "cs".to_string(),
+        max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
+    });
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)), def_index: None,
+        server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: tmp_dir.join(".index"),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "public class",
+        "phrase": true,
+        "ext": "tsx"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let warning = output["summary"]["warning"].as_str();
+    assert!(warning.is_some(),
+        "Phrase search should show ext warning. Got: {}",
+        serde_json::to_string_pretty(&output["summary"]).unwrap());
+
+    cleanup_tmp(&tmp_dir);
+}
