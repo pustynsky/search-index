@@ -324,6 +324,53 @@ IDF = ln(total_files / files_containing_term)
 
 Multi-term: scores are summed across matching terms. Files matching more terms rank higher naturally.
 
+### Relevance Ranking
+
+Results from `search_definitions`, `search_fast`, and `search_grep` (phrase mode) are sorted by relevance using a multi-key tiered sort algorithm. This ensures that exact matches appear first, followed by prefix matches, then substring/contains matches — critical for AI agents that rely on the first 5–10 results.
+
+#### Algorithm: `best_match_tier()`
+
+Shared function in `utils.rs` that classifies a name against search terms (case-insensitive):
+
+| Tier | Match Type | Example (query: `UserService`) |
+|------|-----------|-------------------------------|
+| 0    | **Exact** — name equals a search term | `UserService` |
+| 1    | **Prefix** — name starts with a search term | `UserServiceFactory`, `UserServiceHelper` |
+| 2    | **Contains** — name contains a search term | `IUserService`, `BaseUserService` |
+
+For comma-separated multi-term queries, the **best** (lowest) tier across all terms is used.
+
+#### Sort Keys by Tool
+
+**`search_definitions`** (when `name` filter is active, non-regex):
+
+```
+1. Match tier:   exact(0) > prefix(1) > contains(2)
+2. Kind:         class/interface/enum/struct/record(0) > method/property/field(1)
+3. Name length:  shorter > longer
+4. Alphabetical: deterministic tiebreaker
+```
+
+**`search_fast`** (file name search):
+
+```
+1. Match tier:   exact(0) > prefix(1) > contains(2)  — by filename stem (no extension)
+2. Stem length:  shorter > longer
+3. Full path:    alphabetical tiebreaker
+```
+
+**`search_grep` phrase mode**: sorted by occurrence count (descending).
+
+**Not ranked**: `search_grep` token/substring mode (uses TF-IDF), `search_find` (filesystem walk order), regex mode in `search_definitions` (no "exact match" semantics).
+
+#### Design Decisions
+
+- **No numeric score in JSON** — LLM agents use result **order**, not absolute score values. No `relevanceScore` field is emitted.
+- **Kind is a tiebreaker, not a primary key** — a method `GetUser` (exact, tier 0) always outranks a class `GetUserService` (prefix, tier 1). Kind only matters within the same tier.
+- **Case-insensitive comparison** — `best_match_tier()` lowercases both the name and terms internally, so ranking works correctly regardless of input casing.
+
+See [TODO-relevance-ranking.md](TODO-relevance-ranking.md) for the full design rationale and comparison of alternatives.
+
 ### Call Tree Pipeline (search_callers)
 
 **Direction "up" (find callers):**

@@ -656,6 +656,9 @@ fn handle_phrase_search(
     let total_files = results.len();
     let total_occurrences: usize = results.iter().map(|r| r.lines.len()).sum();
 
+    // Sort by number of occurrences descending (most matches first)
+    results.sort_by(|a, b| b.lines.len().cmp(&a.lines.len()));
+
     if max_results > 0 {
         results.truncate(max_results);
     }

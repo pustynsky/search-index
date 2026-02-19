@@ -2100,3 +2100,342 @@ fn test_search_info_response_structure() {
         }
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Relevance Ranking tests
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Helper: create a context with definitions for ranking tests.
+/// Contains: UserService (class), UserServiceFactory (class), UserServiceHelper (method).
+fn make_ranking_defs_ctx() -> HandlerContext {
+    use crate::definitions::*;
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec![
+            "C:\\src\\UserService.cs".to_string(),
+            "C:\\src\\UserServiceFactory.cs".to_string(),
+            "C:\\src\\Helpers.cs".to_string(),
+        ],
+        index: HashMap::new(), total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50, 30, 20],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "UserService".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "UserServiceFactory".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 2, name: "UserServiceHelper".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 30,
+            parent: Some("Helpers".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "IUserService".to_string(),
+            kind: DefinitionKind::Interface, line_start: 1, line_end: 20,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![
+            "C:\\src\\UserService.cs".to_string(),
+            "C:\\src\\UserServiceFactory.cs".to_string(),
+            "C:\\src\\Helpers.cs".to_string(),
+        ],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    }
+}
+
+/// search_definitions ranking: exact match class comes first, then prefix matches,
+/// with shorter names before longer. Type-level defs sort before member-level.
+#[test]
+fn test_search_definitions_ranking_exact_first() {
+    let ctx = make_ranking_defs_ctx();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "UserService"
+    }));
+    assert!(!result.is_error, "search_definitions should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    assert!(defs.len() >= 3, "Should find at least 3 definitions containing 'UserService', got {}", defs.len());
+
+    // First result should be exact match "UserService" (class, tier 0)
+    assert_eq!(defs[0]["name"], "UserService",
+        "First result should be exact match 'UserService', got '{}'", defs[0]["name"]);
+    assert_eq!(defs[0]["kind"], "class",
+        "Exact match should be the class definition");
+}
+
+/// search_definitions ranking: prefix matches come before contains matches.
+#[test]
+fn test_search_definitions_ranking_prefix_before_contains() {
+    let ctx = make_ranking_defs_ctx();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "UserService"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    // Collect names in order
+    let names: Vec<&str> = defs.iter().map(|d| d["name"].as_str().unwrap()).collect();
+
+    // "IUserService" is a contains-only match (tier 2) — should be after
+    // "UserServiceFactory" and "UserServiceHelper" which are prefix matches (tier 1)
+    let iuser_pos = names.iter().position(|n| *n == "IUserService");
+    let factory_pos = names.iter().position(|n| *n == "UserServiceFactory");
+    let helper_pos = names.iter().position(|n| *n == "UserServiceHelper");
+
+    if let (Some(iuser), Some(factory)) = (iuser_pos, factory_pos) {
+        assert!(factory < iuser,
+            "Prefix match 'UserServiceFactory' (pos {}) should come before contains match 'IUserService' (pos {})",
+            factory, iuser);
+    }
+    if let (Some(iuser), Some(helper)) = (iuser_pos, helper_pos) {
+        assert!(helper < iuser,
+            "Prefix match 'UserServiceHelper' (pos {}) should come before contains match 'IUserService' (pos {})",
+            helper, iuser);
+    }
+}
+
+/// search_definitions ranking: among prefix matches, type-level (class) sorts before
+/// member-level (method), and shorter names before longer for same kind priority.
+#[test]
+fn test_search_definitions_ranking_kind_and_length_tiebreak() {
+    let ctx = make_ranking_defs_ctx();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "UserService"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    let names: Vec<&str> = defs.iter().map(|d| d["name"].as_str().unwrap()).collect();
+
+    // Among prefix matches (tier 1): "UserServiceFactory" (class, priority 0)
+    // and "UserServiceHelper" (method, priority 1)
+    // Class should come before method.
+    let factory_pos = names.iter().position(|n| *n == "UserServiceFactory");
+    let helper_pos = names.iter().position(|n| *n == "UserServiceHelper");
+
+    if let (Some(factory), Some(helper)) = (factory_pos, helper_pos) {
+        assert!(factory < helper,
+            "Class 'UserServiceFactory' (pos {}) should sort before method 'UserServiceHelper' (pos {}) due to kind priority",
+            factory, helper);
+    }
+}
+
+/// search_definitions ranking: regex mode should NOT apply relevance ranking.
+#[test]
+fn test_search_definitions_ranking_not_applied_with_regex() {
+    let ctx = make_ranking_defs_ctx();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "UserService.*",
+        "regex": true
+    }));
+    assert!(!result.is_error, "regex search should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+    assert!(!defs.is_empty(), "Should find definitions matching regex");
+    // We don't assert specific order since regex mode uses default order (no ranking)
+}
+
+/// search_fast ranking: exact stem match sorts first, then prefix, then contains.
+#[test]
+fn test_search_fast_ranking_exact_stem_first() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_rank_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create files with names that test different match tiers
+    for name in &["UserService.cs", "UserServiceFactory.cs", "IUserService.cs", "UserServiceHelpers.cs"] {
+        let p = tmp_dir.join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0 });
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+
+    let result = handle_search_fast(&ctx, &json!({"pattern": "UserService"}));
+    assert!(!result.is_error, "search_fast should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+
+    assert!(files.len() >= 3, "Should find at least 3 files matching 'UserService', got {}", files.len());
+
+    // First result should be "UserService.cs" — exact stem match (tier 0)
+    let first_path = files[0]["path"].as_str().unwrap();
+    assert!(first_path.contains("UserService.cs") && !first_path.contains("Factory") && !first_path.contains("Helper") && !first_path.contains("IUser"),
+        "First result should be exact stem match 'UserService.cs', got '{}'", first_path);
+
+    // IUserService.cs should be after prefix matches (UserServiceFactory, UserServiceHelpers)
+    let paths: Vec<&str> = files.iter().map(|f| f["path"].as_str().unwrap()).collect();
+    let iuser_pos = paths.iter().position(|p| p.contains("IUserService"));
+    let factory_pos = paths.iter().position(|p| p.contains("UserServiceFactory"));
+
+    if let (Some(iuser), Some(factory)) = (iuser_pos, factory_pos) {
+        assert!(factory < iuser,
+            "Prefix match 'UserServiceFactory' (pos {}) should come before contains match 'IUserService' (pos {})",
+            factory, iuser);
+    }
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// search_fast ranking: among prefix matches, shorter stems sort first.
+#[test]
+fn test_search_fast_ranking_shorter_stem_first() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_rank_len_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    for name in &["OrderA.cs", "OrderABC.cs", "OrderABCDEF.cs"] {
+        let p = tmp_dir.join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0 });
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+
+    let result = handle_search_fast(&ctx, &json!({"pattern": "Order"}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+
+    assert_eq!(files.len(), 3, "Should find exactly 3 files");
+
+    // All are prefix matches (tier 1). Shorter stems should come first.
+    let stems: Vec<&str> = files.iter().map(|f| {
+        let path = f["path"].as_str().unwrap();
+        std::path::Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("")
+    }).collect();
+
+    for i in 0..stems.len() - 1 {
+        assert!(stems[i].len() <= stems[i + 1].len(),
+            "Stems should be sorted by length: '{}' ({}) should come before '{}' ({})",
+            stems[i], stems[i].len(), stems[i + 1], stems[i + 1].len());
+    }
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// search_grep phrase mode: results sorted by number of occurrences descending.
+#[test]
+fn test_search_grep_phrase_sort_by_occurrences() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_grep_phrase_rank_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // File with 1 occurrence
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("one.cs")).unwrap();
+        writeln!(f, "// some code").unwrap();
+        writeln!(f, "var result = user service call;").unwrap();
+        writeln!(f, "// end").unwrap();
+    }
+    // File with 3 occurrences
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("three.cs")).unwrap();
+        writeln!(f, "var a = user service one;").unwrap();
+        writeln!(f, "var b = user service two;").unwrap();
+        writeln!(f, "// middle").unwrap();
+        writeln!(f, "var c = user service three;").unwrap();
+    }
+    // File with 2 occurrences
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("two.cs")).unwrap();
+        writeln!(f, "var x = user service alpha;").unwrap();
+        writeln!(f, "// gap").unwrap();
+        writeln!(f, "var y = user service beta;").unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(), ext: "cs".to_string(),
+        max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
+    });
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)), def_index: None,
+        server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: tmp_dir.join(".index"),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "user service",
+        "phrase": true
+    }));
+    assert!(!result.is_error, "Phrase search should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+
+    assert!(files.len() >= 2, "Should find at least 2 files with 'user service' phrase, got {}", files.len());
+
+    // Verify descending order by occurrences
+    for i in 0..files.len() - 1 {
+        let occ_a = files[i]["occurrences"].as_u64().unwrap();
+        let occ_b = files[i + 1]["occurrences"].as_u64().unwrap();
+        assert!(occ_a >= occ_b,
+            "Phrase results should be sorted by occurrences descending: file at pos {} has {} occurrences, file at pos {} has {}",
+            i, occ_a, i + 1, occ_b);
+    }
+
+    cleanup_tmp(&tmp_dir);
+}

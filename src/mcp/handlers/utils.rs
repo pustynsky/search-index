@@ -518,6 +518,27 @@ pub(crate) fn inject_body_into_obj(
     }
 }
 
+// ─── Relevance ranking helpers ──────────────────────────────────────
+
+/// Returns the best (lowest) match tier for a name against a list of search terms.
+/// - 0 = exact match (name equals one of the terms, case-insensitive)
+/// - 1 = prefix match (name starts with one of the terms)
+/// - 2 = contains match (name contains one of the terms — already filtered)
+pub(crate) fn best_match_tier(name: &str, terms: &[String]) -> u8 {
+    let name_lower = name.to_lowercase();
+    let mut best = 2u8;
+    for term in terms {
+        let term_lower = term.to_lowercase();
+        if name_lower == term_lower {
+            return 0; // exact — can't do better
+        }
+        if best > 1 && name_lower.starts_with(&term_lower) {
+            best = 1;
+        }
+    }
+    best
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -927,5 +948,77 @@ mod tests {
             "Grep hint should mention countOnly, got: {}", hint);
         assert!(!hint.contains("kind"),
             "Grep hint should NOT mention definitions filters, got: {}", hint);
+    }
+
+    // ─── best_match_tier relevance ranking tests ─────────────────────
+
+    #[test]
+    fn test_best_match_tier_exact_match_returns_0() {
+        let terms = vec!["userservice".to_string()];
+        assert_eq!(best_match_tier("UserService", &terms), 0);
+    }
+
+    #[test]
+    fn test_best_match_tier_exact_match_case_insensitive() {
+        let terms = vec!["userservice".to_string()];
+        assert_eq!(best_match_tier("USERSERVICE", &terms), 0);
+        assert_eq!(best_match_tier("userservice", &terms), 0);
+        assert_eq!(best_match_tier("UserService", &terms), 0);
+    }
+
+    #[test]
+    fn test_best_match_tier_prefix_match_returns_1() {
+        let terms = vec!["userservice".to_string()];
+        assert_eq!(best_match_tier("UserServiceFactory", &terms), 1);
+    }
+
+    #[test]
+    fn test_best_match_tier_contains_only_returns_2() {
+        let terms = vec!["userservice".to_string()];
+        assert_eq!(best_match_tier("IUserService", &terms), 2);
+    }
+
+    #[test]
+    fn test_best_match_tier_no_match_returns_2() {
+        // The function is called only on already-filtered results,
+        // so a non-matching name still returns 2 (contains/default tier).
+        let terms = vec!["userservice".to_string()];
+        assert_eq!(best_match_tier("OrderProcessor", &terms), 2);
+    }
+
+    #[test]
+    fn test_best_match_tier_multiple_terms_best_wins() {
+        let terms = vec!["order".to_string(), "userservice".to_string()];
+        // "UserService" is exact match for "userservice" → tier 0
+        assert_eq!(best_match_tier("UserService", &terms), 0);
+        // "OrderProcessor" is prefix match for "order" → tier 1
+        assert_eq!(best_match_tier("OrderProcessor", &terms), 1);
+        // "IUserService" contains "userservice" → tier 2
+        assert_eq!(best_match_tier("IUserService", &terms), 2);
+    }
+
+    #[test]
+    fn test_best_match_tier_empty_terms_returns_2() {
+        let terms: Vec<String> = vec![];
+        assert_eq!(best_match_tier("UserService", &terms), 2);
+    }
+
+    #[test]
+    fn test_best_match_tier_exact_beats_prefix_with_multiple_terms() {
+        // When one term is exact and another is prefix, exact wins (tier 0)
+        let terms = vec!["iuserservice".to_string(), "userservice".to_string()];
+        // "UserService" is exact for "userservice" → 0
+        assert_eq!(best_match_tier("UserService", &terms), 0);
+        // "IUserService" is exact for "iuserservice" → 0
+        assert_eq!(best_match_tier("IUserService", &terms), 0);
+    }
+
+    #[test]
+    fn test_best_match_tier_prefix_beats_contains() {
+        let terms = vec!["user".to_string()];
+        // "UserService" starts with "user" → tier 1
+        assert_eq!(best_match_tier("UserService", &terms), 1);
+        // "IUserService" contains "user" but doesn't start with it → tier 2
+        assert_eq!(best_match_tier("IUserService", &terms), 2);
     }
 }

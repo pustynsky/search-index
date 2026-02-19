@@ -52,10 +52,10 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 | Tool                         | Description                                                                                                                             |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `search_grep`                | Search content index with TF-IDF ranking, regex, phrase, AND/OR                                                                         |
-| `search_definitions`         | Search code definitions (classes, methods, interfaces, etc.). Supports `containsLine`, `includeBody`, `audit`. Requires `--definitions` |
+| `search_definitions`         | Search code definitions (classes, methods, interfaces, etc.). Supports `containsLine`, `includeBody`, `audit`. Relevance-ranked when name filter is active. Requires `--definitions` |
 | `search_callers`             | Find callers / callees and build recursive call tree. Requires `--definitions`                                                          |
 | `search_find`                | Live filesystem walk (⚠️ slow for large dirs)                                                                                           |
-| `search_fast`                | Search pre-built file name index (instant). Supports comma-separated OR patterns                                                        |
+| `search_fast`                | Search pre-built file name index (instant). Supports comma-separated OR patterns. Results ranked: exact stem → prefix → contains        |
 | `search_info`                | Show all indexes with status, sizes, age                                                                                                |
 | `search_reindex`             | Force rebuild + reload content index                                                                                                    |
 | `search_reindex_definitions` | Force rebuild + reload definition index. Requires `--definitions`                                                                       |
@@ -148,6 +148,8 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 ## `search_definitions` — Code Definitions
 
 Search code definitions: classes, methods, interfaces, enums, functions, type aliases, stored procedures. Requires `--definitions`.
+
+Results are **relevance-ranked** when a `name` filter is active (non-regex): exact matches first, then prefix matches, then substring matches. Within the same match tier, type-level definitions (classes, interfaces, enums) sort before members (methods, properties), and shorter names before longer. See [Architecture — Relevance Ranking](architecture.md#relevance-ranking) for details.
 
 ### Parameters
 
