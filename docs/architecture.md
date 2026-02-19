@@ -350,6 +350,59 @@ Direction "up" combines the content index (where does this token appear?) with t
 
 Direction "down" uses the pre-computed call graph — zero runtime file I/O. Call sites are extracted during `def-index` build with field type resolution (DI constructor parameter types → field types → receiver types).
 
+## Indexing Triggers — When Does Indexing Happen?
+
+A single consolidated reference for all indexing scenarios. For detailed internals, see [Storage Model](storage.md), [Concurrency](concurrency.md), and [CLI Reference](cli-reference.md).
+
+### Full Index Build
+
+| Trigger | What Happens | Indexes Affected | Time |
+|---------|-------------|-----------------|------|
+| `search content-index -d DIR -e EXT` | Full parallel walk + tokenization | ContentIndex (`.cidx`) | ~7–16s |
+| `search def-index -d DIR -e EXT` | Full parallel walk + tree-sitter parse | DefinitionIndex (`.didx`) | ~16–32s |
+| `search index -d DIR` | Full parallel walk | FileIndex (`.idx`) | ~2–4s |
+| MCP server first start (no index on disk) | Background thread builds indexes; tools return "index is building" until ready | ContentIndex + DefinitionIndex (if `--definitions`) | Same as above |
+| `search_reindex` (MCP tool) | Full rebuild + reload in-memory | ContentIndex | ~7–16s |
+| `search_reindex_definitions` (MCP tool) | Full rebuild + reload in-memory | DefinitionIndex | ~16–32s |
+| Watcher batch > `--bulk-threshold` (default: 100) | Full rebuild from scratch (faster than 100+ incremental updates) | ContentIndex + DefinitionIndex | ~7–32s |
+
+### Incremental Update (Watcher)
+
+| Trigger | What Happens | Indexes Affected | Time |
+|---------|-------------|-----------------|------|
+| File saved in IDE | Watcher detects change after debounce window (`--debounce-ms`, default 500ms), updates inverted index + re-parses AST | ContentIndex + DefinitionIndex | ~50–100ms per file |
+| File created | Same as file save — added to both indexes | ContentIndex + DefinitionIndex | ~50–100ms |
+| File deleted | Postings purged from inverted index (brute-force scan); definitions removed from def index | ContentIndex + DefinitionIndex | ~50–100ms |
+
+### Lazy / On-Demand Rebuild
+
+| Trigger | What Happens | Indexes Affected | Time |
+|---------|-------------|-----------------|------|
+| Substring search after file watcher update | `trigram_dirty` flag → trigram index rebuilt from inverted index on next `search_grep` with `substring=true` | TrigramIndex (in-memory, part of ContentIndex) | ~200ms |
+| `search fast` with stale FileIndex | Auto-rebuild if `--auto-reindex true` (default) | FileIndex | ~2–4s |
+| `search grep` with stale ContentIndex | Auto-rebuild if `--auto-reindex true` (default) | ContentIndex | ~7–16s |
+
+### Load From Disk (No Rebuild)
+
+| Trigger | What Happens | Time |
+|---------|-------------|------|
+| MCP server start (index exists on disk) | Synchronous load of LZ4-compressed bincode files | < 3s |
+| `search grep` / `search fast` (index exists, not stale) | Load from disk | < 3s |
+
+### What Does NOT Trigger Re-indexing
+
+| Scenario | Why |
+|----------|-----|
+| Upgrading `search.exe` binary (runtime logic changes only) | Index format unchanged → existing `.cidx` / `.didx` files are fully compatible |
+| Upgrading `search.exe` binary (parser changes — new definition types, new call site patterns) | Old index loads fine but may have stale/incomplete data → **manual `search_reindex_definitions`** recommended |
+| Upgrading `search.exe` binary (index format changes — e.g., new field added to struct) | Bincode deserialization fails → index is rebuilt automatically on next server start |
+| Restarting VS Code / MCP server | Index loads from disk (if saved); no rebuild |
+| Opening a different VS Code workspace | Each workspace has its own MCP server instance with its own index |
+
+### Graceful Shutdown — Saving Incremental Changes
+
+When the MCP server shuts down (stdin closes), it saves both in-memory indexes to disk. This preserves all incremental watcher updates that were only held in memory. On next startup, the saved indexes are loaded — no rebuild needed for changes made during the previous session.
+
 ## Module Structure
 
 ```

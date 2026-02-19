@@ -129,6 +129,11 @@ pub struct CallSite {
     pub receiver_type: Option<String>,
     /// Line number where the call occurs (1-based)
     pub line: u32,
+    /// Whether the receiver type at the call site had generic parameters,
+    /// e.g., `new List<int>()` → true, `new List()` → false.
+    /// Used to filter out name collisions with non-generic classes.
+    #[serde(default)]
+    pub receiver_is_generic: bool,
 }
 
 // ─── Definition Index ────────────────────────────────────────────────

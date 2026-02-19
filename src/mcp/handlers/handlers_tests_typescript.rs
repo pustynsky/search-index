@@ -211,7 +211,8 @@ fn make_ts_ctx_with_defs() -> HandlerContext {
         method_name: "getUser".to_string(),
         receiver_type: Some("UserService".to_string()),
         line: 20,
-    }]);
+                receiver_is_generic: false,
+            }]);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(),
@@ -809,7 +810,8 @@ fn test_ts_search_callers_inject_support() {
         method_name: "getUser".to_string(),
         receiver_type: Some("UserService".to_string()),
         line: 12,
-    }]);
+                receiver_is_generic: false,
+            }]);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,
@@ -1060,12 +1062,14 @@ fn test_mixed_cs_ts_callers_ext_filter() {
         method_name: "getUser".to_string(),
         receiver_type: Some("CsService".to_string()),
         line: 5,
-    }]);
+                receiver_is_generic: false,
+            }]);
     method_calls.insert(3, vec![CallSite {
         method_name: "getUser".to_string(),
         receiver_type: Some("CsService".to_string()),
         line: 10,
-    }]);
+                receiver_is_generic: false,
+            }]);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,

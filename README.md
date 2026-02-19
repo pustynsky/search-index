@@ -97,6 +97,14 @@ The engine uses three independent index types:
 
 Indexes are stored in `%LOCALAPPDATA%\search-index\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX) for definitions. See [Architecture](docs/architecture.md) for details.
 
+### Caller Tree Verification
+
+The `search_callers` tool builds call trees by tracing method invocations through AST-parsed call-site data. Key design points:
+
+- **Call-site verification is mandatory** — methods without parsed call-site data are filtered out (no false-positive fallback)
+- **Expression body properties supported** — C# expression body properties (`public string Name => _service.GetName();`) have their call sites extracted and verified
+- **Pre-filter uses class name and method name only** — base types and interfaces are not expanded during the pre-filter phase; inheritance verification happens during call-site validation via receiver type matching
+
 ## Dependencies
 
 | Crate | Purpose |

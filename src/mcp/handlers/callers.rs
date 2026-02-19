@@ -207,14 +207,15 @@ struct CallerLimits {
 }
 
 /// Find the containing method for a given file_id and line number in the definition index.
+/// Returns `(name, parent, line_start, definition_index)`.
 pub(crate) fn find_containing_method(
     def_idx: &DefinitionIndex,
     file_id: u32,
     line: u32,
-) -> Option<(String, Option<String>, u32)> {
+) -> Option<(String, Option<String>, u32, u32)> {
     let def_indices = def_idx.file_index.get(&file_id)?;
 
-    let mut best: Option<&DefinitionEntry> = None;
+    let mut best: Option<(u32, &DefinitionEntry)> = None;
     for &di in def_indices {
         if let Some(def) = def_idx.definitions.get(di as usize) {
             match def.kind {
@@ -222,18 +223,18 @@ pub(crate) fn find_containing_method(
                 _ => continue,
             }
             if def.line_start <= line && def.line_end >= line {
-                if let Some(current_best) = best {
+                if let Some((_, current_best)) = best {
                     if (def.line_end - def.line_start) < (current_best.line_end - current_best.line_start) {
-                        best = Some(def);
+                        best = Some((di, def));
                     }
                 } else {
-                    best = Some(def);
+                    best = Some((di, def));
                 }
             }
         }
     }
 
-    best.map(|d| (d.name.clone(), d.parent.clone(), d.line_start))
+    best.map(|(di, d)| (d.name.clone(), d.parent.clone(), d.line_start, di))
 }
 
 /// Collect file_ids from the content index where `term` appears as a SUBSTRING of
@@ -290,29 +291,6 @@ fn collect_substring_file_ids(
     }
 }
 
-/// Finds the definition index for a method/function/constructor at a given file_id and line_start.
-/// Uses file_index for fast lookup instead of scanning all definitions.
-fn find_method_def_index(
-    def_idx: &DefinitionIndex,
-    file_id: u32,
-    method_line_start: u32,
-) -> Option<u32> {
-    let file_defs = def_idx.file_index.get(&file_id)?;
-    file_defs.iter().find_map(|&di| {
-        let d = def_idx.definitions.get(di as usize)?;
-        if d.line_start == method_line_start
-            && matches!(
-                d.kind,
-                DefinitionKind::Method | DefinitionKind::Function | DefinitionKind::Constructor
-            )
-        {
-            Some(di)
-        } else {
-            None
-        }
-    })
-}
-
 /// Verifies that a call on a specific line actually targets the expected class.
 /// Uses pre-computed call-site data from the definition index.
 ///
@@ -340,7 +318,7 @@ fn verify_call_site_target(
     // Get call sites for the caller method from the definition index
     let call_sites = match def_idx.method_calls.get(&caller_di) {
         Some(cs) => cs,
-        None => return true, // graceful fallback: no call-site data available
+        None => return false, // no call-site data → reject (parser covers all patterns now)
     };
 
     // Find call sites on the specified line with the matching method name
@@ -515,20 +493,10 @@ fn build_caller_tree(
             file_ids.extend(postings.iter().map(|p| p.file_id));
         }
 
-        // Also check if parent implements any interfaces and add files referencing those
-        if let Some(name_indices) = def_idx.name_index.get(&cls_lower) {
-            for &di in name_indices {
-                if let Some(def) = def_idx.definitions.get(di as usize)
-                    && (def.kind == DefinitionKind::Class || def.kind == DefinitionKind::Struct) {
-                        for bt in &def.base_types {
-                            let bt_lower = bt.to_lowercase();
-                            if let Some(postings) = content_index.index.get(&bt_lower) {
-                                file_ids.extend(postings.iter().map(|p| p.file_id));
-                            }
-                        }
-                    }
-            }
-        }
+        // Note: we intentionally do NOT expand pre-filter by base_types (interfaces).
+        // Common interfaces (IDisposable, IEnumerable, etc.) would add thousands of
+        // irrelevant files, disabling the pre-filter. Inheritance is already verified
+        // in verify_call_site_target() via target_base_types.
 
         // Trigram substring matching: find files where class name appears as a
         // SUBSTRING of another token (e.g. m_catalogQueryManager, _catalogQueryManager).
@@ -597,22 +565,20 @@ fn build_caller_tree(
                 continue;
             }
 
-            if let Some((caller_name, caller_parent, caller_line)) =
+            if let Some((caller_name, caller_parent, caller_line, caller_di)) =
                 find_containing_method(def_idx, def_fid, line)
             {
                 // Verify the call on this line actually targets the expected class
                 // using pre-computed call-site data from the AST
                 if parent_class.is_some() {
-                    if let Some(caller_di) = find_method_def_index(def_idx, def_fid, caller_line) {
-                        if !verify_call_site_target(
-                            def_idx,
-                            caller_di,
-                            line,
-                            &method_lower,
-                            parent_class,
-                        ) {
-                            continue;
-                        }
+                    if !verify_call_site_target(
+                        def_idx,
+                        caller_di,
+                        line,
+                        &method_lower,
+                        parent_class,
+                    ) {
+                        continue;
                     }
                 }
 
@@ -794,7 +760,9 @@ fn build_callee_tree(
             if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes { break; }
 
             // Resolve this call site to actual definitions
-            let resolved = resolve_call_site(call, def_idx);
+            let caller_parent = def_idx.definitions.get(method_di as usize)
+                .and_then(|d| d.parent.as_deref());
+            let resolved = resolve_call_site(call, def_idx, caller_parent);
 
             for callee_di in resolved {
                 if callees.len() >= limits.max_callers_per_level { break; }
@@ -835,7 +803,7 @@ fn build_callee_tree(
 
                 let sub_callees = build_callee_tree(
                     &callee_def.name,
-                    None, // don't propagate class filter to sub-callees
+                    callee_def.parent.as_deref(), // scope recursion to the callee's own class
                     max_depth,
                     current_depth + 1,
                     def_idx,
@@ -872,10 +840,30 @@ fn build_callee_tree(
     callees
 }
 
+/// Check if a class (by lowercased name) has generic parameters in its signature.
+/// Returns true if ANY class definition with that name has `<` in its signature.
+fn is_class_generic(def_idx: &DefinitionIndex, class_name_lower: &str) -> bool {
+    if let Some(indices) = def_idx.name_index.get(class_name_lower) {
+        for &di in indices {
+            if let Some(def) = def_idx.definitions.get(di as usize) {
+                if matches!(def.kind, DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record | DefinitionKind::Interface) {
+                    if let Some(ref sig) = def.signature {
+                        if sig.contains('<') {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Resolve a CallSite to actual definition indices in the definition index.
-/// Uses receiver_type to disambiguate when available, and falls back to
-/// name-only matching when receiver is unknown.
-pub(crate) fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex) -> Vec<u32> {
+/// Uses receiver_type to disambiguate when available. When receiver is unknown,
+/// scopes to the caller's own class if `caller_parent` is provided, otherwise
+/// falls back to accepting all matching methods.
+pub(crate) fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex, caller_parent: Option<&str>) -> Vec<u32> {
     let name_lower = call.method_name.to_lowercase();
     let candidates = match def_idx.name_index.get(&name_lower) {
         Some(c) => c,
@@ -904,6 +892,11 @@ pub(crate) fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex) -> V
 
                 // Direct match: parent class name == receiver type
                 if parent_lower == recv_lower {
+                    // Generic arity check: if call site is generic (e.g. new List<int>())
+                    // but the resolved class is NOT generic, skip — likely BCL name collision
+                    if call.receiver_is_generic && !is_class_generic(def_idx, &parent_lower) {
+                        continue;
+                    }
                     resolved.push(di);
                     continue;
                 }
@@ -931,9 +924,17 @@ pub(crate) fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex) -> V
                 }
             }
         } else {
-            // No receiver type -- accept any matching method/constructor
-            // (this handles simple calls like Foo() within the same class)
-            resolved.push(di);
+            // No receiver type -- prefer methods in the same class as the caller
+            if let Some(caller_cls) = caller_parent {
+                if let Some(ref parent) = def.parent {
+                    if parent.eq_ignore_ascii_case(caller_cls) {
+                        resolved.push(di);
+                    }
+                }
+            } else {
+                // No caller class context -- accept all (backward-compatible)
+                resolved.push(di);
+            }
         }
     }
 
@@ -1034,6 +1035,7 @@ mod tests {
                 method_name: "validate".to_string(),
                 receiver_type: Some("OrderValidator".to_string()),
                 line: 25,
+                receiver_is_generic: false,
             },
         ]);
 
@@ -1062,6 +1064,7 @@ mod tests {
                 method_name: "resolve".to_string(),
                 receiver_type: Some("Path".to_string()),
                 line: 25,
+                receiver_is_generic: false,
             },
         ]);
 
@@ -1089,6 +1092,7 @@ mod tests {
                 method_name: "validate".to_string(),
                 receiver_type: None,
                 line: 55,
+                receiver_is_generic: false,
             },
         ]);
 
@@ -1117,6 +1121,7 @@ mod tests {
                 method_name: "validate".to_string(),
                 receiver_type: None,
                 line: 25,
+                receiver_is_generic: false,
             },
         ]);
 
@@ -1141,6 +1146,7 @@ mod tests {
                 method_name: "validate".to_string(),
                 receiver_type: Some("SomeRandomClass".to_string()),
                 line: 25,
+                receiver_is_generic: false,
             },
         ]);
 
@@ -1164,8 +1170,8 @@ mod tests {
 
         let def_idx = make_def_index(definitions, method_calls);
 
-        // No call-site data → graceful fallback, should return true
-        assert!(verify_call_site_target(&def_idx, 1, 25, "validate", Some("OrderValidator")));
+        // No call-site data → rejection (parser covers all patterns now)
+        assert!(!verify_call_site_target(&def_idx, 1, 25, "validate", Some("OrderValidator")));
     }
 
     // ─── Test 7: Interface match (IOrderValidator → OrderValidator) ─
@@ -1188,6 +1194,7 @@ mod tests {
                 method_name: "validate".to_string(),
                 receiver_type: Some("IOrderValidator".to_string()),
                 line: 25,
+                receiver_is_generic: false,
             },
         ]);
 
@@ -1215,6 +1222,7 @@ mod tests {
                 method_name: "endsWith".to_string(),
                 receiver_type: Some("String".to_string()),
                 line: 10,
+                receiver_is_generic: false,
             },
         ]);
 
@@ -1223,5 +1231,343 @@ mod tests {
         // Method has call-site data (endsWith at line 10), but no call at line 5
         // → this is a false positive from content index → should return false
         assert!(!verify_call_site_target(&def_idx, 1, 5, "resolve", Some("PathUtils")));
+    }
+
+    // ─── Test 9: Pre-filter does NOT expand by base_types ────────────
+
+    #[test]
+    fn test_prefilter_does_not_expand_by_base_types() {
+        // Scenario:
+        // - ResourceManager implements IDisposable, has method Dispose
+        // - Many files mention "idisposable" (simulating a large codebase)
+        // - Only one file actually calls resourceManager.Dispose()
+        // - The pre-filter should NOT include all IDisposable files
+        //
+        // We test this by running build_caller_tree and verifying that
+        // only the file with the actual call is in the results.
+
+        use crate::{ContentIndex, Posting, TrigramIndex};
+        use std::sync::atomic::AtomicUsize;
+        use std::path::PathBuf;
+
+        // --- Definition Index ---
+        // file 0: ResourceManager.cs (defines ResourceManager : IDisposable + Dispose)
+        // file 1: Caller.cs (calls resourceManager.Dispose())
+        // files 2..11: IDisposable-mentioning files (no actual Dispose call on ResourceManager)
+
+        let definitions = vec![
+            // idx 0: class ResourceManager : IDisposable
+            DefinitionEntry {
+                file_id: 0,
+                name: "ResourceManager".to_string(),
+                kind: DefinitionKind::Class,
+                line_start: 1,
+                line_end: 50,
+                parent: None,
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec!["IDisposable".to_string()],
+            },
+            // idx 1: method ResourceManager.Dispose
+            DefinitionEntry {
+                file_id: 0,
+                name: "Dispose".to_string(),
+                kind: DefinitionKind::Method,
+                line_start: 10,
+                line_end: 20,
+                parent: Some("ResourceManager".to_string()),
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec![],
+            },
+            // idx 2: class Caller (in file 1)
+            DefinitionEntry {
+                file_id: 1,
+                name: "Caller".to_string(),
+                kind: DefinitionKind::Class,
+                line_start: 1,
+                line_end: 30,
+                parent: None,
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec![],
+            },
+            // idx 3: method Caller.DoWork (contains the actual call)
+            DefinitionEntry {
+                file_id: 1,
+                name: "DoWork".to_string(),
+                kind: DefinitionKind::Method,
+                line_start: 5,
+                line_end: 25,
+                parent: Some("Caller".to_string()),
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec![],
+            },
+        ];
+
+        // Call site: Caller.DoWork calls resourceManager.Dispose() at line 15
+        let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+        method_calls.insert(3, vec![
+            CallSite {
+                method_name: "Dispose".to_string(),
+                receiver_type: Some("ResourceManager".to_string()),
+                line: 15,
+                receiver_is_generic: false,
+            },
+        ]);
+
+        // Build def index
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+        }
+
+        let num_files = 12u32; // file 0 + file 1 + 10 IDisposable files
+        let mut files_list: Vec<String> = vec![
+            "src/ResourceManager.cs".to_string(),
+            "src/Caller.cs".to_string(),
+        ];
+        path_to_id.insert(PathBuf::from("src/ResourceManager.cs"), 0);
+        path_to_id.insert(PathBuf::from("src/Caller.cs"), 1);
+
+        for i in 2..num_files {
+            let path = format!("src/Service{}.cs", i);
+            files_list.push(path.clone());
+            path_to_id.insert(PathBuf::from(&path), i);
+        }
+
+        let def_idx = DefinitionIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: files_list.clone(),
+            definitions,
+            name_index,
+            kind_index,
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index,
+            path_to_id,
+            method_calls,
+            parse_errors: 0,
+            lossy_file_count: 0,
+            empty_file_ids: Vec::new(),
+        };
+
+        // --- Content Index ---
+        // Token "dispose" appears in file 0 (definition) and file 1 (actual call)
+        // Token "idisposable" appears in files 2..11 (many files mentioning the interface)
+        // Token "resourcemanager" appears only in file 0 and file 1
+        let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+
+        // "dispose" in file 0 (definition, line 10) and file 1 (call, line 15)
+        index.insert("dispose".to_string(), vec![
+            Posting { file_id: 0, lines: vec![10] },
+            Posting { file_id: 1, lines: vec![15] },
+        ]);
+
+        // "resourcemanager" in file 0 and file 1
+        index.insert("resourcemanager".to_string(), vec![
+            Posting { file_id: 0, lines: vec![1] },
+            Posting { file_id: 1, lines: vec![15] },
+        ]);
+
+        // "idisposable" in many files (simulating common interface)
+        let idisposable_postings: Vec<Posting> = (2..num_files)
+            .map(|fid| Posting { file_id: fid, lines: vec![1, 5, 10] })
+            .collect();
+        index.insert("idisposable".to_string(), idisposable_postings);
+
+        let content_index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: files_list,
+            index,
+            total_tokens: 100,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![50; num_files as usize],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+
+        // --- Run build_caller_tree ---
+        let mut visited = HashSet::new();
+        let limits = CallerLimits {
+            max_callers_per_level: 50,
+            max_total_nodes: 200,
+        };
+        let node_count = AtomicUsize::new(0);
+
+        let callers = build_caller_tree(
+            "Dispose",
+            Some("ResourceManager"),
+            3,
+            0,
+            &content_index,
+            &def_idx,
+            "cs",
+            &[],
+            &[],
+            false, // no interface resolution for this test
+            &mut visited,
+            &limits,
+            &node_count,
+        );
+
+        // Should find exactly one caller: Caller.DoWork
+        assert_eq!(callers.len(), 1, "Expected exactly 1 caller, got {}: {:?}", callers.len(), callers);
+        let caller = &callers[0];
+        assert_eq!(caller["method"].as_str().unwrap(), "DoWork");
+        assert_eq!(caller["class"].as_str().unwrap(), "Caller");
+
+        // Verify no false positives from IDisposable files
+        let caller_file = caller["file"].as_str().unwrap();
+        assert_eq!(caller_file, "Caller.cs", "Caller should be from Caller.cs, not an IDisposable file");
+    }
+
+    // ─── Test 10: resolve_call_site scopes by caller_parent when no receiver_type ──
+
+    #[test]
+    fn test_resolve_call_site_scopes_by_caller_parent() {
+        let definitions = vec![
+            class_def(0, "ClassA", vec![]),
+            method_def(0, "doWork", "ClassA", 5, 15),
+            class_def(1, "ClassB", vec![]),
+            method_def(1, "doWork", "ClassB", 5, 15),
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+        let call = CallSite {
+            method_name: "doWork".to_string(),
+            receiver_type: None,
+            line: 10,
+            receiver_is_generic: false,
+        };
+
+        let resolved_a = resolve_call_site(&call, &def_idx, Some("ClassA"));
+        assert_eq!(resolved_a.len(), 1);
+        assert_eq!(def_idx.definitions[resolved_a[0] as usize].parent.as_deref(), Some("ClassA"));
+
+        let resolved_b = resolve_call_site(&call, &def_idx, Some("ClassB"));
+        assert_eq!(resolved_b.len(), 1);
+        assert_eq!(def_idx.definitions[resolved_b[0] as usize].parent.as_deref(), Some("ClassB"));
+
+        let resolved_all = resolve_call_site(&call, &def_idx, None);
+        assert_eq!(resolved_all.len(), 2);
+    }
+
+    // ─── Test 11: build_callee_tree depth=2 no cross-class pollution ──
+
+    #[test]
+    fn test_callee_tree_depth2_no_cross_class_pollution() {
+        use std::sync::atomic::AtomicUsize;
+
+        let definitions = vec![
+            DefinitionEntry { file_id: 0, name: "ClassA".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 0, name: "process".to_string(), kind: DefinitionKind::Method, line_start: 5, line_end: 20, parent: Some("ClassA".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 0, name: "internalWork".to_string(), kind: DefinitionKind::Method, line_start: 22, line_end: 30, parent: Some("ClassA".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 1, name: "Helper".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 40, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 1, name: "run".to_string(), kind: DefinitionKind::Method, line_start: 5, line_end: 20, parent: Some("Helper".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 1, name: "helperStep".to_string(), kind: DefinitionKind::Method, line_start: 22, line_end: 35, parent: Some("Helper".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 2, name: "ClassB".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 40, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 2, name: "internalWork".to_string(), kind: DefinitionKind::Method, line_start: 5, line_end: 15, parent: Some("ClassB".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 2, name: "helperStep".to_string(), kind: DefinitionKind::Method, line_start: 17, line_end: 30, parent: Some("ClassB".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        ];
+
+        let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+        method_calls.insert(1, vec![
+            CallSite { method_name: "run".to_string(), receiver_type: Some("Helper".to_string()), line: 10, receiver_is_generic: false },
+            CallSite { method_name: "internalWork".to_string(), receiver_type: None, line: 15, receiver_is_generic: false },
+        ]);
+        method_calls.insert(4, vec![
+            CallSite { method_name: "helperStep".to_string(), receiver_type: None, line: 12, receiver_is_generic: false },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+        let mut visited = HashSet::new();
+        let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
+        let node_count = AtomicUsize::new(0);
+
+        let callees = build_callee_tree("process", Some("ClassA"), 3, 0, &def_idx, "ts", &[], &[], &mut visited, &limits, &node_count);
+
+        assert_eq!(callees.len(), 2, "Should have 2 callees, got {:?}", callees);
+        let callee_names: Vec<(&str, &str)> = callees.iter()
+            .map(|c| (c["method"].as_str().unwrap(), c["class"].as_str().unwrap_or("?")))
+            .collect();
+        assert!(callee_names.contains(&("run", "Helper")));
+        assert!(callee_names.contains(&("internalWork", "ClassA")));
+        assert!(!callee_names.contains(&("internalWork", "ClassB")), "ClassB.internalWork should NOT appear");
+
+        let run_node = callees.iter().find(|c| c["method"] == "run").unwrap();
+        let run_callees = run_node["callees"].as_array().unwrap();
+        assert_eq!(run_callees.len(), 1);
+        assert_eq!(run_callees[0]["method"].as_str().unwrap(), "helperStep");
+        assert_eq!(run_callees[0]["class"].as_str().unwrap(), "Helper", "helperStep should be Helper, not ClassB");
+    }
+
+    // ─── Test 12: Generic arity mismatch filters out non-generic class ──
+
+    #[test]
+    fn test_resolve_call_site_generic_arity_mismatch() {
+        // Scenario: new List<int>() should NOT resolve to a non-generic List class
+        // that happens to have the same name (e.g. ReportRenderingModel.List : DataRegion)
+        let definitions = vec![
+            // idx 0: non-generic List class (user-defined, NOT System.Collections.Generic.List<T>)
+            DefinitionEntry {
+                file_id: 0, name: "List".to_string(), kind: DefinitionKind::Class,
+                line_start: 1, line_end: 50, parent: None,
+                signature: Some("internal sealed class List : DataRegion".to_string()),
+                modifiers: vec![], attributes: vec![], base_types: vec!["DataRegion".to_string()],
+            },
+            // idx 1: constructor of non-generic List
+            DefinitionEntry {
+                file_id: 0, name: "List".to_string(), kind: DefinitionKind::Constructor,
+                line_start: 10, line_end: 20, parent: Some("List".to_string()),
+                signature: Some("internal List(int, ReportProcessing.List, ListInstance, RenderingContext)".to_string()),
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+        ];
+
+        let def_idx = make_def_index(definitions, HashMap::new());
+
+        // Call site: new List<CatalogEntry>() — generic call
+        let call_generic = CallSite {
+            method_name: "List".to_string(),
+            receiver_type: Some("List".to_string()),
+            line: 252,
+            receiver_is_generic: true, // <-- the key: call site had generics
+        };
+
+        // Should NOT resolve because the only List class is non-generic
+        let resolved = resolve_call_site(&call_generic, &def_idx, None);
+        assert!(resolved.is_empty(),
+            "Generic call new List<CatalogEntry>() should NOT resolve to non-generic List class, got {:?}", resolved);
+
+        // Call site: new List() — non-generic call
+        let call_non_generic = CallSite {
+            method_name: "List".to_string(),
+            receiver_type: Some("List".to_string()),
+            line: 300,
+            receiver_is_generic: false,
+        };
+
+        // SHOULD resolve — both non-generic
+        let resolved2 = resolve_call_site(&call_non_generic, &def_idx, None);
+        assert!(!resolved2.is_empty(),
+            "Non-generic call new List() SHOULD resolve to non-generic List class");
     }
 }
