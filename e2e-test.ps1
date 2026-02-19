@@ -43,12 +43,16 @@ if ($LASTEXITCODE -ne 0) { Write-Host "Build failed!" -ForegroundColor Red; exit
 # T01-T05: find
 Run-Test "T01 find-filename"       "$Binary find main -d $TestDir -e $TestExt"
 Run-Test "T02 find-contents"       "$Binary find `"fn main`" -d $TestDir -e $TestExt --contents"
+Run-Test "T03 find-regex"          "$Binary find `"fn\s+\w+`" -d $TestDir -e $TestExt --contents --regex"
 Run-Test "T04 find-case-insensitive" "$Binary find CONTENTINDEX -d $TestDir -e $TestExt --contents -i"
 Run-Test "T05 find-count"          "$Binary find fn -d $TestDir -e $TestExt --contents -c"
 
 # T06-T09: index + fast
 Run-Test "T06 index-build"         "$Binary index -d $TestDir"
 Run-Test "T07 fast-search"         "$Binary fast main -d $TestDir -e $TestExt"
+Run-Test "T08 fast-regex-icase"    "$Binary fast `".*handler.*`" -d $TestDir -e $TestExt --regex -i"
+Run-Test "T09 fast-dirs-only"      "$Binary fast src -d $TestDir --dirs-only"
+Run-Test "T09a fast-multi-term"    "$Binary fast `"main,lib,handler`" -d $TestDir -e $TestExt"
 
 # T10: content-index
 Run-Test "T10 content-index"       "$Binary content-index -d $TestDir -e $TestExt"
@@ -74,8 +78,9 @@ Run-Test "T64 grep-regex-no-substr"   "$Binary grep `".*stale.*`" -d $TestDir -e
 # T19: info
 Run-Test "T19 info"                "$Binary info"
 
-# T20: def-index
+# T20: def-index + def-audit
 Run-Test "T20 def-index"           "$Binary def-index -d $TestDir -e $TestExt"
+Run-Test "T-DEF-AUDIT def-audit"   "$Binary def-audit -d $TestDir -e $TestExt"
 
 # T49: def-index with TypeScript
 Run-Test "T49 def-index-ts"        "$Binary def-index -d $TestDir -e ts"

@@ -134,6 +134,32 @@ fn test_parse_ts_enum() {
 }
 
 #[test]
+fn test_parse_ts_const_enum() {
+    let source = r#"const enum Foo {
+    Alpha,
+    Beta,
+    Gamma
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let enum_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Enum).collect();
+    assert_eq!(enum_defs.len(), 1);
+    assert_eq!(enum_defs[0].name, "Foo");
+
+    let member_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::EnumMember).collect();
+    assert_eq!(member_defs.len(), 3);
+    let member_names: Vec<&str> = member_defs.iter().map(|d| d.name.as_str()).collect();
+    assert!(member_names.contains(&"Alpha"));
+    assert!(member_names.contains(&"Beta"));
+    assert!(member_names.contains(&"Gamma"));
+    for m in &member_defs {
+        assert_eq!(m.parent.as_deref(), Some("Foo"));
+    }
+}
+
+#[test]
 fn test_parse_ts_type_alias() {
     let source = "export type UserId = string | number;";
     let mut parser = tree_sitter::Parser::new();

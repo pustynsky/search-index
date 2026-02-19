@@ -1961,3 +1961,74 @@ fn test_search_find_combined_parameters() {
 
     cleanup_tmp(&tmp_dir);
 }
+
+// ─── validate_search_dir security boundary tests ────────────────────
+
+#[test]
+fn test_validate_search_dir_subdir_accepted() {
+    // Create a real temp directory structure so canonicalize works
+    let base = std::env::temp_dir().join(format!("search_sec_base_{}_{}", std::process::id(),
+        std::sync::atomic::AtomicU64::new(0).fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+    let sub = base.join("subdir");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    let result = validate_search_dir(
+        &sub.to_string_lossy(),
+        &base.to_string_lossy(),
+    );
+    assert!(result.is_ok(), "Subdirectory should be accepted, got: {:?}", result);
+    assert!(result.unwrap().is_some(), "Subdirectory should return Some(canonical_subdir)");
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn test_validate_search_dir_outside_rejected() {
+    // Two sibling directories — neither is a subdirectory of the other
+    let parent = std::env::temp_dir().join(format!("search_sec_outside_{}", std::process::id()));
+    let dir_a = parent.join("dir_a");
+    let dir_b = parent.join("dir_b");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+
+    let result = validate_search_dir(
+        &dir_b.to_string_lossy(),
+        &dir_a.to_string_lossy(),
+    );
+    assert!(result.is_err(), "Path outside server dir should be rejected");
+    assert!(result.unwrap_err().contains("--dir"),
+        "Error message should mention --dir");
+
+    let _ = std::fs::remove_dir_all(&parent);
+}
+
+#[test]
+fn test_validate_search_dir_path_traversal_rejected() {
+    // Create base/subdir, then try to access base/subdir/../../.. which escapes base
+    let base = std::env::temp_dir().join(format!("search_sec_traversal_{}", std::process::id()));
+    let sub = base.join("subdir");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    // Path traversal: subdir/../../.. resolves above base
+    let traversal = sub.join("..").join("..").join("..");
+    let result = validate_search_dir(
+        &traversal.to_string_lossy(),
+        &base.to_string_lossy(),
+    );
+    assert!(result.is_err(),
+        "Path traversal escaping base dir should be rejected, got: {:?}", result);
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn test_validate_search_dir_windows_absolute_outside_rejected() {
+    // Non-existent absolute path that clearly isn't under the server dir
+    // canonicalize will fail, falling back to raw string comparison
+    let result = validate_search_dir(
+        r"C:\Windows\System32",
+        r"C:\Repos\MyProject",
+    );
+    assert!(result.is_err(),
+        "Absolute path outside server dir should be rejected");
+}
