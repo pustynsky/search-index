@@ -30,9 +30,15 @@ use crate::definitions;
 
 /// High-performance code search engine with inverted indexing and AST-based code intelligence
 #[derive(Parser, Debug)]
-#[command(name = "search", version, about, after_help = "\
+#[command(
+    name = "search",
+    version,
+    long_version = concat!(env!("CARGO_PKG_VERSION"), " (built ", env!("BUILD_DATETIME"), ")"),
+    about,
+    after_help = "\
 Run 'search <COMMAND> --help' for detailed options and examples.\n\
-Common options: -d <DIR> (directory), -e <EXT> (extension filter), -c (count only)")]
+Common options: -d <DIR> (directory), -e <EXT> (extension filter), -c (count only)"
+)]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub command: Commands,
