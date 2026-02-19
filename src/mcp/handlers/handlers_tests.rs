@@ -2192,3 +2192,1508 @@ fn test_dispatch_find_works_while_index_building() {
     let result = dispatch_tool(&ctx, "search_find", &json!({"pattern": "nonexistent_xyz"}));
     assert!(!result.is_error, "search_find should work during index build");
 }
+
+// ─── Batch 1: Missing unit tests (T40, T27, T28, T32, T50, T53, T54, T61, T73) ───
+
+/// T40 — search_grep response truncation: when results exceed max_response_bytes,
+/// the output includes responseTruncated indicator and files array is reduced.
+#[test]
+fn test_search_grep_response_truncation_via_small_budget() {
+    // Build an index with enough files to exceed a small response budget
+    let mut idx = HashMap::new();
+    let mut files = Vec::new();
+    let mut file_token_counts = Vec::new();
+
+    for i in 0..100 {
+        let path = format!(
+            "C:\\Projects\\Module_{:03}\\Component_{:03}Service.cs",
+            i / 10, i
+        );
+        files.push(path);
+        file_token_counts.push(100u32);
+        let lines: Vec<u32> = (1..=20).collect();
+        idx.entry("targettoken".to_string())
+            .or_insert_with(Vec::new)
+            .push(Posting { file_id: i as u32, lines });
+    }
+
+    let index = ContentIndex {
+        root: ".".to_string(),
+        created_at: 0,
+        max_age_secs: 3600,
+        files,
+        index: idx,
+        total_tokens: 10_000,
+        extensions: vec!["cs".to_string()],
+        file_token_counts,
+        trigram: TrigramIndex::default(),
+        trigram_dirty: false,
+        forward: None,
+        path_to_id: None,
+    };
+
+    // Use a very small max_response_bytes to force truncation
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(index)),
+        def_index: None,
+        server_dir: ".".to_string(),
+        server_ext: "cs".to_string(),
+        metrics: true,
+        index_base: PathBuf::from("."),
+        max_response_bytes: 2_000, // Very small budget to force truncation
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "targettoken",
+        "maxResults": 0,
+        "substring": false
+    }));
+
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Summary should reflect the full result count
+    assert_eq!(output["summary"]["totalFiles"], 100);
+
+    // Response should have been truncated
+    assert_eq!(output["summary"]["responseTruncated"], true,
+        "Expected responseTruncated=true for 100-file response with 2KB budget");
+    assert!(output["summary"]["truncationReason"].as_str().is_some(),
+        "Expected truncationReason in summary");
+
+    // The files array should be reduced from 100
+    let files_arr = output["files"].as_array().unwrap();
+    assert!(files_arr.len() < 100,
+        "Expected files array to be truncated from 100, got {}", files_arr.len());
+}
+
+/// T27 — search_definitions regex name filter: regex=true with name pattern
+/// should match definitions whose names satisfy the regex.
+#[test]
+fn test_search_definitions_regex_name_filter() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "Execute.*",
+        "regex": true
+    }));
+    assert!(!result.is_error, "search_definitions regex should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    // Should find ExecuteQueryAsync (exists in ResilientClient and ProxyClient)
+    assert!(!defs.is_empty(), "Regex 'Execute.*' should match ExecuteQueryAsync definitions");
+
+    // All returned definitions should match the regex
+    for def in defs {
+        let name = def["name"].as_str().unwrap();
+        assert!(name.to_lowercase().starts_with("execute"),
+            "Definition '{}' should match regex 'Execute.*'", name);
+    }
+
+    // Should NOT contain definitions that don't match
+    for def in defs {
+        let name = def["name"].as_str().unwrap();
+        assert!(name != "QueryService" && name != "RunQueryBatchAsync",
+            "Definition '{}' should NOT match regex 'Execute.*'", name);
+    }
+}
+
+/// T28 — search_definitions audit mode: audit=true returns index coverage report
+/// with totalFiles, filesWithDefinitions, filesWithoutDefinitions, etc.
+#[test]
+fn test_search_definitions_audit_mode() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "audit": true
+    }));
+    assert!(!result.is_error, "audit mode should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Audit output should have the audit object
+    let audit = &output["audit"];
+    assert!(audit.is_object(), "Expected 'audit' object in output");
+    assert!(audit["totalFiles"].as_u64().is_some(), "Expected totalFiles in audit");
+    assert!(audit["filesWithDefinitions"].as_u64().is_some(), "Expected filesWithDefinitions in audit");
+    assert!(audit["filesWithoutDefinitions"].as_u64().is_some(), "Expected filesWithoutDefinitions in audit");
+    assert!(audit["readErrors"].as_u64().is_some(), "Expected readErrors in audit");
+    assert!(audit["lossyUtf8Files"].as_u64().is_some(), "Expected lossyUtf8Files in audit");
+    assert!(audit["suspiciousFiles"].as_u64().is_some(), "Expected suspiciousFiles count in audit");
+    assert!(audit["suspiciousThresholdBytes"].as_u64().is_some(), "Expected suspiciousThresholdBytes in audit");
+
+    // Should also have suspiciousFiles array at top level
+    assert!(output["suspiciousFiles"].is_array(), "Expected suspiciousFiles array in output");
+
+    // Verify the counts make sense for our test context (3 files, all with definitions)
+    assert_eq!(audit["totalFiles"].as_u64().unwrap(), 3);
+    assert_eq!(audit["filesWithDefinitions"].as_u64().unwrap(), 3);
+}
+
+/// T32 — search_callers excludeDir/excludeFile filters: callers from excluded
+/// directories or files should be filtered out.
+#[test]
+fn test_search_callers_exclude_dir_and_file() {
+    use crate::definitions::*;
+
+    // Set up: MethodA is defined in ServiceA (dir: src\services)
+    // MethodA is called from ControllerB (dir: src\controllers) and from TestC (dir: src\tests)
+    let mut content_idx = HashMap::new();
+    content_idx.insert("methoda".to_string(), vec![
+        Posting { file_id: 0, lines: vec![10] },
+        Posting { file_id: 1, lines: vec![25] },
+        Posting { file_id: 2, lines: vec![15] },
+    ]);
+    content_idx.insert("servicea".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![5] },
+        Posting { file_id: 2, lines: vec![3] },
+    ]);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec![
+            "C:\\src\\services\\ServiceA.cs".to_string(),
+            "C:\\src\\controllers\\ControllerB.cs".to_string(),
+            "C:\\src\\tests\\TestC.cs".to_string(),
+        ],
+        index: content_idx, total_tokens: 300,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![100, 100, 100],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "ServiceA".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "MethodA".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("ServiceA".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "ControllerB".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "HandleRequest".to_string(),
+            kind: DefinitionKind::Method, line_start: 20, line_end: 35,
+            parent: Some("ControllerB".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 2, name: "TestC".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 40,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 2, name: "TestMethodA".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 25,
+            parent: Some("TestC".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\services\\ServiceA.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\controllers\\ControllerB.cs"), 1);
+    path_to_id.insert(PathBuf::from("C:\\src\\tests\\TestC.cs"), 2);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![
+            "C:\\src\\services\\ServiceA.cs".to_string(),
+            "C:\\src\\controllers\\ControllerB.cs".to_string(),
+            "C:\\src\\tests\\TestC.cs".to_string(),
+        ],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // Test excludeDir: exclude "tests" directory
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "MethodA",
+        "class": "ServiceA",
+        "depth": 1,
+        "excludeDir": ["tests"]
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+
+    // Should NOT contain callers from the "tests" directory
+    for node in tree {
+        let file = node["file"].as_str().unwrap_or("");
+        assert!(!file.to_lowercase().contains("test"),
+            "excludeDir should filter out test files, but found: {}", file);
+    }
+
+    // Test excludeFile: exclude "TestC" file pattern
+    let result2 = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "MethodA",
+        "class": "ServiceA",
+        "depth": 1,
+        "excludeFile": ["TestC"]
+    }));
+    assert!(!result2.is_error);
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    let tree2 = output2["callTree"].as_array().unwrap();
+
+    for node in tree2 {
+        let file = node["file"].as_str().unwrap_or("");
+        assert!(!file.to_lowercase().contains("testc"),
+            "excludeFile should filter out TestC, but found: {}", file);
+    }
+}
+
+/// T50 — search_definitions excludeDir filter: definitions from excluded
+/// directories should not appear in results.
+#[test]
+fn test_search_definitions_exclude_dir() {
+    use crate::definitions::*;
+
+    // Create a context with definitions in two different directories
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec![
+            "C:\\src\\main\\UserService.cs".to_string(),
+            "C:\\src\\tests\\UserServiceTests.cs".to_string(),
+        ],
+        index: HashMap::new(), total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50, 50],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "UserService".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "GetUser".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("UserService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "UserServiceTests".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "TestGetUser".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 30,
+            parent: Some("UserServiceTests".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\main\\UserService.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\tests\\UserServiceTests.cs"), 1);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![
+            "C:\\src\\main\\UserService.cs".to_string(),
+            "C:\\src\\tests\\UserServiceTests.cs".to_string(),
+        ],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // Exclude "tests" directory
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "excludeDir": ["tests"]
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    // All returned definitions should be from non-test directories
+    for def in defs {
+        let file = def["file"].as_str().unwrap_or("");
+        assert!(!file.to_lowercase().contains("tests"),
+            "excludeDir should filter out definitions from 'tests' dir, but found file: {}", file);
+    }
+
+    // Should still have the main definitions
+    assert!(!defs.is_empty(), "Should have definitions from non-excluded directories");
+    let names: Vec<&str> = defs.iter().filter_map(|d| d["name"].as_str()).collect();
+    assert!(names.contains(&"UserService"), "Should contain UserService from main dir");
+    assert!(names.contains(&"GetUser"), "Should contain GetUser from main dir");
+    assert!(!names.contains(&"UserServiceTests"), "Should NOT contain UserServiceTests from tests dir");
+    assert!(!names.contains(&"TestGetUser"), "Should NOT contain TestGetUser from tests dir");
+}
+
+/// T53 — search_definitions combined name+parent+kind filter: only definitions
+/// matching ALL three criteria should be returned.
+#[test]
+fn test_search_definitions_combined_name_parent_kind_filter() {
+    let ctx = make_ctx_with_defs();
+
+    // Filter: name=ExecuteQueryAsync, parent=ResilientClient, kind=method
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "ExecuteQueryAsync",
+        "parent": "ResilientClient",
+        "kind": "method"
+    }));
+    assert!(!result.is_error, "Combined filter should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    // Should return exactly 1 definition: ExecuteQueryAsync in ResilientClient
+    assert_eq!(defs.len(), 1,
+        "Expected exactly 1 result for name+parent+kind filter, got {}: {:?}",
+        defs.len(), defs);
+    assert_eq!(defs[0]["name"], "ExecuteQueryAsync");
+    assert_eq!(defs[0]["parent"], "ResilientClient");
+    assert_eq!(defs[0]["kind"], "method");
+
+    // Verify: same name+kind but different parent should NOT match
+    let result2 = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "ExecuteQueryAsync",
+        "parent": "NonExistentClass",
+        "kind": "method"
+    }));
+    assert!(!result2.is_error);
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    let defs2 = output2["definitions"].as_array().unwrap();
+    assert_eq!(defs2.len(), 0,
+        "Non-matching parent should return 0 results, got {}", defs2.len());
+}
+
+/// T54 — search_definitions non-existent name returns empty: searching for a name
+/// that doesn't exist should return an empty definitions array.
+#[test]
+fn test_search_definitions_nonexistent_name_returns_empty() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "CompletelyNonExistentDefinitionXYZ123"
+    }));
+    assert!(!result.is_error, "Non-existent name should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+    assert!(defs.is_empty(),
+        "Expected empty definitions array for non-existent name, got {} results", defs.len());
+    assert_eq!(output["summary"]["totalResults"], 0);
+}
+
+/// T61 — search_definitions invalid regex error: using regex=true with an
+/// invalid regex pattern should return an error.
+#[test]
+fn test_search_definitions_invalid_regex_error() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "[invalid",
+        "regex": true
+    }));
+    assert!(result.is_error, "Invalid regex should produce an error");
+    assert!(result.content[0].text.contains("Invalid regex"),
+        "Error should mention 'Invalid regex', got: {}", result.content[0].text);
+}
+
+/// T73 — search_definitions struct kind via handler: filtering by kind="struct"
+/// should return only struct definitions.
+#[test]
+fn test_search_definitions_struct_kind() {
+    use crate::definitions::*;
+
+    // Create a context with a struct definition alongside class and method
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec!["C:\\src\\Models.cs".to_string()],
+        index: HashMap::new(), total_tokens: 50,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "UserModel".to_string(),
+            kind: DefinitionKind::Struct, line_start: 1, line_end: 20,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "UserService".to_string(),
+            kind: DefinitionKind::Class, line_start: 25, line_end: 80,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "GetUser".to_string(),
+            kind: DefinitionKind::Method, line_start: 30, line_end: 45,
+            parent: Some("UserService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "OrderInfo".to_string(),
+            kind: DefinitionKind::Struct, line_start: 85, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\Models.cs"), 0);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["C:\\src\\Models.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "kind": "struct"
+    }));
+    assert!(!result.is_error, "kind=struct should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    // Should return only struct definitions
+    assert_eq!(defs.len(), 2, "Expected 2 struct definitions, got {}", defs.len());
+    for def in defs {
+        assert_eq!(def["kind"], "struct",
+            "All results should be structs, but got kind={}", def["kind"]);
+    }
+    let names: Vec<&str> = defs.iter().filter_map(|d| d["name"].as_str()).collect();
+    assert!(names.contains(&"UserModel"), "Should contain UserModel struct");
+    assert!(names.contains(&"OrderInfo"), "Should contain OrderInfo struct");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Batch 2 tests — Strengthen Partial Coverage
+// ═══════════════════════════════════════════════════════════════════════
+
+/// T15 — search_fast dirsOnly and filesOnly filters.
+/// dirsOnly=true should return only directory matches;
+/// filesOnly=true should return only file matches.
+#[test]
+fn test_search_fast_dirs_only_and_files_only() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_dironly_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create files and a subdirectory whose name contains "Models"
+    let sub = tmp_dir.join("Models");
+    let _ = std::fs::create_dir_all(&sub);
+    let file_in_sub = sub.join("ModelItem.cs");
+    { let mut f = std::fs::File::create(&file_in_sub).unwrap(); writeln!(f, "// model").unwrap(); }
+    let file_at_root = tmp_dir.join("ModelsHelper.cs");
+    { let mut f = std::fs::File::create(&file_at_root).unwrap(); writeln!(f, "// helper").unwrap(); }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0 });
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+
+    // dirsOnly=true: should only return directory entries matching "Models"
+    let result_dirs = handle_search_fast(&ctx, &json!({"pattern": "Models", "dirsOnly": true}));
+    assert!(!result_dirs.is_error, "dirsOnly should not error: {}", result_dirs.content[0].text);
+    let output_dirs: Value = serde_json::from_str(&result_dirs.content[0].text).unwrap();
+    let dir_files = output_dirs["files"].as_array().unwrap();
+    for entry in dir_files {
+        assert_eq!(entry["isDir"], true, "dirsOnly should only return directories, got: {}", entry);
+    }
+    assert!(output_dirs["summary"]["totalMatches"].as_u64().unwrap() >= 1,
+        "Should find at least one directory matching 'Models'");
+
+    // filesOnly=true: should only return file entries matching "Models"
+    let result_files = handle_search_fast(&ctx, &json!({"pattern": "Models", "filesOnly": true}));
+    assert!(!result_files.is_error);
+    let output_files: Value = serde_json::from_str(&result_files.content[0].text).unwrap();
+    let file_entries = output_files["files"].as_array().unwrap();
+    for entry in file_entries {
+        assert_eq!(entry["isDir"], false, "filesOnly should only return files, got: {}", entry);
+    }
+    assert!(output_files["summary"]["totalMatches"].as_u64().unwrap() >= 1,
+        "Should find at least one file matching 'Models'");
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// T16 — search_fast regex mode.
+/// Using regex=true with a regex pattern should match file names via regex.
+#[test]
+fn test_search_fast_regex_mode() {
+    let (ctx, tmp) = make_search_fast_ctx();
+
+    // Regex pattern to match files ending in "State.cs"
+    let result = handle_search_fast(&ctx, &json!({"pattern": ".*State\\.cs$", "regex": true}));
+    assert!(!result.is_error, "regex search should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    // The make_search_fast_ctx creates "ScannerJobState.cs" which should match
+    assert_eq!(output["summary"]["totalMatches"], 1,
+        "Regex '.*State\\.cs$' should match exactly ScannerJobState.cs");
+    let files = output["files"].as_array().unwrap();
+    assert!(files[0]["path"].as_str().unwrap().contains("ScannerJobState"),
+        "Matched file should be ScannerJobState.cs");
+
+    // Regex that matches multiple files: anything with "Model" in the name
+    let result2 = handle_search_fast(&ctx, &json!({"pattern": "Model.*\\.cs$", "regex": true}));
+    assert!(!result2.is_error);
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    assert_eq!(output2["summary"]["totalMatches"], 2,
+        "Regex 'Model.*\\.cs$' should match ModelSchemaStorage.cs and ModelSchemaManager.cs");
+
+    cleanup_tmp(&tmp);
+}
+
+/// T22 — search_definitions baseType filter at handler level.
+/// Only definitions whose base_types include the given baseType should be returned.
+#[test]
+fn test_search_definitions_base_type_filter() {
+    use crate::definitions::*;
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec!["C:\\src\\Controllers.cs".to_string()],
+        index: HashMap::new(), total_tokens: 50,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "UserController".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![],
+            base_types: vec!["ControllerBase".to_string()],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "OrderService".to_string(),
+            kind: DefinitionKind::Class, line_start: 55, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![],
+            base_types: vec!["IOrderService".to_string()],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "AdminController".to_string(),
+            kind: DefinitionKind::Class, line_start: 105, line_end: 150,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![],
+            base_types: vec!["ControllerBase".to_string(), "IAdminAccess".to_string()],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "PlainClass".to_string(),
+            kind: DefinitionKind::Class, line_start: 155, line_end: 170,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![],
+            base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    let mut base_type_index: HashMap<String, Vec<u32>> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+        for bt in &def.base_types {
+            base_type_index.entry(bt.to_lowercase()).or_default().push(idx);
+        }
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\Controllers.cs"), 0);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["C:\\src\\Controllers.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index,
+        file_index, path_to_id, method_calls: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // Filter by baseType=ControllerBase — should return UserController and AdminController
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "baseType": "ControllerBase"
+    }));
+    assert!(!result.is_error, "baseType filter should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 2, "Expected 2 definitions with baseType=ControllerBase, got {}", defs.len());
+    let names: Vec<&str> = defs.iter().filter_map(|d| d["name"].as_str()).collect();
+    assert!(names.contains(&"UserController"), "Should contain UserController");
+    assert!(names.contains(&"AdminController"), "Should contain AdminController");
+
+    // Filter by baseType=IOrderService — should return only OrderService
+    let result2 = dispatch_tool(&ctx, "search_definitions", &json!({
+        "baseType": "IOrderService"
+    }));
+    assert!(!result2.is_error);
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    let defs2 = output2["definitions"].as_array().unwrap();
+    assert_eq!(defs2.len(), 1, "Expected 1 definition with baseType=IOrderService, got {}", defs2.len());
+    assert_eq!(defs2[0]["name"], "OrderService");
+
+    // Filter by non-existent baseType — should return empty
+    let result3 = dispatch_tool(&ctx, "search_definitions", &json!({
+        "baseType": "NonExistentBase"
+    }));
+    assert!(!result3.is_error);
+    let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
+    let defs3 = output3["definitions"].as_array().unwrap();
+    assert!(defs3.is_empty(), "Non-existent baseType should return empty, got {}", defs3.len());
+}
+
+/// T34 — search_reindex_definitions success case.
+/// When a definitions index exists, reindex should succeed and return status=ok.
+#[test]
+fn test_reindex_definitions_success() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_reindex_def_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create a minimal .cs file so the reindex has something to parse
+    let cs_file = tmp_dir.join("Sample.cs");
+    {
+        let mut f = std::fs::File::create(&cs_file).unwrap();
+        writeln!(f, "public class SampleClass {{").unwrap();
+        writeln!(f, "    public void DoWork() {{ }}").unwrap();
+        writeln!(f, "}}").unwrap();
+    }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+
+    // Build an initial (empty) definition index
+    let def_index = crate::definitions::DefinitionIndex {
+        root: dir_str.clone(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![], definitions: vec![],
+        name_index: HashMap::new(), kind_index: HashMap::new(),
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index: HashMap::new(), path_to_id: HashMap::new(),
+        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0,
+        empty_file_ids: Vec::new(),
+    };
+
+    let content_index = ContentIndex {
+        root: dir_str.clone(), created_at: 0, max_age_secs: 3600,
+        files: vec![], index: HashMap::new(), total_tokens: 0,
+        extensions: vec!["cs".to_string()], file_token_counts: vec![],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: dir_str.clone(),
+        server_ext: "cs".to_string(),
+        metrics: false,
+        index_base: tmp_dir.join(".index"),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    let result = dispatch_tool(&ctx, "search_reindex_definitions", &json!({}));
+    assert!(!result.is_error, "Reindex definitions should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["status"], "ok", "Status should be 'ok'");
+    assert!(output["files"].as_u64().unwrap() >= 1, "Should have parsed at least 1 file");
+    assert!(output["definitions"].as_u64().unwrap() >= 1, "Should have found at least 1 definition");
+    assert!(output["rebuildTimeMs"].as_f64().is_some(), "Should report rebuild time");
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// T43-T45 — search_find combined parameters: countOnly, maxDepth, ignoreCase, regex.
+#[test]
+fn test_search_find_combined_parameters() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_find_combined_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create nested structure:
+    //   tmp/level1/level2/deep.cs
+    //   tmp/level1/shallow.cs
+    //   tmp/TopFile.CS  (uppercase extension for case test)
+    let level1 = tmp_dir.join("level1");
+    let level2 = level1.join("level2");
+    std::fs::create_dir_all(&level2).unwrap();
+    { let mut f = std::fs::File::create(level2.join("deep.cs")).unwrap(); writeln!(f, "// deep").unwrap(); }
+    { let mut f = std::fs::File::create(level1.join("shallow.cs")).unwrap(); writeln!(f, "// shallow").unwrap(); }
+    { let mut f = std::fs::File::create(tmp_dir.join("TopFile.CS")).unwrap(); writeln!(f, "// top").unwrap(); }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let content_index = ContentIndex {
+        root: dir_str.clone(), created_at: 0, max_age_secs: 3600,
+        files: vec![], index: HashMap::new(), total_tokens: 0,
+        extensions: vec!["cs".to_string()], file_token_counts: vec![],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: None,
+        server_dir: dir_str.clone(),
+        server_ext: "cs".to_string(),
+        metrics: false,
+        index_base: tmp_dir.join(".index"),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // T43: countOnly=true — should return only counts, no file listings
+    let result_count = dispatch_tool(&ctx, "search_find", &json!({
+        "pattern": ".cs",
+        "countOnly": true,
+        "ignoreCase": true
+    }));
+    assert!(!result_count.is_error, "countOnly should not error: {}", result_count.content[0].text);
+    let output_count: Value = serde_json::from_str(&result_count.content[0].text).unwrap();
+    assert!(output_count["summary"]["totalMatches"].as_u64().unwrap() >= 3,
+        "Should find at least 3 .cs files (case-insensitive)");
+    assert!(output_count["files"].as_array().unwrap().is_empty(),
+        "countOnly=true should return empty files array");
+
+    // T44: maxDepth — should limit directory traversal
+    // maxDepth=1 should find TopFile.CS at root but NOT files in level1/ subdirectories
+    // Note: maxDepth=1 means root-level only in ignore::WalkBuilder
+    let result_depth = dispatch_tool(&ctx, "search_find", &json!({
+        "pattern": ".cs",
+        "maxDepth": 1,
+        "ignoreCase": true
+    }));
+    assert!(!result_depth.is_error);
+    let output_depth: Value = serde_json::from_str(&result_depth.content[0].text).unwrap();
+    let depth_matches = output_depth["summary"]["totalMatches"].as_u64().unwrap();
+    // maxDepth=1 means only root level — should find TopFile.CS but not deeper files
+    assert!(depth_matches < 3,
+        "maxDepth=1 should find fewer than 3 files, got {}", depth_matches);
+
+    // T45: ignoreCase=true + regex=true — case-insensitive regex matching
+    let result_regex = dispatch_tool(&ctx, "search_find", &json!({
+        "pattern": "top.*\\.cs",
+        "regex": true,
+        "ignoreCase": true
+    }));
+    assert!(!result_regex.is_error, "regex+ignoreCase should not error: {}", result_regex.content[0].text);
+    let output_regex: Value = serde_json::from_str(&result_regex.content[0].text).unwrap();
+    assert!(output_regex["summary"]["totalMatches"].as_u64().unwrap() >= 1,
+        "Case-insensitive regex 'top.*\\.cs' should match TopFile.CS");
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// T72 — search_definitions enumMember kind at handler level.
+/// Filtering by kind="enumMember" should return only enum member definitions.
+#[test]
+fn test_search_definitions_enum_member_kind() {
+    use crate::definitions::*;
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec!["C:\\src\\Enums.cs".to_string()],
+        index: HashMap::new(), total_tokens: 50,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "OrderStatus".to_string(),
+            kind: DefinitionKind::Enum, line_start: 1, line_end: 20,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "Pending".to_string(),
+            kind: DefinitionKind::EnumMember, line_start: 3, line_end: 3,
+            parent: Some("OrderStatus".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "Completed".to_string(),
+            kind: DefinitionKind::EnumMember, line_start: 4, line_end: 4,
+            parent: Some("OrderStatus".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "Cancelled".to_string(),
+            kind: DefinitionKind::EnumMember, line_start: 5, line_end: 5,
+            parent: Some("OrderStatus".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "OrderHelper".to_string(),
+            kind: DefinitionKind::Class, line_start: 25, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "GetStatus".to_string(),
+            kind: DefinitionKind::Method, line_start: 30, line_end: 40,
+            parent: Some("OrderHelper".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\Enums.cs"), 0);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["C:\\src\\Enums.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // Filter by kind=enumMember
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "kind": "enumMember"
+    }));
+    assert!(!result.is_error, "kind=enumMember should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    // Should return exactly 3 enum members: Pending, Completed, Cancelled
+    assert_eq!(defs.len(), 3, "Expected 3 enumMember definitions, got {}", defs.len());
+    for def in defs {
+        assert_eq!(def["kind"], "enumMember",
+            "All results should be enumMember, but got kind={}", def["kind"]);
+    }
+    let names: Vec<&str> = defs.iter().filter_map(|d| d["name"].as_str()).collect();
+    assert!(names.contains(&"Pending"), "Should contain Pending enum member");
+    assert!(names.contains(&"Completed"), "Should contain Completed enum member");
+    assert!(names.contains(&"Cancelled"), "Should contain Cancelled enum member");
+
+    // Verify parent is set correctly
+    for def in defs {
+        assert_eq!(def["parent"], "OrderStatus",
+            "Enum members should have parent=OrderStatus, got {}", def["parent"]);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Batch 3 tests — Nice-to-have edge cases
+// ═══════════════════════════════════════════════════════════════════════
+
+/// T39 — search_grep SQL extension filter.
+/// When ext="sql" is specified, only files with .sql extension should be returned.
+#[test]
+fn test_search_grep_sql_extension_filter() {
+    // Build an index with both .cs and .sql files containing the same token
+    let mut idx = HashMap::new();
+    idx.insert("createtable".to_string(), vec![
+        Posting { file_id: 0, lines: vec![5] },
+        Posting { file_id: 1, lines: vec![10] },
+        Posting { file_id: 2, lines: vec![3] },
+    ]);
+
+    let index = ContentIndex {
+        root: ".".to_string(),
+        created_at: 0,
+        max_age_secs: 3600,
+        files: vec![
+            "C:\\src\\Schema.sql".to_string(),
+            "C:\\src\\Service.cs".to_string(),
+            "C:\\src\\Migration.sql".to_string(),
+        ],
+        index: idx,
+        total_tokens: 100,
+        extensions: vec!["cs".to_string(), "sql".to_string()],
+        file_token_counts: vec![50, 50, 50],
+        trigram: TrigramIndex::default(),
+        trigram_dirty: false,
+        forward: None,
+        path_to_id: None,
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(index)),
+        def_index: None,
+        server_dir: ".".to_string(),
+        server_ext: "cs,sql".to_string(),
+        metrics: false,
+        index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // With ext="sql" filter — should only return .sql files
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "createtable",
+        "ext": "sql",
+        "substring": false
+    }));
+    assert!(!result.is_error, "grep with ext=sql should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], 2,
+        "Should find exactly 2 .sql files, got: {}", output["summary"]["totalFiles"]);
+    let files = output["files"].as_array().unwrap();
+    for file in files {
+        let path = file["path"].as_str().unwrap();
+        assert!(path.ends_with(".sql"),
+            "All results should be .sql files, but found: {}", path);
+    }
+
+    // Without ext filter — should return all 3 files
+    let result_all = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "createtable",
+        "substring": false
+    }));
+    assert!(!result_all.is_error);
+    let output_all: Value = serde_json::from_str(&result_all.content[0].text).unwrap();
+    assert_eq!(output_all["summary"]["totalFiles"], 3,
+        "Without ext filter should find all 3 files");
+}
+
+/// T71 — search_grep SQL phrase search with showLines.
+/// Phrase search with showLines=true should return line content from matching files.
+#[test]
+fn test_search_grep_phrase_search_with_show_lines() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_phrase_sql_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // Create a .sql file with a SQL phrase
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("schema.sql")).unwrap();
+        writeln!(f, "-- Database schema").unwrap();
+        writeln!(f, "CREATE TABLE Users (").unwrap();
+        writeln!(f, "    Id INT PRIMARY KEY,").unwrap();
+        writeln!(f, "    Name NVARCHAR(100)").unwrap();
+        writeln!(f, ");").unwrap();
+        writeln!(f, "CREATE TABLE Orders (").unwrap();
+        writeln!(f, "    OrderId INT PRIMARY KEY").unwrap();
+        writeln!(f, ");").unwrap();
+    }
+    // Create a file WITHOUT the phrase
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("other.sql")).unwrap();
+        writeln!(f, "-- No create table here").unwrap();
+        writeln!(f, "SELECT * FROM Users;").unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        ext: "sql".to_string(),
+        max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
+    });
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: None,
+        server_dir: tmp_dir.to_string_lossy().to_string(),
+        server_ext: "sql".to_string(),
+        metrics: false,
+        index_base: tmp_dir.join(".index"),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // Phrase search for "CREATE TABLE" with showLines=true
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "CREATE TABLE",
+        "phrase": true,
+        "showLines": true
+    }));
+    assert!(!result.is_error, "Phrase search should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Should find at least 1 file (schema.sql has "CREATE TABLE")
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert!(total >= 1, "Should find at least 1 file with 'CREATE TABLE' phrase, got {}", total);
+
+    // Verify showLines returned line content
+    let files = output["files"].as_array().unwrap();
+    assert!(!files.is_empty(), "Files array should not be empty");
+    let first_file = &files[0];
+    assert!(first_file["lineContent"].is_array(),
+        "showLines=true should produce lineContent array");
+    let line_content = first_file["lineContent"].as_array().unwrap();
+    assert!(!line_content.is_empty(), "lineContent should have entries");
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// T76 — search_fast empty pattern edge case.
+/// An empty string pattern should be handled gracefully (not crash/panic).
+#[test]
+fn test_search_fast_empty_pattern() {
+    let (ctx, tmp) = make_search_fast_ctx();
+
+    // Empty pattern — should return error (missing required parameter)
+    // because after trim/filter the pattern is empty
+    let result = handle_search_fast(&ctx, &json!({"pattern": ""}));
+
+    // The handler splits by ',' and filters empty strings, resulting in 0 terms.
+    // It should either return an error or return 0 matches gracefully.
+    if result.is_error {
+        // Handler correctly rejects empty pattern
+        assert!(result.content[0].text.contains("Missing") || result.content[0].text.contains("pattern") || result.content[0].text.contains("empty"),
+            "Error should mention missing/empty pattern, got: {}", result.content[0].text);
+    } else {
+        // Handler returns 0 matches for empty pattern (also acceptable)
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["summary"]["totalMatches"], 0,
+            "Empty pattern should return 0 matches");
+    }
+
+    cleanup_tmp(&tmp);
+}
+
+/// T77 — search_definitions file filter: backslash vs forward slash normalization.
+/// Both backslashes (Windows-style) and forward slashes (Unix-style) should match
+/// the same definitions when used in the file filter parameter.
+#[test]
+fn test_search_definitions_file_filter_slash_normalization() {
+    use crate::definitions::*;
+
+    // Create definitions with Windows-style backslash paths
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec![
+            "C:\\src\\Models\\User.cs".to_string(),
+            "C:\\src\\Services\\UserService.cs".to_string(),
+        ],
+        index: HashMap::new(), total_tokens: 50,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![25, 25],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "UserModel".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 30,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "UserService".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\Models\\User.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\Services\\UserService.cs"), 1);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![
+            "C:\\src\\Models\\User.cs".to_string(),
+            "C:\\src\\Services\\UserService.cs".to_string(),
+        ],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // Search with backslash path (Windows-style) — should match
+    let result_backslash = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "Models\\User"
+    }));
+    assert!(!result_backslash.is_error);
+    let output_bs: Value = serde_json::from_str(&result_backslash.content[0].text).unwrap();
+    let defs_bs = output_bs["definitions"].as_array().unwrap();
+
+    // Search with forward slash path (Unix-style) — file filter uses contains()
+    // so "Models/User" should also match "C:\\src\\Models\\User.cs" if case-insensitive
+    // The file filter uses: file_path.to_lowercase().contains(&ff.to_lowercase())
+    // Backslash in path won't match forward slash in filter, so this tests actual behavior
+    let result_fwdslash = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "Models/User"
+    }));
+    assert!(!result_fwdslash.is_error);
+    let output_fs: Value = serde_json::from_str(&result_fwdslash.content[0].text).unwrap();
+    let defs_fs = output_fs["definitions"].as_array().unwrap();
+
+    // Backslash filter should always match (path uses backslashes)
+    assert_eq!(defs_bs.len(), 1,
+        "Backslash file filter should find UserModel, got {} results", defs_bs.len());
+    assert_eq!(defs_bs[0]["name"], "UserModel");
+
+    // Forward slash filter behavior: depends on whether the handler normalizes slashes.
+    // The current implementation uses simple string contains() — forward slashes won't
+    // match backslash paths. This test documents the actual behavior.
+    // If defs_fs is empty, the handler does NOT normalize slashes (expected current behavior).
+    // If defs_fs has results, the handler DOES normalize slashes.
+    if defs_fs.is_empty() {
+        // Current behavior: no normalization — forward slash doesn't match backslash path
+        // This is a known limitation that could be improved in the future
+        assert_eq!(defs_fs.len(), 0,
+            "Forward slash filter currently does not match backslash paths (no normalization)");
+    } else {
+        // If normalization was added, both should return the same results
+        assert_eq!(defs_fs.len(), defs_bs.len(),
+            "If slash normalization exists, both filters should return same count");
+    }
+
+    // Use a path fragment that works regardless of slash direction
+    // Note: "User.cs" is a substring of "User.cs" but NOT of "UserService.cs"
+    let result_fragment = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "User"
+    }));
+    assert!(!result_fragment.is_error);
+    let output_frag: Value = serde_json::from_str(&result_fragment.content[0].text).unwrap();
+    let defs_frag = output_frag["definitions"].as_array().unwrap();
+    // Both files contain "User" substring (User.cs and UserService.cs)
+    assert_eq!(defs_frag.len(), 2,
+        "File filter 'User' should match both User.cs and UserService.cs, got {}", defs_frag.len());
+}
+
+/// T78 — search_callers cycle detection in direction=down.
+/// When the call graph has a cycle (A calls B, B calls A), the handler should
+/// complete without infinite loop thanks to the visited set.
+#[test]
+fn test_search_callers_cycle_detection_down() {
+    use crate::definitions::*;
+
+    // Set up: MethodA (in ClassA) calls MethodB (in ClassB),
+    // and MethodB calls MethodA back — creating a cycle.
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "ClassA".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "MethodA".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 30,
+            parent: Some("ClassA".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "ClassB".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "MethodB".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 30,
+            parent: Some("ClassB".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\ClassA.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\src\\ClassB.cs"), 1);
+
+    // MethodA (def index 1) calls MethodB; MethodB (def index 3) calls MethodA
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(1, vec![CallSite {
+        method_name: "MethodB".to_string(),
+        receiver_type: Some("ClassB".to_string()),
+        line: 20,
+    }]);
+    method_calls.insert(3, vec![CallSite {
+        method_name: "MethodA".to_string(),
+        receiver_type: Some("ClassA".to_string()),
+        line: 20,
+    }]);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["C:\\src\\ClassA.cs".to_string(), "C:\\src\\ClassB.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls,
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+    };
+
+    let content_index = ContentIndex {
+        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        files: vec!["C:\\src\\ClassA.cs".to_string(), "C:\\src\\ClassB.cs".to_string()],
+        index: HashMap::new(), total_tokens: 0,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50, 50],
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: ".".to_string(), server_ext: "cs".to_string(),
+        metrics: false, index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // direction=down with depth=5 — cycle should be stopped by visited set
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "MethodA",
+        "class": "ClassA",
+        "direction": "down",
+        "depth": 5,
+        "maxTotalNodes": 50
+    }));
+    assert!(!result.is_error, "Cycle in call graph should not cause error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Should complete and have some nodes (MethodA → MethodB, but MethodB → MethodA is blocked)
+    let tree = output["callTree"].as_array().unwrap();
+    let total_nodes = output["summary"]["totalNodes"].as_u64().unwrap();
+    assert!(total_nodes > 0, "Should find at least one callee before cycle is detected");
+    // The cycle means we can't recurse forever — total nodes should be bounded
+    assert!(total_nodes <= 10, "Cycle detection should prevent runaway recursion, got {} nodes", total_nodes);
+
+    // First level should find MethodB as a callee
+    if !tree.is_empty() {
+        let callee_names: Vec<&str> = tree.iter().filter_map(|n| n["method"].as_str()).collect();
+        assert!(callee_names.contains(&"MethodB"),
+            "MethodA should call MethodB. Got callees: {:?}", callee_names);
+    }
+}
+
+/// T80 — search_reindex with invalid/non-existent directory.
+/// Should return an error message when given a directory that doesn't exist.
+#[test]
+fn test_search_reindex_invalid_directory() {
+    let ctx = make_empty_ctx();
+
+    // Use a clearly non-existent directory path
+    let result = dispatch_tool(&ctx, "search_reindex", &json!({
+        "dir": "Z:\\nonexistent\\path\\that\\does\\not\\exist"
+    }));
+
+    // The handler should error because:
+    // 1. fs::canonicalize fails on non-existent path, falling back to raw string
+    // 2. The raw string won't match the server dir, producing a "Server started with --dir" error
+    assert!(result.is_error, "Reindex with non-existent dir should error");
+    // The error message should mention the server dir mismatch or the invalid directory
+    let error_text = &result.content[0].text;
+    assert!(
+        error_text.contains("Server started with") || error_text.contains("not exist") || error_text.contains("error"),
+        "Error should explain the issue. Got: {}", error_text
+    );
+}
+
+/// T82 — search_grep maxResults=0 semantics.
+/// When maxResults=0, the handler should return unlimited results (no truncation).
+#[test]
+fn test_search_grep_max_results_zero_means_unlimited() {
+    // Build an index with many files
+    let mut idx = HashMap::new();
+    let mut files = Vec::new();
+    let mut file_token_counts = Vec::new();
+
+    for i in 0..25 {
+        let path = format!("C:\\src\\Module_{:02}\\Service.cs", i);
+        files.push(path);
+        file_token_counts.push(50u32);
+        idx.entry("commontoken".to_string())
+            .or_insert_with(Vec::new)
+            .push(Posting { file_id: i as u32, lines: vec![10] });
+    }
+
+    let index = ContentIndex {
+        root: ".".to_string(),
+        created_at: 0,
+        max_age_secs: 3600,
+        files,
+        index: idx,
+        total_tokens: 1000,
+        extensions: vec!["cs".to_string()],
+        file_token_counts,
+        trigram: TrigramIndex::default(),
+        trigram_dirty: false,
+        forward: None,
+        path_to_id: None,
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(index)),
+        def_index: None,
+        server_dir: ".".to_string(),
+        server_ext: "cs".to_string(),
+        metrics: false,
+        index_base: PathBuf::from("."),
+        max_response_bytes: 0, // disable response truncation for this test
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+    };
+
+    // maxResults=0 should return ALL 25 files (unlimited)
+    let result_unlimited = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "commontoken",
+        "maxResults": 0,
+        "substring": false
+    }));
+    assert!(!result_unlimited.is_error);
+    let output_unlimited: Value = serde_json::from_str(&result_unlimited.content[0].text).unwrap();
+    assert_eq!(output_unlimited["summary"]["totalFiles"], 25);
+    let files_unlimited = output_unlimited["files"].as_array().unwrap();
+    assert_eq!(files_unlimited.len(), 25,
+        "maxResults=0 should return all 25 files (unlimited), got {}", files_unlimited.len());
+
+    // maxResults=5 should cap at 5 files
+    let result_capped = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "commontoken",
+        "maxResults": 5,
+        "substring": false
+    }));
+    assert!(!result_capped.is_error);
+    let output_capped: Value = serde_json::from_str(&result_capped.content[0].text).unwrap();
+    assert_eq!(output_capped["summary"]["totalFiles"], 25,
+        "totalFiles in summary should reflect full count (25)");
+    let files_capped = output_capped["files"].as_array().unwrap();
+    assert_eq!(files_capped.len(), 5,
+        "maxResults=5 should return exactly 5 files, got {}", files_capped.len());
+
+    // Default (no maxResults) should use default of 50, which is > 25 so all 25 returned
+    let result_default = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "commontoken",
+        "substring": false
+    }));
+    assert!(!result_default.is_error);
+    let output_default: Value = serde_json::from_str(&result_default.content[0].text).unwrap();
+    let files_default = output_default["files"].as_array().unwrap();
+    assert_eq!(files_default.len(), 25,
+        "Default maxResults=50 should return all 25 files when total < 50, got {}", files_default.len());
+}

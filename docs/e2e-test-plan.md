@@ -2680,3 +2680,385 @@ $stderr = Get-Content "$dir\stderr.txt" -Raw
 **Unit test:** `test_watch_index_survives_save_load_roundtrip` in [`watcher.rs`](../src/mcp/watcher.rs) verifies that watch-mode fields (`forward`, `path_to_id`) survive serialization roundtrip.
 
 **Automated:** Test T-SHUTDOWN in [`e2e-test.ps1`](../e2e-test.ps1) runs this scenario automatically.
+
+
+---
+
+## Unit Test Coverage — Handler-Level Scenarios
+
+The following test scenarios are covered by unit tests in
+[`handlers_tests.rs`](../src/mcp/handlers/handlers_tests.rs). They validate MCP handler behavior
+with real indexes built from test fixture files (C#, TypeScript, SQL). Each entry documents what
+the unit test verifies at the E2E-equivalent level.
+
+### search_grep
+
+#### T65: `search_grep` — Response truncation via small budget
+
+**Tool:** `search_grep`
+
+**Scenario:** When the JSON response exceeds the `max_response_bytes` budget, the server
+progressively truncates the response (capping lines, removing lineContent, reducing file count).
+
+**Expected:**
+
+- `summary.responseTruncated` = `true`
+- `summary.truncationReason` is present and non-empty
+- Response byte size is within the configured budget
+
+**Unit test:** [`test_search_grep_response_truncation_via_small_budget`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T66: `search_grep` — SQL extension filter
+
+**Tool:** `search_grep`
+
+**Scenario:** Passing `ext: "sql"` returns only `.sql` files from the index, excluding `.cs` and
+`.ts` files even if they contain the same tokens.
+
+**Expected:**
+
+- All files in results have `.sql` extension
+- `summary.totalFiles` ≥ 1
+
+**Unit test:** [`test_search_grep_sql_extension_filter`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T67: `search_grep` — Phrase search with showLines from SQL files
+
+**Tool:** `search_grep`
+
+**Scenario:** Phrase search with `phrase: true` and `showLines: true` against `.sql` files returns
+matching line content in the compact grouped format.
+
+**Expected:**
+
+- Results contain `.sql` files
+- Each file has `lineContent` array with `startLine`, `lines[]`, `matchIndices[]`
+- Matched lines contain the searched phrase
+
+**Unit test:** [`test_search_grep_phrase_search_with_show_lines`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T68: `search_grep` — `maxResults=0` means unlimited
+
+**Tool:** `search_grep`
+
+**Scenario:** Setting `maxResults: 0` returns all matching files without any cap (0 = unlimited).
+
+**Expected:**
+
+- `summary.totalFiles` equals the actual number of files in the `files` array
+- No artificial capping at the default limit
+
+**Unit test:** [`test_search_grep_max_results_zero_means_unlimited`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+### search_definitions
+
+#### T69: `search_definitions` — Regex name filter
+
+**Tool:** `search_definitions`
+
+**Scenario:** Setting `regex: true` with a name pattern (e.g., `^User.*`) returns only definitions
+whose name matches the regex pattern.
+
+**Expected:**
+
+- All returned definitions have names matching the regex
+- Non-matching definitions are excluded
+- `summary.totalResults` reflects only matching definitions
+
+**Unit test:** [`test_search_definitions_regex_name_filter`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T70: `search_definitions` — Audit mode
+
+**Tool:** `search_definitions`
+
+**Scenario:** Setting `audit: true` returns an index coverage report instead of search results.
+
+**Expected:**
+
+- Response contains `audit` object with `totalFiles`, `filesWithDefinitions`, `suspiciousFiles` counts
+- `audit.totalFiles` > 0
+- `suspiciousFiles` is an array (may be empty)
+
+**Unit test:** [`test_search_definitions_audit_mode`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T71: `search_definitions` — `excludeDir` filter
+
+**Tool:** `search_definitions`
+
+**Scenario:** Setting `excludeDir: ["some_dir"]` excludes definitions from files in the specified
+directory.
+
+**Expected:**
+
+- No definitions from excluded directories appear in results
+- Definitions from other directories are returned normally
+
+**Unit test:** [`test_search_definitions_exclude_dir`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T72: `search_definitions` — Combined name + parent + kind filter
+
+**Tool:** `search_definitions`
+
+**Scenario:** Passing `name`, `parent`, and `kind` filters simultaneously returns only definitions
+matching ALL three criteria.
+
+**Expected:**
+
+- All returned definitions match the specified name substring
+- All returned definitions belong to the specified parent class
+- All returned definitions have the specified kind
+- `summary.totalResults` reflects only definitions matching all filters
+
+**Unit test:** [`test_search_definitions_combined_name_parent_kind_filter`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T73: `search_definitions` — Nonexistent name returns empty
+
+**Tool:** `search_definitions`
+
+**Scenario:** Searching for a name that doesn't exist in the index returns an empty result set.
+
+**Expected:**
+
+- `definitions` array is empty
+- `summary.totalResults` = 0
+- No error (graceful empty response)
+
+**Unit test:** [`test_search_definitions_nonexistent_name_returns_empty`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T74: `search_definitions` — Invalid regex error
+
+**Tool:** `search_definitions`
+
+**Scenario:** Passing `regex: true` with an invalid pattern (e.g., `[invalid`) returns an error.
+
+**Expected:**
+
+- Response is an error (`isError: true`)
+- Error message mentions invalid regex
+
+**Unit test:** [`test_search_definitions_invalid_regex_error`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T75: `search_definitions` — `kind="struct"` filter
+
+**Tool:** `search_definitions`
+
+**Scenario:** Filtering by `kind: "struct"` returns only struct-kind definitions.
+
+**Expected:**
+
+- All returned definitions have `kind: "struct"`
+- No classes, interfaces, methods, or other kinds appear
+
+**Unit test:** [`test_search_definitions_struct_kind`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T76: `search_definitions` — `baseType` filter
+
+**Tool:** `search_definitions`
+
+**Scenario:** Filtering by `baseType` (e.g., `"ControllerBase"`) returns only classes that inherit
+from or implement the specified type.
+
+**Expected:**
+
+- All returned definitions list the specified base type in their inheritance
+- Definitions without that base type are excluded
+
+**Unit test:** [`test_search_definitions_base_type_filter`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T77: `search_definitions` — `kind="enumMember"` filter
+
+**Tool:** `search_definitions`
+
+**Scenario:** Filtering by `kind: "enumMember"` returns only enum member definitions.
+
+**Expected:**
+
+- All returned definitions have `kind: "enumMember"`
+- No enums, classes, or other kinds appear
+
+**Unit test:** [`test_search_definitions_enum_member_kind`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T78: `search_definitions` — File filter slash normalization
+
+**Tool:** `search_definitions`
+
+**Scenario:** The `file` parameter handles both forward slashes and backslashes for path matching,
+documenting the current behavior on Windows vs. Unix-style paths.
+
+**Expected:**
+
+- File filter with forward slashes matches files stored with the OS path separator
+- Behavior is consistent and documented (may vary by OS)
+
+**Unit test:** [`test_search_definitions_file_filter_slash_normalization`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+### search_fast
+
+#### T79: `search_fast` — `dirsOnly` and `filesOnly` filters
+
+**Tool:** `search_fast`
+
+**Scenario:** Setting `dirsOnly: true` returns only directory entries; setting `filesOnly: true`
+returns only file entries.
+
+**Expected:**
+
+- `dirsOnly: true` — all results are directories (no file entries)
+- `filesOnly: true` — all results are files (no directory entries)
+- Both modes return valid results from the file name index
+
+**Unit test:** [`test_search_fast_dirs_only_and_files_only`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T80: `search_fast` — Regex mode
+
+**Tool:** `search_fast`
+
+**Scenario:** Setting `regex: true` matches file names using regex patterns instead of substring
+matching.
+
+**Expected:**
+
+- File names matching the regex pattern are returned
+- Non-matching files are excluded
+- `summary.totalMatches` reflects regex-matched entries
+
+**Unit test:** [`test_search_fast_regex_mode`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T81: `search_fast` — Empty pattern handled gracefully
+
+**Tool:** `search_fast`
+
+**Scenario:** Passing an empty string as the pattern is handled gracefully without panicking.
+
+**Expected:**
+
+- No panic or crash
+- Returns 0 matches (or all entries, depending on implementation)
+- Clean response with valid JSON structure
+
+**Unit test:** [`test_search_fast_empty_pattern`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+### search_find
+
+#### T82: `search_find` — Combined parameters (countOnly, maxDepth, ignoreCase+regex)
+
+**Tool:** `search_find`
+
+**Scenario:** Tests combined parameter usage:
+- `countOnly: true` returns only the match count without file paths
+- `maxDepth` limits directory traversal depth
+- `ignoreCase: true` + `regex: true` performs case-insensitive regex matching
+
+**Expected:**
+
+- `countOnly` mode: response contains count but no file list
+- `maxDepth` mode: results limited to specified directory depth
+- `ignoreCase + regex` mode: case-insensitive regex patterns match correctly
+
+**Unit test:** [`test_search_find_combined_parameters`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+### search_callers
+
+#### T83: `search_callers` — `excludeDir` and `excludeFile` filters
+
+**Tool:** `search_callers`
+
+**Scenario:** Setting `excludeDir` and `excludeFile` filters on `search_callers` excludes
+matching entries from the call tree.
+
+**Expected:**
+
+- Call tree nodes from excluded directories are filtered out
+- Call tree nodes from excluded file patterns are filtered out
+- Remaining nodes are returned normally
+
+**Unit test:** [`test_search_callers_exclude_dir_and_file`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+#### T84: `search_callers` — Cycle detection (direction=down)
+
+**Tool:** `search_callers`
+
+**Scenario:** When tracing callees (`direction: "down"`) through a circular call graph
+(A calls B, B calls A), the search completes without infinite loop.
+
+**Expected:**
+
+- Search completes in finite time
+- No infinite recursion or stack overflow
+- Call tree represents the cycle without duplicating nodes indefinitely
+
+**Unit test:** [`test_search_callers_cycle_detection_down`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+### search_reindex_definitions
+
+#### T85: `search_reindex_definitions` — Successful reindex
+
+**Tool:** `search_reindex_definitions`
+
+**Scenario:** Calling `search_reindex_definitions` successfully rebuilds the AST definition index
+and returns build metrics.
+
+**Expected:**
+
+- Response contains `status: "ok"`
+- Response includes metrics: files parsed, definitions extracted, build time
+- Definition index is usable for subsequent `search_definitions` queries
+
+**Unit test:** [`test_reindex_definitions_success`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+### search_reindex
+
+#### T86: `search_reindex` — Invalid directory error
+
+**Tool:** `search_reindex`
+
+**Scenario:** Calling `search_reindex` with a non-existent directory parameter returns an error.
+
+**Expected:**
+
+- Response is an error (`isError: true`)
+- Error message indicates the directory does not exist or is invalid
+
+**Unit test:** [`test_search_reindex_invalid_directory`](../src/mcp/handlers/handlers_tests.rs)
