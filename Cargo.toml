@@ -35,6 +35,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1"
+tempfile = "3"
 
 [[bench]]
 name = "search_benchmarks"

@@ -353,9 +353,8 @@ mod tests {
 
     #[test]
     fn test_incremental_update_new_file() {
-        let dir = std::env::temp_dir().join("search_watcher_test_new");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let new_file = dir.join("new_file.cs");
         std::fs::write(&new_file, "class NewClass { HttpClient client; }").unwrap();
@@ -374,15 +373,12 @@ mod tests {
         assert_eq!(index.files.len(), 3);
         assert!(index.index.contains_key("newclass"));
         assert!(index.index.contains_key("httpclient"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_incremental_update_existing_file() {
-        let dir = std::env::temp_dir().join("search_watcher_test_update");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let test_file = dir.join("test.cs");
         std::fs::write(&test_file, "class Original { OldToken stuff; }").unwrap();
@@ -421,8 +417,6 @@ mod tests {
         assert!(!index.index.contains_key("oldtoken"), "old token 'oldtoken' should be removed");
         assert!(index.index.contains_key("updated"), "new token 'updated' should be present");
         assert!(index.index.contains_key("newtoken"), "new token 'newtoken' should be present");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -552,9 +546,8 @@ mod tests {
 
     #[test]
     fn test_update_existing_file_without_forward_index() {
-        let dir = std::env::temp_dir().join("search_watcher_test_no_fwd");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let test_file = dir.join("test.cs");
         std::fs::write(&test_file, "class Original { OldToken stuff; }").unwrap();
@@ -593,8 +586,6 @@ mod tests {
         assert!(!index.index.contains_key("oldtoken"), "old token should be removed");
         assert!(index.index.contains_key("updated"), "new token should be present");
         assert!(index.index.contains_key("newtoken"), "new token should be present");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -610,9 +601,8 @@ mod tests {
 
     #[test]
     fn test_total_tokens_decremented_on_update() {
-        let dir = std::env::temp_dir().join("search_watcher_test_tokens_update");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let test_file = dir.join("test.cs");
         std::fs::write(&test_file, "class Original { OldToken stuff; }").unwrap();
@@ -653,8 +643,6 @@ mod tests {
         assert_eq!(index.total_tokens, sum,
             "total_tokens ({}) should equal sum of file_token_counts ({})",
             index.total_tokens, sum);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -673,9 +661,8 @@ mod tests {
 
     #[test]
     fn test_total_tokens_consistency_after_multiple_ops() {
-        let dir = std::env::temp_dir().join("search_watcher_test_consistency");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let file1 = dir.join("a.cs");
         let file2 = dir.join("b.cs");
@@ -717,8 +704,6 @@ mod tests {
         assert_eq!(index.total_tokens, sum,
             "total_tokens ({}) should equal sum of file_token_counts ({}) after multiple operations",
             index.total_tokens, sum);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -731,9 +716,7 @@ mod tests {
         // Note: forward index was intentionally dropped in build_watch_index_from
         // (memory optimization commit b43473c) to save ~1.5 GB RAM.
         // Only path_to_id is preserved for watch-mode operation.
-        let tmp = std::env::temp_dir().join(format!("search_roundtrip_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
 
         // Build a watch-mode index with path_to_id populated (forward is None)
         let index = make_test_index();
@@ -747,11 +730,11 @@ mod tests {
         let orig_path_to_id_len = watch_index.path_to_id.as_ref().unwrap().len();
 
         // Save to disk
-        crate::save_content_index(&watch_index, &tmp).expect("save should succeed");
+        crate::save_content_index(&watch_index, tmp.path()).expect("save should succeed");
 
         // Load from disk
         let exts_str = watch_index.extensions.join(",");
-        let loaded = crate::load_content_index(&watch_index.root, &exts_str, &tmp)
+        let loaded = crate::load_content_index(&watch_index.root, &exts_str, tmp.path())
             .expect("load should return Ok with the saved index");
 
         // Verify all core fields survived
@@ -766,7 +749,5 @@ mod tests {
         assert!(loaded.path_to_id.is_some(), "path_to_id should survive roundtrip");
         assert_eq!(loaded.path_to_id.as_ref().unwrap().len(), orig_path_to_id_len,
             "path_to_id entry count mismatch after roundtrip");
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

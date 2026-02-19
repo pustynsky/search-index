@@ -36,17 +36,11 @@ pub fn save_compressed<T: serde::Serialize>(path: &std::path::Path, data: &T, la
     let compressed_size = std::fs::metadata(path)?.len();
     let elapsed = start.elapsed();
 
-    // Estimate uncompressed size for logging
-    let uncompressed_size = bincode::serialized_size(data).unwrap_or(0);
-    if uncompressed_size > 0 {
-        let ratio = uncompressed_size as f64 / compressed_size as f64;
-        eprintln!("[{}] Saved {:.1} MB → {:.1} MB ({:.1}× compression) in {:.2}s",
-            label,
-            uncompressed_size as f64 / 1_048_576.0,
-            compressed_size as f64 / 1_048_576.0,
-            ratio,
-            elapsed.as_secs_f64());
-    }
+    eprintln!("[{}] Saved {:.1} MB (compressed) in {:.2}s to {}",
+        label,
+        compressed_size as f64 / 1_048_576.0,
+        elapsed.as_secs_f64(),
+        path.display());
 
     Ok(())
 }
@@ -652,9 +646,8 @@ mod index_tests {
 
     #[test]
     fn test_save_load_compressed_roundtrip() {
-        let tmp = std::env::temp_dir().join("search_test_compressed_roundtrip");
-        let _ = std::fs::create_dir_all(&tmp);
-        let path = tmp.join("test.bin");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.bin");
 
         let data = vec!["hello".to_string(), "world".to_string(), "compressed".to_string()];
         crate::index::save_compressed(&path, &data, "test").unwrap();
@@ -665,15 +658,12 @@ mod index_tests {
         // Verify file starts with LZ4 magic bytes
         let raw = std::fs::read(&path).unwrap();
         assert_eq!(&raw[..4], crate::index::LZ4_MAGIC);
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn test_load_compressed_legacy_uncompressed() {
-        let tmp = std::env::temp_dir().join("search_test_legacy_load");
-        let _ = std::fs::create_dir_all(&tmp);
-        let path = tmp.join("legacy.bin");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("legacy.bin");
 
         // Write uncompressed bincode (legacy format)
         let data = vec!["legacy".to_string(), "format".to_string()];
@@ -684,8 +674,6 @@ mod index_tests {
         let loaded: Result<Vec<String>, _> = crate::index::load_compressed(&path, "test");
         assert!(loaded.is_ok());
         assert_eq!(data, loaded.unwrap());
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -700,9 +688,8 @@ mod index_tests {
 
     #[test]
     fn test_load_compressed_corrupt_data() {
-        let tmp = std::env::temp_dir().join("search_test_corrupt_data");
-        let _ = std::fs::create_dir_all(&tmp);
-        let path = tmp.join("corrupt.bin");
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("corrupt.bin");
 
         // Write random bytes that look like neither valid LZ4 nor valid bincode
         std::fs::write(&path, b"this is not valid data at all!!!!!").unwrap();
@@ -710,16 +697,13 @@ mod index_tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("deserialization failed"), "Error should mention deserialization, got: {}", err_msg);
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn test_compressed_file_smaller_than_uncompressed() {
-        let tmp = std::env::temp_dir().join("search_test_compression_ratio");
-        let _ = std::fs::create_dir_all(&tmp);
-        let compressed_path = tmp.join("compressed.bin");
-        let uncompressed_path = tmp.join("uncompressed.bin");
+        let tmp = tempfile::tempdir().unwrap();
+        let compressed_path = tmp.path().join("compressed.bin");
+        let uncompressed_path = tmp.path().join("uncompressed.bin");
 
         // Create data with repetitive content (compresses well)
         let data: Vec<String> = (0..1000).map(|i| format!("repeated_token_{}", i % 10)).collect();
@@ -734,7 +718,5 @@ mod index_tests {
         assert!(compressed_size < uncompressed_size,
             "Compressed ({}) should be smaller than uncompressed ({})",
             compressed_size, uncompressed_size);
-
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

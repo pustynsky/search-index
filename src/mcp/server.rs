@@ -36,69 +36,78 @@ pub fn run_server(
     };
 
     let stdin = io::stdin();
-    let reader = stdin.lock();
+    let mut reader = stdin.lock();
     let stdout = io::stdout();
     let mut writer = stdout.lock();
 
+    const MAX_REQUEST_SIZE: usize = 10 * 1024 * 1024; // 10 MB
+
     info!("MCP server ready, waiting for JSON-RPC requests on stdin");
 
-    for line in reader.lines() {
-        let line = match line {
-            Ok(l) => l,
-            Err(e) => {
-                error!(error = %e, "Error reading stdin");
-                break;
-            }
-        };
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(_) => {
+                if line.len() > MAX_REQUEST_SIZE {
+                    error!(size = line.len(), "Request too large, skipping");
+                    continue;
+                }
+                let line = line.trim().to_string();
+                if line.is_empty() {
+                    continue;
+                }
 
-        let line = line.trim().to_string();
-        if line.is_empty() {
-            continue;
-        }
+                debug!(request = %line, "Incoming JSON-RPC");
 
-        debug!(request = %line, "Incoming JSON-RPC");
+                let request: JsonRpcRequest = match serde_json::from_str(&line) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!(error = %e, "Failed to parse JSON-RPC request");
+                        let err = JsonRpcErrorResponse::new(
+                            Value::Null,
+                            -32700,
+                            format!("Parse error: {}", e),
+                        );
+                        let resp = serde_json::to_string(&err).unwrap();
+                        debug!(response = %resp, "Error response");
+                        if let Err(e) = writeln!(writer, "{}", resp) {
+                            error!(error = %e, "Failed to write error response to stdout, shutting down");
+                            break;
+                        }
+                        if let Err(e) = writer.flush() {
+                            error!(error = %e, "Failed to flush stdout, shutting down");
+                            break;
+                        }
+                        continue;
+                    }
+                };
 
-        let request: JsonRpcRequest = match serde_json::from_str(&line) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!(error = %e, "Failed to parse JSON-RPC request");
-                let err = JsonRpcErrorResponse::new(
-                    Value::Null,
-                    -32700,
-                    format!("Parse error: {}", e),
-                );
-                let resp = serde_json::to_string(&err).unwrap();
-                debug!(response = %resp, "Error response");
-                if let Err(e) = writeln!(writer, "{}", resp) {
-                    error!(error = %e, "Failed to write error response to stdout, shutting down");
+                // Notifications have no id — don't send a response
+                if request.id.is_none() {
+                    debug!(method = %request.method, "Received notification");
+                    continue;
+                }
+
+                let id = request.id.unwrap();
+                let response = handle_request(&ctx, &request.method, &request.params, id.clone());
+
+                let resp_str = serde_json::to_string(&response).unwrap();
+                debug!(response = %resp_str, "Outgoing JSON-RPC");
+                if let Err(e) = writeln!(writer, "{}", resp_str) {
+                    error!(error = %e, "Failed to write response to stdout, shutting down");
                     break;
                 }
                 if let Err(e) = writer.flush() {
                     error!(error = %e, "Failed to flush stdout, shutting down");
                     break;
                 }
-                continue;
             }
-        };
-
-        // Notifications have no id — don't send a response
-        if request.id.is_none() {
-            debug!(method = %request.method, "Received notification");
-            continue;
-        }
-
-        let id = request.id.unwrap();
-        let response = handle_request(&ctx, &request.method, &request.params, id.clone());
-
-        let resp_str = serde_json::to_string(&response).unwrap();
-        debug!(response = %resp_str, "Outgoing JSON-RPC");
-        if let Err(e) = writeln!(writer, "{}", resp_str) {
-            error!(error = %e, "Failed to write response to stdout, shutting down");
-            break;
-        }
-        if let Err(e) = writer.flush() {
-            error!(error = %e, "Failed to flush stdout, shutting down");
-            break;
+            Err(e) => {
+                error!(error = %e, "Error reading stdin");
+                break;
+            }
         }
     }
 

@@ -111,9 +111,8 @@
 
     #[test]
     fn test_build_and_search_content_index() {
-        let dir = std::env::temp_dir().join("search_test_content_idx");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let mut f1 = fs::File::create(dir.join("file1.cs")).unwrap();
         writeln!(f1, "using System;").unwrap();
@@ -138,15 +137,12 @@
 
         let postings = &index.index["httpclient"];
         assert_eq!(postings.len(), 2, "HttpClient should appear in both files");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_build_file_index() {
-        let dir = std::env::temp_dir().join("search_test_file_idx");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         fs::write(dir.join("file1.cs"), "public class Foo {}").unwrap();
         fs::write(dir.join("file2.rs"), "fn main() {}").unwrap();
@@ -167,8 +163,6 @@
             .collect();
         assert!(names.contains(&"file1.cs"), "Should contain file1.cs");
         assert!(names.contains(&"file2.rs"), "Should contain file2.rs");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ── ContentIndex staleness tests / Serialization roundtrip tests ────────
@@ -280,9 +274,8 @@
 
     #[test]
     fn test_multi_term_or_search() {
-        let dir = std::env::temp_dir().join("search_test_multi_or");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let mut f1 = fs::File::create(dir.join("both.cs")).unwrap();
         writeln!(f1, "class Foo {{ HttpClient client; ILogger logger; }}").unwrap();
@@ -329,15 +322,12 @@
 
         // Only both.cs
         assert_eq!(and_files.len(), 1, "AND should match 1 file");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_multi_term_and_search() {
-        let dir = std::env::temp_dir().join("search_test_multi_and");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let mut f1 = fs::File::create(dir.join("all_three.cs")).unwrap();
         writeln!(f1, "HttpClient Task ILogger").unwrap();
@@ -372,17 +362,14 @@
         });
 
         assert_eq!(intersection.len(), 1, "Only 1 file should contain all 3 terms");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ─────────────────────────────────────────────────────────────────
 
     #[test]
     fn test_regex_token_matching() {
-        let dir = std::env::temp_dir().join("search_test_regex");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let mut f1 = fs::File::create(dir.join("caches.cs")).unwrap();
         writeln!(f1, "ITenantCache IUserCache ISessionCache INotAMatch").unwrap();
@@ -412,15 +399,12 @@
             !matching_tokens.contains(&&"inotamatch".to_string()),
             "inotamatch should not match i.*cache pattern"
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_regex_no_match() {
-        let dir = std::env::temp_dir().join("search_test_regex_no");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let mut f1 = fs::File::create(dir.join("simple.cs")).unwrap();
         writeln!(f1, "class Foo {{ int x; }}").unwrap();
@@ -442,15 +426,12 @@
             .collect();
 
         assert_eq!(matching.len(), 0, "Non-existent pattern should match 0 tokens");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_regex_matches_partial_tokens() {
-        let dir = std::env::temp_dir().join("search_test_regex_partial");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let mut f1 = fs::File::create(dir.join("async.cs")).unwrap();
         writeln!(f1, "GetAsync PostAsync SendAsync SyncMethod").unwrap();
@@ -477,16 +458,14 @@
             !matching.contains(&&"syncmethod".to_string()),
             "syncmethod should not match .*async$ pattern"
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ─────────────────────────────────────────────────────────────────
 
     #[test]
     fn test_exclude_dir_filters_paths() {
-        let dir = std::env::temp_dir().join("search_excl_dir");
-        let _ = fs::remove_dir_all(&dir);
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
         fs::create_dir_all(dir.join("src")).unwrap();
         fs::create_dir_all(dir.join("zzztests")).unwrap();
         fs::create_dir_all(dir.join("zzztests").join("zzzE2E")).unwrap();
@@ -529,15 +508,12 @@
             index.files[filtered[0].file_id as usize].contains("main.cs"),
             "Remaining file should be main.cs"
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_exclude_pattern_filters_files() {
-        let dir = std::env::temp_dir().join("search_test_exclude_pat");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let mut f1 = fs::File::create(dir.join("Service.cs")).unwrap();
         writeln!(f1, "class Service {{ HttpClient c; }}").unwrap();
@@ -576,8 +552,6 @@
                 && !index.files[filtered[0].file_id as usize].contains("Mock"),
             "Remaining file should be Service.cs (not Mock or Tests)"
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -642,12 +616,12 @@
 
     #[test]
     fn test_cleanup_indexes_for_dir_removes_matching() {
-        let tmp = std::env::temp_dir().join(format!("search_cleanup_test_{}", std::process::id()));
-        let idx_base = tmp.join("indexes");
+        let tmp = tempfile::tempdir().unwrap();
+        let idx_base = tmp.path().join("indexes");
         fs::create_dir_all(&idx_base).unwrap();
 
         // Create a test directory to act as the "root"
-        let test_root = tmp.join("myproject");
+        let test_root = tmp.path().join("myproject");
         fs::create_dir_all(&test_root).unwrap();
         fs::write(test_root.join("hello.cs"), "class Hello {}").unwrap();
 
@@ -685,20 +659,17 @@
                 ext == "idx" || ext == "cidx" || ext == "didx"))
             .count();
         assert_eq!(count_after, 0, "No index files should remain");
-
-        // Cleanup temp dir
-        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
     fn test_cleanup_indexes_for_dir_preserves_other() {
-        let tmp = std::env::temp_dir().join(format!("search_cleanup_other_{}", std::process::id()));
-        let idx_base = tmp.join("indexes");
+        let tmp = tempfile::tempdir().unwrap();
+        let idx_base = tmp.path().join("indexes");
         fs::create_dir_all(&idx_base).unwrap();
 
         // Create two test directories
-        let dir_a = tmp.join("project_a");
-        let dir_b = tmp.join("project_b");
+        let dir_a = tmp.path().join("project_a");
+        let dir_b = tmp.path().join("project_b");
         fs::create_dir_all(&dir_a).unwrap();
         fs::create_dir_all(&dir_b).unwrap();
         fs::write(dir_a.join("a.cs"), "class A {}").unwrap();
@@ -730,18 +701,14 @@
                 ext == "idx" || ext == "cidx" || ext == "didx"))
             .count();
         assert_eq!(remaining, 1, "dir_b index should still exist");
-
-        // Cleanup temp dir
-        let _ = fs::remove_dir_all(&tmp);
     }
 
     // ─────────────────────────────────────────────────────────────────
 
     #[test]
     fn test_phrase_search_finds_exact_phrase() {
-        let dir = std::env::temp_dir().join("search_phrase_test");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let mut f1 = fs::File::create(dir.join("has_phrase.cs")).unwrap();
         writeln!(f1, "using System;").unwrap();
@@ -805,15 +772,12 @@
             index.files[verified[0] as usize].contains("has_phrase"),
             "The verified file should be has_phrase.cs"
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_phrase_search_no_match() {
-        let dir = std::env::temp_dir().join("search_phrase_nomatch");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let mut f1 = fs::File::create(dir.join("file.cs")).unwrap();
         writeln!(f1, "class Foo {{ int x; string y; }}").unwrap();
@@ -836,15 +800,12 @@
         // "new" and "httpclient" are not in the index for this file
         let has_all = phrase_tokens.iter().all(|t| index.index.contains_key(t.as_str()));
         assert!(!has_all, "Not all phrase tokens should exist in index");
-
-        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_phrase_search_case_insensitive() {
-        let dir = std::env::temp_dir().join("search_phrase_case");
-        let _ = fs::remove_dir_all(&dir);
-        fs::create_dir_all(&dir).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
 
         let mut f1 = fs::File::create(dir.join("mixed.cs")).unwrap();
         writeln!(f1, "var c = New HTTPCLIENT();").unwrap();
@@ -870,6 +831,4 @@
             content.to_lowercase().contains(&phrase_lower),
             "Case-insensitive phrase match should work"
         );
-
-        let _ = fs::remove_dir_all(&dir);
     }
