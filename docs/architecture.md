@@ -376,7 +376,9 @@ src/
 │   ├── parser_sql.rs         # SQL AST parsing (retained, currently disabled)
 │   ├── storage.rs            # save/load/find definition index + def_index_path_for()
 │   ├── incremental.rs        # update_file_definitions, remove_file_definitions
-│   └── definitions_tests.rs  # Unit tests for definition parsing
+│   ├── definitions_tests.rs  # General definition tests (12 tests)
+│   ├── definitions_tests_csharp.rs   # C# parser tests (19 tests)
+│   └── definitions_tests_typescript.rs # TypeScript parser tests (32 tests)
 │
 └── mcp/                      # MCP server layer
     ├── mod.rs                # Module exports
@@ -391,7 +393,9 @@ src/
         ├── definitions.rs    # handle_search_definitions + body injection
         ├── callers.rs        # handle_search_callers + caller/callee tree builders
         ├── utils.rs          # validate_search_dir, sorted_intersect, metrics helpers
-        └── handlers_tests.rs # Handler integration tests
+        ├── handlers_tests.rs           # General handler tests (77 tests)
+        ├── handlers_tests_csharp.rs    # C# handler tests (31 tests)
+        └── handlers_tests_typescript.rs # TypeScript handler tests (placeholder)
 ```
 
 **Dependency direction:** `cli/*` → `index.rs` → `lib.rs` (types). `mcp/*` → `index.rs` + `definitions/*`. No circular dependencies. MCP layer depends on core index types but core has no knowledge of MCP. `main.rs` delegates to `cli::run()`.

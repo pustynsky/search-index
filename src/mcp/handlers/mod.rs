@@ -565,3 +565,11 @@ fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> Tool
 #[cfg(test)]
 #[path = "handlers_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "handlers_tests_csharp.rs"]
+mod tests_csharp;
+
+#[cfg(test)]
+#[path = "handlers_tests_typescript.rs"]
+mod tests_typescript;
