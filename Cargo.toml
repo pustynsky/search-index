@@ -28,6 +28,7 @@ tree-sitter-typescript = "0.23"
 # but tree-sitter 0.24 only supports versions 13-14. SQL parsing is disabled until a
 # compatible T-SQL grammar is available.
 lz4_flex = "0.11"
+mimalloc = { version = "0.1", features = ["override"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
