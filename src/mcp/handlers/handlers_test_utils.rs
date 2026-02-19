@@ -113,7 +113,7 @@ pub(crate) fn make_ctx_with_defs() -> HandlerContext {
     for (i, def) in definitions.iter().enumerate() {
         let idx = i as u32;
         name_index.entry(def.name.to_lowercase()).or_default().push(idx);
-        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
 

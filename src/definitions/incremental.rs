@@ -70,7 +70,7 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
             .or_default()
             .push(def_idx);
 
-        index.kind_index.entry(def.kind.clone())
+        index.kind_index.entry(def.kind)
             .or_default()
             .push(def_idx);
 

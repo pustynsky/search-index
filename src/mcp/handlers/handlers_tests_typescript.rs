@@ -194,7 +194,7 @@ fn make_ts_ctx_with_defs() -> HandlerContext {
     for (i, def) in definitions.iter().enumerate() {
         let idx = i as u32;
         name_index.entry(def.name.to_lowercase()).or_default().push(idx);
-        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
         for bt in &def.base_types {
             base_type_index.entry(bt.to_lowercase()).or_default().push(idx);
@@ -319,7 +319,7 @@ fn make_ts_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     for (i, def) in definitions.iter().enumerate() {
         let idx = i as u32;
         name_index.entry(def.name.to_lowercase()).or_default().push(idx);
-        kind_index.entry(def.kind.clone()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
     path_to_id.insert(file0_path, 0);

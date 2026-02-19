@@ -199,7 +199,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                     .or_default()
                     .push(def_idx);
 
-                kind_index.entry(def.kind.clone())
+                kind_index.entry(def.kind)
                     .or_default()
                     .push(def_idx);
 
