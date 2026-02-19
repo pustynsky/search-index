@@ -65,6 +65,7 @@ pub fn cmd_serve(args: ServeArgs) {
     // Try fast load from disk (typically < 3s)
     let start = Instant::now();
     let loaded = load_content_index(&dir_str, &exts_for_load, &idx_base)
+        .ok()
         .or_else(|| find_content_index_for_dir(&dir_str, &idx_base));
 
     if let Some(idx) = loaded {
@@ -114,8 +115,8 @@ pub fn cmd_serve(args: ServeArgs) {
             let token_count = new_idx.index.len();
             drop(new_idx);
             let new_idx = load_content_index(&bg_dir, &bg_ext, &bg_idx_base)
-                .unwrap_or_else(|| {
-                    warn!("Failed to reload content index from disk, rebuilding");
+                .unwrap_or_else(|e| {
+                    warn!(error = %e, "Failed to reload content index from disk, rebuilding");
                     build_content_index(&ContentIndexArgs {
                         dir: bg_dir, ext: bg_ext,
                         max_age_hours: 24, hidden: false, no_ignore: false,
@@ -174,6 +175,7 @@ pub fn cmd_serve(args: ServeArgs) {
         // Try fast load from disk
         let def_start = Instant::now();
         let def_loaded = definitions::load_definition_index(&dir_str, &def_exts, &idx_base)
+            .ok()
             .or_else(|| definitions::find_definition_index_for_dir(&dir_str, &idx_base));
 
         if let Some(idx) = def_loaded {
@@ -211,8 +213,8 @@ pub fn cmd_serve(args: ServeArgs) {
                 let file_count = new_idx.files.len();
                 drop(new_idx);
                 let new_idx = definitions::load_definition_index(&bg_dir, &bg_def_exts, &bg_idx_base)
-                    .unwrap_or_else(|| {
-                        warn!("Failed to reload definition index from disk, rebuilding");
+                    .unwrap_or_else(|e| {
+                        warn!(error = %e, "Failed to reload definition index from disk, rebuilding");
                         definitions::build_definition_index(&definitions::DefIndexArgs {
                             dir: bg_dir, ext: bg_def_exts, threads: 0,
                         })

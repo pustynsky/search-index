@@ -485,6 +485,97 @@ cargo run -- cleanup --dir $tmp
 
 ---
 
+### T19c: `info` — Error reporting for missing index file
+
+**Setup:**
+
+```powershell
+# Find the content index file and delete it
+$idxDir = "$env:LOCALAPPDATA\search-index"
+$cidxFile = Get-ChildItem $idxDir -Filter *.cidx | Select-Object -First 1
+$backupPath = "$cidxFile.bak"
+Move-Item $cidxFile.FullName $backupPath
+```
+
+**Command:**
+
+```powershell
+cargo run -- info
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr/stdout: Warning message indicates file not found (not a silent skip)
+- Other valid indexes still listed normally
+
+**Cleanup:**
+
+```powershell
+Move-Item $backupPath $cidxFile.FullName
+```
+
+**Validates:** `info` command reports a clear warning when an index file is missing (e.g., deleted externally), rather than silently ignoring it.
+
+---
+
+### T19d: `info` — Error reporting for corrupt index file
+
+**Setup:**
+
+```powershell
+# Find the content index file and overwrite with garbage
+$idxDir = "$env:LOCALAPPDATA\search-index"
+$cidxFile = Get-ChildItem $idxDir -Filter *.cidx | Select-Object -First 1
+$backupPath = "$cidxFile.bak"
+Copy-Item $cidxFile.FullName $backupPath
+Set-Content -Path $cidxFile.FullName -Value "THIS_IS_GARBAGE_DATA_NOT_A_VALID_INDEX" -Encoding Byte
+```
+
+**Command:**
+
+```powershell
+cargo run -- info
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr/stdout: Warning message indicates deserialization failed for the corrupt file
+- Other valid indexes still listed normally
+
+**Cleanup:**
+
+```powershell
+Move-Item $backupPath $cidxFile.FullName -Force
+```
+
+**Validates:** `info` command reports a clear warning when an index file is corrupt (deserialization failure), rather than crashing or silently skipping it.
+
+---
+
+### T19e: `info` — Normal operation with valid indexes
+
+**Command:**
+
+```powershell
+# Ensure indexes are built first
+cargo run -- index -d $TEST_DIR
+cargo run -- content-index -d $TEST_DIR -e $TEST_EXT
+cargo run -- info
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr: `Index directory: ...`
+- stdout: list of `[FILE]` and `[CONTENT]` entries with age, size, staleness
+- No warnings or errors about missing/corrupt files
+
+**Validates:** `info` command shows index statistics normally when all indexes are valid (baseline/regression test for T19c and T19d).
+
+---
+
 ### T20: `def-index` — Build definition index
 
 **Command:**
@@ -1231,6 +1322,8 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 **Validates:** Reindex flow rebuilds trigram index alongside content index.
 
 **Status:** ✅ Implemented (covered by `e2e_reindex_rebuilds_trigram` unit test)
+
+**Note (Sprint 2):** Trigram index rebuild now uses double-check locking — the trigram is built under a read lock, then swapped under a brief write lock. This eliminates contention during concurrent substring searches while the trigram index is being rebuilt. No behavioral change; same substring search results.
 
 ---
 

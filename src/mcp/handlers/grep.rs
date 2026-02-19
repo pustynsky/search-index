@@ -78,12 +78,23 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
     if use_substring {
         let needs_rebuild = ctx.index.read().map(|idx| idx.trigram_dirty).unwrap_or(false);
         if needs_rebuild {
-            if let Ok(mut idx) = ctx.index.write() {
+            // Build trigram index under READ lock (doesn't block other readers)
+            let new_trigram = ctx.index.read().ok().and_then(|idx| {
                 if idx.trigram_dirty {
-                    idx.trigram = build_trigram_index(&idx.index);
-                    idx.trigram_dirty = false;
-                    eprintln!("[substring] Rebuilt trigram index: {} tokens, {} trigrams",
-                        idx.trigram.tokens.len(), idx.trigram.trigram_map.len());
+                    Some(build_trigram_index(&idx.index))
+                } else {
+                    None
+                }
+            });
+            // Swap in under brief WRITE lock (microseconds, not ~200ms)
+            if let Some(trigram) = new_trigram {
+                if let Ok(mut idx) = ctx.index.write() {
+                    if idx.trigram_dirty {  // double-check after acquiring write lock
+                        eprintln!("[substring] Rebuilt trigram index: {} tokens, {} trigrams",
+                            trigram.tokens.len(), trigram.trigram_map.len());
+                        idx.trigram = trigram;
+                        idx.trigram_dirty = false;
+                    }
                 }
             }
         }

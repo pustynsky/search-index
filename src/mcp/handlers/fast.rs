@@ -28,8 +28,8 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
 
     // Load file index
     let index = match crate::load_index(&dir, &ctx.index_base) {
-        Some(idx) => idx,
-        None => {
+        Ok(idx) => idx,
+        Err(_) => {
             // Auto-build
             info!(dir = %dir, "No file index found, building automatically");
             let new_index = crate::build_index(&crate::IndexArgs {

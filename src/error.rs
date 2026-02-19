@@ -48,6 +48,13 @@ pub enum SearchError {
     /// Mutually exclusive flags or other argument validation error
     #[error("{0}")]
     InvalidArgs(String),
+
+    /// Failed to load an index from disk
+    #[error("Failed to load index from {path}: {message}")]
+    IndexLoad {
+        path: String,
+        message: String,
+    },
 }
 
 #[cfg(test)]

@@ -24,7 +24,7 @@ pub fn save_definition_index(index: &DefinitionIndex, index_base: &std::path::Pa
 }
 
 #[allow(dead_code)]
-pub fn load_definition_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Option<DefinitionIndex> {
+pub fn load_definition_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Result<DefinitionIndex, crate::SearchError> {
     let path = def_index_path_for(dir, exts, index_base);
     crate::index::load_compressed(&path, "definition-index")
 }
@@ -39,12 +39,17 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path) ->
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|e| e == "didx") {
-            if let Some(index) = crate::index::load_compressed::<DefinitionIndex>(&path, "definition-index") {
-                let idx_root = std::fs::canonicalize(&index.root)
-                    .map(|p| clean_path(&p.to_string_lossy()))
-                    .unwrap_or_else(|_| index.root.clone());
-                if idx_root.eq_ignore_ascii_case(&dir_str) {
-                    return Some(index);
+            match crate::index::load_compressed::<DefinitionIndex>(&path, "definition-index") {
+                Ok(index) => {
+                    let idx_root = std::fs::canonicalize(&index.root)
+                        .map(|p| clean_path(&p.to_string_lossy()))
+                        .unwrap_or_else(|_| index.root.clone());
+                    if idx_root.eq_ignore_ascii_case(&dir_str) {
+                        return Some(index);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[find_definition_index] Skipping {}: {}", path.display(), e);
                 }
             }
         }

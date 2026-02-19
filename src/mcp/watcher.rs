@@ -752,7 +752,7 @@ mod tests {
         // Load from disk
         let exts_str = watch_index.extensions.join(",");
         let loaded = crate::load_content_index(&watch_index.root, &exts_str, &tmp)
-            .expect("load should return the saved index");
+            .expect("load should return Ok with the saved index");
 
         // Verify all core fields survived
         assert_eq!(loaded.files.len(), orig_files, "files count mismatch");

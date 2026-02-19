@@ -569,7 +569,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
     crate::save_content_index(&original, &idx_base).unwrap();
     let root = original.root.clone(); let exts = original.extensions.join(",");
     drop(original);
-    let loaded = crate::load_content_index(&root, &exts, &idx_base).unwrap();
+    let loaded = crate::load_content_index(&root, &exts, &idx_base).expect("load should succeed");
     assert_eq!(loaded.files.len(), orig_files);
     assert_eq!(loaded.index.len(), orig_tokens);
     assert_eq!(loaded.trigram.trigram_map.len(), orig_trigrams);
