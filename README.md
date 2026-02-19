@@ -16,10 +16,24 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 
 > Built on the same [`ignore`](https://crates.io/crates/ignore) crate used by [ripgrep](https://github.com/BurntSushi/ripgrep), with [`tree-sitter`](https://tree-sitter.github.io/) for language-aware code parsing.
 
+## What Can You Do With It?
+
+| Scenario | Without search-index | With search-index |
+|---|---|---|
+| 🐛 **Debug a stack trace** — find the exact method, trace all callers to the API entry point | ~5 min per stack frame | **3 seconds** |
+| 🏗️ **Understand unfamiliar code** — map classes, call trees, and dependencies of a module you've never seen | ~40 min of manual exploration | **2 minutes** |
+| 📝 **Review a PR** — check who else calls changed methods, spot missing patterns | ~8 min of searching | **<1 second** |
+| 🔄 **Refactor safely** — find every caller, every implementation, every DI registration | multiple manual searches | **one `search_callers` call** |
+| 📊 **Estimate task scope** — "how many files use this feature?" | ~5 min | **30 seconds** |
+| 🧪 **Write tests** — find existing test patterns, discover all dependencies to mock | ~10 min browsing | **<1 second** |
+
+> 📖 **More:** [Use Cases & Vision](docs/use-cases.md) — detailed scenarios including AI-powered architecture exploration, automated impact analysis, and a real-world case study where we reverse-engineered a 3,800-line system in 5 minutes.
+
 ## Documentation
 
 | Document | Description |
 |---|---|
+| [Use Cases & Vision](docs/use-cases.md) | Real-world scenarios, future ideas, and case studies |
 | [CLI Reference](docs/cli-reference.md) | All commands with examples and options |
 | [MCP Server Guide](docs/mcp-guide.md) | Setup, tools API, JSON-RPC examples |
 | [Architecture](docs/architecture.md) | System overview, component design, data flow diagrams |

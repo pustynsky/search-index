@@ -200,6 +200,54 @@ line.split(|c: char| !c.is_alphanumeric() && c != '_')
 - No remote access — must run on same machine as the AI agent
 - Debugging requires stderr logging — cannot use stdout for diagnostics
 
+## 8. Positioning: search-index vs Existing Code Search Tools
+
+### Chosen: Custom single-binary engine (inverted index + trigram + tree-sitter AST + call graph)
+
+The question is not just "which data structure?" but "why not use an existing tool?"
+
+**Rejected alternatives:**
+
+| Tool | What It Does Well | Why Not Sufficient |
+|---|---|---|
+| **Zoekt** (Google Code Search successor) | Trigram-based code search, used at Google/Sourcegraph scale. Fast substring search via trigrams. | No AST awareness — cannot search by class/method structure, no call graph, no `containsLine`, no `includeBody`. It's a text search engine, not a code intelligence engine. Requires Go runtime. |
+| **Sourcegraph** | Full code intelligence platform with navigation, cross-repo search, precise code intel via SCIP/LSIF. | Heavy infrastructure: requires Docker, PostgreSQL, multiple services. Designed as a web application, not a local CLI/MCP tool. Code intel requires language-specific SCIP indexers (separate build step). Latency: network round-trips to HTTP API vs stdio pipe. |
+| **GitHub Code Search** | Excellent web-based search across repositories with language-aware ranking. | Cloud-only, requires network, cannot run locally. No call graph. No MCP integration. Cannot index private repos that aren't on GitHub. |
+| **LSP (Language Server Protocol)** | Full semantic understanding: type inference, cross-file references, rename refactoring. The "gold standard" for code intelligence. | Requires running the actual language server (Roslyn for C#, tsserver for TS). Index build: minutes to hours for large repos. Memory: GBs for large solutions. Only one language per server. Not designed for broad search — designed for single-file navigation. Cannot answer "find all classes with attribute X across 49K files". |
+| **Roslyn Analyzers / CodeQL** | Deep semantic analysis: data flow, taint tracking, vulnerability detection. | Build times: hours for large codebases. Requires full compilation. CodeQL databases are 10-50GB. Not interactive — batch analysis tools. Completely different use case (static analysis vs code navigation). |
+| **ripgrep (rg)** | Fastest regex-based file search. Gold standard for live filesystem grep. | No index — every query is a full filesystem scan (32s for 49K files). No AST awareness. No call graph. No ranking. No trigram substring search. Linear cost per query. |
+| **ctags / universal-ctags** | Fast tag-based navigation. Works with 50+ languages. | Tags only — no call graph, no base types, no attributes, no modifiers. External tool dependency. Limited structured data. No search API — produces a file that editors consume. |
+
+### What search-index uniquely provides
+
+The combination of these capabilities in a single tool is what makes it distinct:
+
+| Capability | Zoekt | Sourcegraph | LSP | ripgrep | search-index |
+|---|---|---|---|---|---|
+| Text search <1ms | ✅ | ✅ | ❌ | ❌ (32s) | ✅ |
+| Substring search | ✅ (trigram) | ✅ | ❌ | ✅ (regex) | ✅ (trigram) |
+| AST-aware definitions | ❌ | ✅ (SCIP) | ✅ | ❌ | ✅ (tree-sitter) |
+| Call graph / callers | ❌ | ✅ (precise) | ✅ | ❌ | ✅ (AST-based) |
+| DI-aware interface resolution | ❌ | ❌ | ✅ | ❌ | ✅ |
+| `containsLine` (line → method) | ❌ | ❌ | ✅ | ❌ | ✅ |
+| `includeBody` (inline source) | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Single binary, zero deps | ❌ (Go) | ❌ (Docker) | ❌ (.NET/Node) | ✅ | ✅ |
+| MCP native (AI agent) | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Index build time | ~minutes | ~minutes | ~minutes | n/a | **16-32s** |
+| Query latency | ~1-10ms | ~50-200ms | ~10-100ms | ~32s | **<1ms** |
+| Local, offline, no network | ✅ | ❌ | ✅ | ✅ | ✅ |
+
+**Key insight:** No existing tool combines fast text search + AST structural queries + call graph + MCP integration in a single zero-dependency binary. Each tool excels at a subset:
+
+- ripgrep = fastest text search but no structure
+- LSP = most accurate code intelligence but heavy and slow
+- Zoekt = fast indexed search but no AST
+- Sourcegraph = most complete but requires infrastructure
+
+search-index occupies the **"fast enough for interactive AI agents, structured enough for code navigation"** niche that none of the above serve.
+
+**When to reconsider:** If precise type inference becomes critical (not just call-site heuristics), integrating SCIP/LSIF indexes alongside the current AST index would be the path — keeping the fast text search layer while adding semantic precision where needed.
+
 ## Summary Matrix
 
 | Decision        | Chosen                 | Key Reason                  | Reconsider When              |
@@ -211,3 +259,4 @@ line.split(|c: char| !c.is_alphanumeric() && c != '_')
 | Code parsing    | tree-sitter            | Full AST, structured output | n/a (correct choice)         |
 | Tokenization    | char-split + lowercase | Fast, language-agnostic     | Need camelCase/fuzzy         |
 | Transport       | Stdio                  | Zero-config, lowest latency | Need remote access           |
+| Positioning     | Custom single-binary   | Only tool combining all 4 index types + MCP | Need precise type inference (add SCIP/LSIF) |
