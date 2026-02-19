@@ -28,6 +28,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 | [Trade-offs](docs/tradeoffs.md) | Design decisions with alternatives considered |
 | [Benchmarks](docs/benchmarks.md) | Performance data, scaling estimates, industry comparison |
 | [E2E Test Plan](docs/e2e-test-plan.md) | 40+ end-to-end test cases (24 CLI + 16 MCP) with automation script |
+| [Validation Protocol](docs/validation-protocol.md) | Systematic detection of false positives/negatives in `search_callers` & `search_definitions` |
 
 ## Features
 
