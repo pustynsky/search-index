@@ -142,6 +142,20 @@ pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
         !v.is_empty()
     });
 
+    // Shrink secondary index vecs after retain() to release excess capacity.
+    // retain() reduces len but not capacity — shrink_to_fit() reclaims dead allocations.
+    for v in index.name_index.values_mut() { v.shrink_to_fit(); }
+    for v in index.kind_index.values_mut() { v.shrink_to_fit(); }
+    for v in index.attribute_index.values_mut() { v.shrink_to_fit(); }
+    for v in index.base_type_index.values_mut() { v.shrink_to_fit(); }
+
+    // Shrink the HashMaps themselves
+    index.name_index.shrink_to_fit();
+    index.kind_index.shrink_to_fit();
+    index.attribute_index.shrink_to_fit();
+    index.base_type_index.shrink_to_fit();
+    index.method_calls.shrink_to_fit();
+
     // Check for excessive tombstone growth
     let active_count: usize = index.file_index.values().map(|v| v.len()).sum();
     let total_count = index.definitions.len();

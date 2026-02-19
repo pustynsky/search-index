@@ -3670,3 +3670,15 @@ correctly parsed as variable definitions.
 - Variable name and signature are correctly extracted
 
 **Unit test:** [`test_parse_ts_injection_token_variable`](../src/definitions/definitions_tests_typescript.rs)
+
+
+---
+
+## Changes Not CLI-Testable (Covered by Unit Tests)
+
+The following internal optimizations are covered by unit tests in `src/mcp/watcher.rs` and `src/definitions/incremental.rs`, but have no CLI-observable behavior for E2E testing:
+
+| Change | Unit Test | Description |
+|--------|-----------|-------------|
+| `.git/` directory filtering in watcher | `test_is_inside_git_dir` | Watcher now skips files inside `.git/` directories to avoid indexing git internals (e.g., `.git/config` matching "config" extension) |
+| `shrink_to_fit()` after `retain()` | (behavioral — no dedicated test) | After incremental updates, all `HashMap`/`Vec` collections call `shrink_to_fit()` to release excess capacity from `retain()` operations |
