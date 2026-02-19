@@ -918,6 +918,239 @@ catch {
         $ErrorActionPreference = "Stop"
         Remove-Item -Recurse -Force $lambdaDir -ErrorAction SilentlyContinue
     }
+
+    # --- T-OVERLOAD-DEDUP-UP: Overloaded callers not collapsed (direction=up) ---
+    Write-Host -NoNewline "  T-OVERLOAD-DEDUP-UP callers-overloads-not-collapsed-up ... "
+    $total++
+    try {
+        $overloadUpDir = Join-Path $env:TEMP "search_e2e_overload_up_$PID"
+        if (Test-Path $overloadUpDir) { Remove-Item -Recurse -Force $overloadUpDir }
+        New-Item -ItemType Directory -Path $overloadUpDir | Out-Null
+
+        # Create Validator class with Validate() method
+        $validatorCs = @"
+namespace TestApp
+{
+    public class Validator
+    {
+        public bool Validate() { return true; }
+    }
+}
+"@
+        Set-Content -Path (Join-Path $overloadUpDir "Validator.cs") -Value $validatorCs
+
+        # Create Processor with two overloads of Process, both calling Validate()
+        $processorCs = @"
+namespace TestApp
+{
+    public class Processor
+    {
+        private Validator _validator;
+        public void Process(int x)
+        {
+            _validator.Validate();
+        }
+        public void Process(string s)
+        {
+            _validator.Validate();
+        }
+    }
+}
+"@
+        Set-Content -Path (Join-Path $overloadUpDir "Processor.cs") -Value $processorCs
+
+        # Build content-index and def-index
+        $ErrorActionPreference = "Continue"
+        & $searchBin content-index -d $overloadUpDir -e cs 2>&1 | Out-Null
+        & $searchBin def-index -d $overloadUpDir -e cs 2>&1 | Out-Null
+        $ErrorActionPreference = "Stop"
+
+        # Query search_callers direction=up for Validator.Validate
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Validate","class":"Validator","direction":"up","depth":1}}}'
+        ) -join "`n"
+
+        $ErrorActionPreference = "Continue"
+        $output = ($msgs | & $searchBin serve --dir $overloadUpDir --ext cs --definitions 2>$null) | Out-String
+        $ErrorActionPreference = "Stop"
+
+        # Extract the JSON-RPC response (id=5)
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if ($jsonLine) {
+            # Both Process overloads should appear (totalNodes=2)
+            $processMatches = [regex]::Matches($jsonLine, '"Process"')
+            if ($processMatches.Count -ge 2) {
+                Write-Host "OK" -ForegroundColor Green
+                $passed++
+            }
+            else {
+                Write-Host "FAILED (expected 2 Process overloads in callers, got $($processMatches.Count))" -ForegroundColor Red
+                Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+                $failed++
+            }
+        }
+        else {
+            Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
+            Write-Host "    output: $output" -ForegroundColor Yellow
+            $failed++
+        }
+
+        # Cleanup
+        $ErrorActionPreference = "Continue"
+        & $searchBin cleanup --dir $overloadUpDir 2>&1 | Out-Null
+        $ErrorActionPreference = "Stop"
+        Remove-Item -Recurse -Force $overloadUpDir -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+        $failed++
+        if (Test-Path $overloadUpDir) {
+            $ErrorActionPreference = "Continue"
+            & $searchBin cleanup --dir $overloadUpDir 2>&1 | Out-Null
+            $ErrorActionPreference = "Stop"
+            Remove-Item -Recurse -Force $overloadUpDir -ErrorAction SilentlyContinue
+        }
+    }
+
+    # --- T-SAME-NAME-IFACE: Same method name on unrelated interfaces — no cross-contamination ---
+    Write-Host -NoNewline "  T-SAME-NAME-IFACE callers-same-name-unrelated-iface ... "
+    $total++
+    try {
+        $ifaceDir = Join-Path $env:TEMP "search_e2e_same_name_iface_$PID"
+        if (Test-Path $ifaceDir) { Remove-Item -Recurse -Force $ifaceDir }
+        New-Item -ItemType Directory -Path $ifaceDir | Out-Null
+
+        # IServiceA interface with Execute()
+        $iServiceACs = @"
+namespace TestApp
+{
+    public interface IServiceA
+    {
+        void Execute();
+    }
+}
+"@
+        Set-Content -Path (Join-Path $ifaceDir "IServiceA.cs") -Value $iServiceACs
+
+        # IServiceB interface with Execute()
+        $iServiceBCs = @"
+namespace TestApp
+{
+    public interface IServiceB
+    {
+        void Execute();
+    }
+}
+"@
+        Set-Content -Path (Join-Path $ifaceDir "IServiceB.cs") -Value $iServiceBCs
+
+        # ServiceA implements IServiceA
+        $serviceACs = @"
+namespace TestApp
+{
+    public class ServiceA : IServiceA
+    {
+        public void Execute() { }
+    }
+}
+"@
+        Set-Content -Path (Join-Path $ifaceDir "ServiceA.cs") -Value $serviceACs
+
+        # ServiceB implements IServiceB
+        $serviceBCs = @"
+namespace TestApp
+{
+    public class ServiceB : IServiceB
+    {
+        public void Execute() { }
+    }
+}
+"@
+        Set-Content -Path (Join-Path $ifaceDir "ServiceB.cs") -Value $serviceBCs
+
+        # Consumer calls IServiceB.Execute() only
+        $consumerCs = @"
+namespace TestApp
+{
+    public class Consumer
+    {
+        private IServiceB _serviceB;
+        public void DoWork()
+        {
+            _serviceB.Execute();
+        }
+    }
+}
+"@
+        Set-Content -Path (Join-Path $ifaceDir "Consumer.cs") -Value $consumerCs
+
+        # Build content-index and def-index
+        $ErrorActionPreference = "Continue"
+        & $searchBin content-index -d $ifaceDir -e cs 2>&1 | Out-Null
+        & $searchBin def-index -d $ifaceDir -e cs 2>&1 | Out-Null
+        $ErrorActionPreference = "Stop"
+
+        # Query search_callers for ServiceA.Execute (should NOT find Consumer)
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Execute","class":"ServiceA","direction":"up","depth":1}}}'
+        ) -join "`n"
+
+        $ErrorActionPreference = "Continue"
+        $output = ($msgs | & $searchBin serve --dir $ifaceDir --ext cs --definitions 2>$null) | Out-String
+        $ErrorActionPreference = "Stop"
+
+        # Extract the JSON-RPC response (id=5)
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        $testPassed = $true
+        if ($jsonLine) {
+            # BAD: Consumer should NOT appear (it calls IServiceB.Execute, not IServiceA.Execute)
+            if ($jsonLine -match 'Consumer') {
+                Write-Host "FAILED (Consumer should NOT appear as caller of ServiceA.Execute)" -ForegroundColor Red
+                Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+                $testPassed = $false
+            }
+            # Verify totalNodes=0 (no callers for ServiceA.Execute)
+            if ($jsonLine -notmatch 'totalNodes[^0-9]+0[^0-9]') {
+                # May have 0 callers expressed differently; check callTree is empty
+                if ($jsonLine -match 'DoWork') {
+                    $testPassed = $false
+                }
+            }
+            if ($testPassed) {
+                Write-Host "OK" -ForegroundColor Green
+                $passed++
+            }
+            else {
+                $failed++
+            }
+        }
+        else {
+            Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
+            Write-Host "    output: $output" -ForegroundColor Yellow
+            $failed++
+        }
+
+        # Cleanup
+        $ErrorActionPreference = "Continue"
+        & $searchBin cleanup --dir $ifaceDir 2>&1 | Out-Null
+        $ErrorActionPreference = "Stop"
+        Remove-Item -Recurse -Force $ifaceDir -ErrorAction SilentlyContinue
+    }
+    catch {
+        Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+        $failed++
+        if (Test-Path $ifaceDir) {
+            $ErrorActionPreference = "Continue"
+            & $searchBin cleanup --dir $ifaceDir 2>&1 | Out-Null
+            $ErrorActionPreference = "Stop"
+            Remove-Item -Recurse -Force $ifaceDir -ErrorAction SilentlyContinue
+        }
+    }
+
 }
 
 # Note: T-FIX3-PREFILTER (base types removed from pre-filter) and T-FIX3-FIND-CONTAINING

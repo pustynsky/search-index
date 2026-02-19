@@ -1361,7 +1361,7 @@ fn resolve_ts_receiver_type(
             } else if text.chars().next().is_some_and(|c| c.is_uppercase()) {
                 Some(text.to_string())
             } else {
-                None
+                Some(text.to_string()) // preserve unresolved receiver name (e.g., "dbSession")
             }
         }
         "member_expression" => {

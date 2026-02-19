@@ -879,9 +879,9 @@ fn test_ts_local_var_no_type_annotation() {
     let process = dc[0].1.iter().find(|c| c.method_name == "process");
     assert!(process.is_some(), "Expected call to 'process'");
     assert_eq!(
-        process.unwrap().receiver_type,
-        None,
-        "Local var 'result' with no type annotation and no new expression should have receiver_type = None"
+        process.unwrap().receiver_type.as_deref(),
+        Some("result"),
+        "Local var 'result' with no type annotation and no new expression should preserve receiver name"
     );
 }
 

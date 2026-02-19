@@ -578,9 +578,38 @@ public class SomeService {
     let process = dc[0].1.iter().find(|c| c.method_name == "Process");
     assert!(process.is_some(), "Expected call to 'Process'");
     assert_eq!(
-        process.unwrap().receiver_type,
-        None,
-        "Local var 'result' with 'var' and no 'new' expression should have receiver_type = None"
+        process.unwrap().receiver_type.as_deref(),
+        Some("result"),
+        "Local var 'result' with 'var' and no 'new' expression should preserve receiver name"
+    );
+}
+
+#[test]
+fn test_csharp_using_var_receiver_preserved() {
+    let source = r#"
+public class DbService {
+    public void RunQuery() {
+        using (var session = OpenSession()) {
+            session.Execute();
+        }
+    }
+    private object OpenSession() { return null; }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let ri = defs.iter().position(|d| d.name == "RunQuery").unwrap();
+    let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
+    assert!(!rc.is_empty(), "Expected call sites for 'RunQuery'");
+
+    let execute = rc[0].1.iter().find(|c| c.method_name == "Execute");
+    assert!(execute.is_some(), "Expected call to 'Execute'");
+    assert_eq!(
+        execute.unwrap().receiver_type.as_deref(),
+        Some("session"),
+        "Using var 'session' should preserve unresolved receiver name"
     );
 }
 

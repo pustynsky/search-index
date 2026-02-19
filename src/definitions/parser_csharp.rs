@@ -341,7 +341,7 @@ fn resolve_receiver_type(
                     } else if name.chars().next().is_some_and(|c| c.is_uppercase()) {
                         Some(name.to_string())
                     } else {
-                        None
+                        Some(name.to_string()) // preserve unresolved receiver name (e.g., "dbSession")
                     }
                 }
             }
