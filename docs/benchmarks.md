@@ -237,12 +237,12 @@ Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O
 
 ### Unique Capabilities (no rg equivalent)
 
-| Capability             | Tool                 | What it does                                                                                                             |
-| ---------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| **AST definitions**    | `search_definitions` | Find classes/methods/interfaces by name, kind, parent, base type, attributes — with inline source code                   |
-| **Call trees**         | `search_callers`     | Build hierarchical caller/callee trees across the entire codebase in < 1ms                                               |
-| **Structured results** | `search_grep`        | TF-IDF ranked files with occurrence counts, line numbers, context groups                                                 |
-| **Substring matching** | `search_grep`        | Default `substring=true` matches inside compound identifiers (e.g., `TenantMapper` finds `DeleteTenantMapperCacheEntry`) |
+| Capability             | Tool                 | What it does                                                                                                         |
+| ---------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| **AST definitions**    | `search_definitions` | Find classes/methods/interfaces by name, kind, parent, base type, attributes — with inline source code               |
+| **Call trees**         | `search_callers`     | Build hierarchical caller/callee trees across the entire codebase in < 1ms                                           |
+| **Structured results** | `search_grep`        | TF-IDF ranked files with occurrence counts, line numbers, context groups                                             |
+| **Substring matching** | `search_grep`        | Default `substring=true` matches inside compound identifiers (e.g., `UserMapper` finds `DeleteUserMapperCacheEntry`) |
 
 ### When to Use ripgrep Instead
 
