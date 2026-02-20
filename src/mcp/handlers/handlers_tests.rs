@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 #[test]
 fn test_tool_definitions_count() {
     let tools = tool_definitions();
-    assert_eq!(tools.len(), 9);
+    assert_eq!(tools.len(), 13);
 }
 
 #[test]
@@ -105,6 +105,8 @@ fn make_empty_ctx() -> HandlerContext {
         server_ext: "cs".to_string(),
         metrics: false,
         index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     }
 }
 
@@ -161,6 +163,8 @@ fn test_dispatch_grep_with_results() {
         server_ext: "cs".to_string(),
         metrics: false,
         index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient", "substring": false}));
     assert!(!result.is_error);
@@ -307,6 +311,8 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
         index: Arc::new(RwLock::new(content_index)), def_index: None,
         server_dir: ".".to_string(), server_ext: "cs".to_string(),
         metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     }
 }
 
@@ -444,6 +450,8 @@ fn test_substring_search_trigram_dirty_triggers_rebuild() {
         index: Arc::new(RwLock::new(content_index)), def_index: None,
         server_dir: ".".to_string(), server_ext: "cs".to_string(),
         metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "httpcli", "substring": true}));
     assert!(!result.is_error);
@@ -493,6 +501,8 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
         server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "cs".to_string(),
         metrics: false, index_base: tmp_dir.join(".index"),
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
     (ctx, tmp_dir)
 }
@@ -573,7 +583,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
     assert_eq!(loaded.files.len(), orig_files);
     assert_eq!(loaded.index.len(), orig_tokens);
     assert_eq!(loaded.trigram.trigram_map.len(), orig_trigrams);
-    let loaded_ctx = HandlerContext { index: Arc::new(RwLock::new(loaded)), def_index: None, server_dir: root, server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+    let loaded_ctx = HandlerContext { index: Arc::new(RwLock::new(loaded)), def_index: None, server_dir: root, server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)) };
     let result = dispatch_tool(&loaded_ctx, "search_grep", &json!({"terms": "databaseconn", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -758,6 +768,8 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
         metrics: false, index_base: tmp_dir.join(".index"),
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
     (ctx, tmp_dir)
 }
@@ -826,7 +838,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     let mut idx = HashMap::new();
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let index = ContentIndex { root: ".".to_string(), created_at: 0, max_age_secs: 3600, files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)) };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"].get("responseBytes").is_none());
@@ -837,7 +849,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     let mut idx = HashMap::new();
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let index = ContentIndex { root: ".".to_string(), created_at: 0, max_age_secs: 3600, files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: true, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: true, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)) };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["searchTimeMs"].as_f64().is_some());
@@ -857,7 +869,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     let mut idx = HashMap::new();
     idx.insert("foo".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
     let index = ContentIndex { root: ".".to_string(), created_at: 0, max_age_secs: 3600, files: vec!["test.cs".to_string()], index: idx, total_tokens: 10, extensions: vec!["cs".to_string()], file_token_counts: vec![10], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: true, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: true, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)) };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "foo"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["searchTimeMs"].as_f64().unwrap() >= 0.0);
@@ -881,7 +893,7 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)) };
     (ctx, tmp_dir)
 }
 
@@ -968,14 +980,14 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     let tmp = std::env::temp_dir().join("search_test_grep_subdir");
     let sub_a = tmp.join("subA"); let sub_b = tmp.join("subB");
     std::fs::create_dir_all(&sub_a).unwrap(); std::fs::create_dir_all(&sub_b).unwrap();
-    std::fs::write(sub_a.join("hello.txt"), "OneLakeCatalog usage here").unwrap();
-    std::fs::write(sub_b.join("other.txt"), "OneLakeCatalog other usage").unwrap();
+    std::fs::write(sub_a.join("hello.txt"), "ProductCatalog usage here").unwrap();
+    std::fs::write(sub_b.join("other.txt"), "ProductCatalog other usage").unwrap();
     let index = crate::build_content_index(&crate::ContentIndexArgs { dir: tmp.to_string_lossy().to_string(), ext: "txt".to_string(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2 });
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "txt".to_string(), metrics: false, index_base: tmp.clone(), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
-    let r_all = handle_search_grep(&ctx, &json!({"terms": "onelakecatalog"}));
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "txt".to_string(), metrics: false, index_base: tmp.clone(), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)) };
+    let r_all = handle_search_grep(&ctx, &json!({"terms": "productcatalog"}));
     let o_all: Value = serde_json::from_str(&r_all.content[0].text).unwrap();
     assert_eq!(o_all["summary"]["totalFiles"], 2);
-    let r_sub = handle_search_grep(&ctx, &json!({"terms": "onelakecatalog", "dir": sub_a.to_string_lossy().to_string()}));
+    let r_sub = handle_search_grep(&ctx, &json!({"terms": "productcatalog", "dir": sub_a.to_string_lossy().to_string()}));
     assert!(!r_sub.is_error);
     let o_sub: Value = serde_json::from_str(&r_sub.content[0].text).unwrap();
     assert_eq!(o_sub["summary"]["totalFiles"], 1);
@@ -986,7 +998,7 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     let tmp = std::env::temp_dir().join("search_test_grep_reject");
     std::fs::create_dir_all(&tmp).unwrap();
     let index = ContentIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), file_token_counts: vec![], total_tokens: 0, extensions: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: tmp.clone(), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: tmp.clone(), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)) };
     let result = handle_search_grep(&ctx, &json!({"terms": "test", "dir": r"Z:\some\other\path"}));
     assert!(result.is_error);
     let _ = std::fs::remove_dir_all(&tmp);
@@ -1036,6 +1048,8 @@ fn test_response_truncation_triggers_on_large_result() {
         server_ext: "cs".to_string(),
         metrics: true,
         index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     let result = dispatch_tool(&ctx, "search_grep", &json!({
@@ -1092,6 +1106,8 @@ fn test_response_truncation_does_not_trigger_on_small_result() {
         server_ext: "cs".to_string(),
         metrics: true,
         index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "mytoken", "substring": false}));
@@ -1272,6 +1288,8 @@ fn test_search_grep_response_truncation_via_small_budget() {
         max_response_bytes: 2_000,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     let result = dispatch_tool(&ctx, "search_grep", &json!({
@@ -1350,7 +1368,7 @@ fn test_search_fast_dirs_only_and_files_only() {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)) };
 
     let result_dirs = handle_search_fast(&ctx, &json!({"pattern": "Models", "dirsOnly": true}));
     assert!(!result_dirs.is_error, "dirsOnly should not error: {}", result_dirs.content[0].text);
@@ -1441,6 +1459,8 @@ fn test_search_grep_sql_extension_filter() {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     let result = dispatch_tool(&ctx, "search_grep", &json!({
@@ -1512,6 +1532,8 @@ fn test_search_grep_phrase_search_with_show_lines() {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     let result = dispatch_tool(&ctx, "search_grep", &json!({
@@ -1620,6 +1642,8 @@ fn test_search_definitions_file_filter_slash_normalization() {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     let result_backslash = dispatch_tool(&ctx, "search_definitions", &json!({
@@ -1716,6 +1740,8 @@ fn test_search_grep_max_results_zero_means_unlimited() {
         max_response_bytes: 0,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     let result_unlimited = dispatch_tool(&ctx, "search_grep", &json!({
@@ -1787,6 +1813,8 @@ fn test_search_find_combined_parameters() {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     let result_count = dispatch_tool(&ctx, "search_find", &json!({
@@ -1943,6 +1971,8 @@ fn test_search_find_contents_mode() {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     // Search file contents for "magic_searchable_token" in .txt files
@@ -2185,6 +2215,8 @@ fn make_ranking_defs_ctx() -> HandlerContext {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     }
 }
 
@@ -2304,7 +2336,7 @@ fn test_search_fast_ranking_exact_stem_first() {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)) };
 
     let result = handle_search_fast(&ctx, &json!({"pattern": "UserService"}));
     assert!(!result.is_error, "search_fast should not error: {}", result.content[0].text);
@@ -2352,7 +2384,7 @@ fn test_search_fast_ranking_shorter_stem_first() {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)) };
 
     let result = handle_search_fast(&ctx, &json!({"pattern": "Order"}));
     assert!(!result.is_error);
@@ -2374,6 +2406,140 @@ fn test_search_fast_ranking_shorter_stem_first() {
     }
 
     cleanup_tmp(&tmp_dir);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Git handler cache tests
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Helper: create a HandlerContext with a populated GitHistoryCache.
+fn make_ctx_with_git_cache() -> HandlerContext {
+    use crate::git::cache::*;
+    use std::io::Cursor;
+
+    // Build a mock cache from git-log-style input
+    let log = concat!(
+        "COMMIT:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa␞1700000000␞alice@example.com␞Alice␞Initial commit\n",
+        "src/main.rs\n",
+        "Cargo.toml\n",
+        "\n",
+        "COMMIT:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb␞1700001000␞bob@example.com␞Bob␞Add feature\n",
+        "src/main.rs\n",
+        "src/lib.rs\n",
+        "\n",
+        "COMMIT:cccccccccccccccccccccccccccccccccccccccc␞1700002000␞alice@example.com␞Alice␞Fix bug\n",
+        "src/main.rs\n",
+        "\n",
+    );
+    let reader = Cursor::new(log.as_bytes());
+    let mut builder = GitHistoryCache::builder();
+    parse_git_log_stream(reader, &mut builder).expect("parse should succeed");
+    let cache = GitHistoryCache::from_builder(
+        builder,
+        "abc123def456abc123def456abc123def456abc1".to_string(),
+        "main".to_string(),
+    );
+
+    let mut ctx = make_empty_ctx();
+    *ctx.git_cache.write().unwrap() = Some(cache);
+    ctx.git_cache_ready = Arc::new(AtomicBool::new(true));
+    ctx
+}
+
+/// search_git_authors with populated cache returns non-empty firstChange and lastChange.
+#[test]
+fn test_git_authors_cached_has_first_and_last_change() {
+    let ctx = make_ctx_with_git_cache();
+    let result = dispatch_tool(&ctx, "search_git_authors", &json!({
+        "repo": ".",
+        "file": "src/main.rs"
+    }));
+    assert!(!result.is_error, "search_git_authors should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Should use cache path (hint contains "from cache")
+    let hint = output["summary"]["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("cache"), "Should use cache path, hint: {}", hint);
+
+    let authors = output["authors"].as_array().unwrap();
+    assert!(authors.len() >= 2, "Should have at least 2 authors, got {}", authors.len());
+
+    for author in authors {
+        let first = author["firstChange"].as_str().unwrap();
+        let last = author["lastChange"].as_str().unwrap();
+        assert!(!first.is_empty(), "firstChange should not be empty for author {}", author["name"]);
+        assert!(!last.is_empty(), "lastChange should not be empty for author {}", author["name"]);
+        // Verify date format (YYYY-MM-DD HH:MM:SS +0000)
+        assert!(first.len() > 10, "firstChange should be a full date, got: {}", first);
+        assert!(last.len() > 10, "lastChange should be a full date, got: {}", last);
+    }
+
+    // Alice: first commit at 1700000000, last at 1700002000
+    let alice = authors.iter().find(|a| a["name"] == "Alice").unwrap();
+    assert_ne!(alice["firstChange"], alice["lastChange"],
+        "Alice has commits at different times, firstChange should differ from lastChange");
+}
+
+/// search_git_history with populated cache returns commits from cache.
+#[test]
+fn test_git_history_cached_returns_commits() {
+    let ctx = make_ctx_with_git_cache();
+    let result = dispatch_tool(&ctx, "search_git_history", &json!({
+        "repo": ".",
+        "file": "src/main.rs",
+        "maxResults": 5
+    }));
+    assert!(!result.is_error, "search_git_history should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let hint = output["summary"]["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("cache"), "Should use cache path, hint: {}", hint);
+
+    let commits = output["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 3, "src/main.rs should have 3 commits");
+
+    // Verify commits are sorted newest first
+    let ts0 = commits[0]["date"].as_str().unwrap();
+    let ts2 = commits[2]["date"].as_str().unwrap();
+    assert!(ts0 > ts2, "Commits should be sorted newest first");
+}
+
+/// search_git_activity with populated cache returns activity from cache.
+#[test]
+fn test_git_activity_cached_returns_files() {
+    let ctx = make_ctx_with_git_cache();
+    let result = dispatch_tool(&ctx, "search_git_activity", &json!({
+        "repo": "."
+    }));
+    assert!(!result.is_error, "search_git_activity should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let hint = output["summary"]["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("cache"), "Should use cache path, hint: {}", hint);
+
+    let activity = output["activity"].as_array().unwrap();
+    assert_eq!(activity.len(), 3, "Should have 3 files in activity");
+}
+
+/// search_git_diff always uses CLI, never cache (cache has no patch data).
+#[test]
+fn test_git_diff_does_not_use_cache() {
+    let ctx = make_ctx_with_git_cache();
+    // search_git_diff with a fake repo will fail (no real git repo at "."),
+    // but the key test is that it does NOT use the cache path
+    let result = dispatch_tool(&ctx, "search_git_diff", &json!({
+        "repo": ".",
+        "file": "src/main.rs",
+        "maxResults": 1
+    }));
+    // It may succeed (if we're in a real git repo) or fail (if not),
+    // but if it succeeds, it should NOT have "(from cache)" in hint
+    if !result.is_error {
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let hint = output["summary"]["hint"].as_str().unwrap_or("");
+        assert!(!hint.contains("cache"),
+            "search_git_diff should never use cache, hint: {}", hint);
+    }
 }
 
 /// search_grep phrase mode: results sorted by number of occurrences descending.
@@ -2420,6 +2586,8 @@ fn test_search_grep_phrase_sort_by_occurrences() {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     let result = dispatch_tool(&ctx, "search_grep", &json!({

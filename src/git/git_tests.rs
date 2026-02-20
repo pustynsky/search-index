@@ -1,0 +1,254 @@
+//! Unit tests for the git history module (CLI-based implementation).
+//!
+//! Tests run against the search repository itself (which has a `.git/` directory).
+//! Requires `git` to be in PATH.
+
+use super::*;
+
+// ─── Date validation tests ──────────────────────────────────────────
+
+#[test]
+fn test_validate_date_valid() {
+    assert!(validate_date("2025-01-15").is_ok());
+}
+
+#[test]
+fn test_validate_date_epoch() {
+    assert!(validate_date("1970-01-01").is_ok());
+}
+
+#[test]
+fn test_validate_date_invalid_format() {
+    assert!(validate_date("not-a-date").is_err());
+}
+
+#[test]
+fn test_validate_date_invalid_month() {
+    assert!(validate_date("2025-13-01").is_err());
+}
+
+#[test]
+fn test_validate_date_invalid_day() {
+    assert!(validate_date("2025-01-32").is_err());
+}
+
+#[test]
+fn test_validate_date_too_short() {
+    assert!(validate_date("2025-1-1").is_err());
+}
+
+// ─── next_day tests ─────────────────────────────────────────────────
+
+#[test]
+fn test_next_day_normal() {
+    assert_eq!(next_day("2025-01-15"), "2025-01-16");
+}
+
+#[test]
+fn test_next_day_end_of_month() {
+    assert_eq!(next_day("2025-01-31"), "2025-02-01");
+}
+
+#[test]
+fn test_next_day_end_of_year() {
+    assert_eq!(next_day("2025-12-31"), "2026-01-01");
+}
+
+#[test]
+fn test_next_day_leap_year_feb() {
+    assert_eq!(next_day("2024-02-28"), "2024-02-29");
+    assert_eq!(next_day("2024-02-29"), "2024-03-01");
+}
+
+#[test]
+fn test_next_day_non_leap_feb() {
+    assert_eq!(next_day("2025-02-28"), "2025-03-01");
+}
+
+// ─── Date filter tests ──────────────────────────────────────────────
+
+#[test]
+fn test_parse_date_filter_none() {
+    let filter = parse_date_filter(None, None, None).unwrap();
+    assert!(filter.from_date.is_none());
+    assert!(filter.to_date.is_none());
+}
+
+#[test]
+fn test_parse_date_filter_from_only() {
+    let filter = parse_date_filter(Some("2025-01-01"), None, None).unwrap();
+    assert_eq!(filter.from_date.as_deref(), Some("2025-01-01"));
+    assert!(filter.to_date.is_none());
+}
+
+#[test]
+fn test_parse_date_filter_to_only() {
+    let filter = parse_date_filter(None, Some("2025-12-31"), None).unwrap();
+    assert!(filter.from_date.is_none());
+    assert_eq!(filter.to_date.as_deref(), Some("2025-12-31"));
+}
+
+#[test]
+fn test_parse_date_filter_exact_date_overrides() {
+    let filter = parse_date_filter(Some("2024-01-01"), Some("2024-12-31"), Some("2025-06-15")).unwrap();
+    // date should override from/to
+    assert_eq!(filter.from_date.as_deref(), Some("2025-06-15"));
+    assert_eq!(filter.to_date.as_deref(), Some("2025-06-15"));
+}
+
+#[test]
+fn test_parse_date_filter_invalid_date() {
+    let result = parse_date_filter(Some("bad"), None, None);
+    assert!(result.is_err());
+}
+
+// ─── File history tests (using search repo itself) ──────────────────
+
+#[test]
+fn test_file_history_returns_commits() {
+    let filter = DateFilter { from_date: None, to_date: None };
+    let result = file_history(".", "Cargo.toml", &filter, false, 10);
+    assert!(result.is_ok(), "Should succeed on own repo: {:?}", result.err());
+    let (commits, total) = result.unwrap();
+    assert!(!commits.is_empty(), "Cargo.toml should have commit history");
+    assert!(total >= commits.len(), "Total should be >= returned commits");
+}
+
+#[test]
+fn test_file_history_nonexistent_file() {
+    let filter = DateFilter { from_date: None, to_date: None };
+    let result = file_history(".", "nonexistent_file_xyz_abc_123.rs", &filter, false, 50);
+    assert!(result.is_ok(), "Should succeed even for nonexistent file");
+    let (commits, total) = result.unwrap();
+    assert!(commits.is_empty(), "Nonexistent file should have no commits");
+    assert_eq!(total, 0);
+}
+
+#[test]
+fn test_file_history_bad_repo() {
+    let filter = DateFilter { from_date: None, to_date: None };
+    let result = file_history("C:\\nonexistent\\repo\\path\\xyz", "file.rs", &filter, false, 50);
+    assert!(result.is_err(), "Should fail for nonexistent repo");
+}
+
+#[test]
+fn test_file_history_max_results_limits_output() {
+    let filter = DateFilter { from_date: None, to_date: None };
+    let result = file_history(".", "Cargo.toml", &filter, false, 2);
+    assert!(result.is_ok());
+    let (commits, total) = result.unwrap();
+    assert!(commits.len() <= 2, "Should return at most 2 commits");
+    assert!(total >= commits.len(), "Total should count all matching commits");
+}
+
+#[test]
+fn test_file_history_with_diff() {
+    let filter = DateFilter { from_date: None, to_date: None };
+    let result = file_history(".", "Cargo.toml", &filter, true, 3);
+    assert!(result.is_ok());
+    let (commits, _) = result.unwrap();
+    assert!(!commits.is_empty());
+    // At least one commit should have a non-empty patch
+    let has_patch = commits.iter().any(|c| c.patch.as_ref().is_some_and(|p| !p.is_empty()));
+    assert!(has_patch, "Diff mode should include patch text");
+}
+
+#[test]
+fn test_file_history_date_filter_narrows_results() {
+    let no_filter = DateFilter { from_date: None, to_date: None };
+    let (_, all_total) = file_history(".", "Cargo.toml", &no_filter, false, 0).unwrap();
+
+    // Filter to a very old date range that likely has no commits
+    let narrow_filter = parse_date_filter(Some("1970-01-01"), Some("1970-01-02"), None).unwrap();
+    let (narrow_commits, narrow_total) = file_history(".", "Cargo.toml", &narrow_filter, false, 0).unwrap();
+
+    assert!(narrow_total <= all_total, "Narrow filter should return <= total commits");
+    assert!(narrow_commits.is_empty(), "1970 date range should have no commits");
+}
+
+// ─── Top authors tests ──────────────────────────────────────────────
+
+#[test]
+fn test_top_authors_returns_ranked() {
+    let filter = DateFilter { from_date: None, to_date: None };
+    let result = top_authors(".", "Cargo.toml", &filter, 10);
+    assert!(result.is_ok(), "Should succeed: {:?}", result.err());
+    let (authors, total_commits, total_authors) = result.unwrap();
+    assert!(!authors.is_empty(), "Should have at least one author");
+    assert!(total_commits > 0);
+    assert!(total_authors > 0);
+
+    // Verify ranking: each author should have >= commits than the next
+    for i in 1..authors.len() {
+        assert!(
+            authors[i - 1].commit_count >= authors[i].commit_count,
+            "Authors should be ranked by commit count (descending)"
+        );
+    }
+}
+
+#[test]
+fn test_top_authors_nonexistent_file() {
+    let filter = DateFilter { from_date: None, to_date: None };
+    let result = top_authors(".", "nonexistent_xyz_abc_123.rs", &filter, 10);
+    assert!(result.is_ok());
+    let (authors, total_commits, _) = result.unwrap();
+    assert!(authors.is_empty());
+    assert_eq!(total_commits, 0);
+}
+
+#[test]
+fn test_top_authors_limits_results() {
+    let filter = DateFilter { from_date: None, to_date: None };
+    let result = top_authors(".", "Cargo.toml", &filter, 1);
+    assert!(result.is_ok());
+    let (authors, _, _) = result.unwrap();
+    assert!(authors.len() <= 1, "Should return at most 1 author");
+}
+
+// ─── Repo activity tests ────────────────────────────────────────────
+
+#[test]
+fn test_repo_activity_returns_files() {
+    // Use a broad date range
+    let filter = parse_date_filter(Some("2020-01-01"), Some("2030-12-31"), None).unwrap();
+    let result = repo_activity(".", &filter);
+    assert!(result.is_ok(), "Should succeed: {:?}", result.err());
+    let (files, commits_processed) = result.unwrap();
+    assert!(!files.is_empty(), "Should have at least one file with changes");
+    assert!(commits_processed > 0, "Should have processed some commits");
+}
+
+#[test]
+fn test_repo_activity_empty_date_range() {
+    let filter = parse_date_filter(Some("1970-01-01"), Some("1970-01-02"), None).unwrap();
+    let result = repo_activity(".", &filter);
+    assert!(result.is_ok());
+    let (files, _) = result.unwrap();
+    assert!(files.is_empty(), "Very old date range should have no activity");
+}
+
+#[test]
+fn test_repo_activity_bad_repo() {
+    let filter = DateFilter { from_date: None, to_date: None };
+    let result = repo_activity("C:\\nonexistent\\repo\\xyz", &filter);
+    assert!(result.is_err(), "Should fail for nonexistent repo");
+}
+
+// ─── Commit info field tests ────────────────────────────────────────
+
+#[test]
+fn test_commit_info_has_all_fields() {
+    let filter = DateFilter { from_date: None, to_date: None };
+    let (commits, _) = file_history(".", "Cargo.toml", &filter, false, 1).unwrap();
+    assert!(!commits.is_empty());
+
+    let commit = &commits[0];
+    assert!(!commit.hash.is_empty(), "Hash should not be empty");
+    assert!(commit.hash.len() >= 40, "Hash should be full SHA, got len={}", commit.hash.len());
+    assert!(!commit.date.is_empty(), "Date should not be empty");
+    assert!(!commit.author_name.is_empty(), "Author name should not be empty");
+    assert!(!commit.author_email.is_empty(), "Author email should not be empty");
+    assert!(!commit.message.is_empty(), "Message should not be empty");
+    assert!(commit.patch.is_none(), "Patch should be None when include_diff=false");
+}

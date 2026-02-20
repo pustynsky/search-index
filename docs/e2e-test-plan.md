@@ -701,9 +701,10 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 **Expected:**
 
-- stdout: JSON-RPC response with 9 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_reindex_definitions`, `search_definitions`, `search_callers`, `search_help`
+- stdout: JSON-RPC response with 13 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_reindex_definitions`, `search_definitions`, `search_callers`, `search_help`, `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`
 - Each tool has `name`, `description`, `inputSchema`
 - `search_definitions` inputSchema includes `includeBody` (boolean), `maxBodyLines` (integer), and `maxTotalBodyLines` (integer) parameters
+- Git tools have `repo` (required) and date filter parameters
 
 **Validates:** Tool discovery, tool schema generation, `search_definitions` schema includes body-related parameters.
 
@@ -2122,8 +2123,8 @@ if ($failed -gt 0) { exit 1 }
 
 ### T30: `serve` — MCP search_grep with subdirectory `dir` parameter
 
-**Scenario:** When the MCP server is started with `--dir C:\Repos\Shared`, a `search_grep` call
-with `dir` set to a subdirectory (e.g., `C:\Repos\Shared\Sql\CloudBI`) should succeed and
+**Scenario:** When the MCP server is started with `--dir C:\Repos\MainProject`, a `search_grep` call
+with `dir` set to a subdirectory (e.g., `C:\Repos\MainProject\Backend\Services`) should succeed and
 return only files within that subdirectory. Previously this returned an error.
 
 **Command:**
@@ -4530,3 +4531,660 @@ lines) in descending order — files with more matches appear first.
 
 - Response is an error (`isError: true`)
 - Error message recommends `search_reindex_definitions`
+
+
+---
+
+## Git History Tools Tests
+
+### T-GIT-01: `serve` — search_git_history returns file commit history
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":5}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `commits` array (non-empty)
+- Each commit has `hash`, `date`, `author`, `email`, `message`
+- `summary.totalCommits` ≥ 1
+- `summary.returned` ≤ 5
+- No `patch` field (history mode, not diff)
+
+**Validates:** `search_git_history` tool with maxResults limit.
+
+**Status:** ✅ Covered by unit tests: `test_file_history_returns_commits`, `test_file_history_max_results_limits_output`, `test_commit_info_has_all_fields`
+
+---
+
+### T-GIT-02: `serve` — search_git_diff returns patches
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_diff","arguments":{"repo":".","file":"Cargo.toml","maxResults":3}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `commits` array (non-empty)
+- Each commit has `patch` field (non-empty string with +/- lines)
+- Patches truncated to ~200 lines per commit
+- `summary.tool` = `"search_git_diff"`
+
+**Validates:** `search_git_diff` tool returns actual diff content.
+
+**Status:** ✅ Covered by unit tests: `test_file_history_with_diff`
+
+---
+
+### T-GIT-03: `serve` — search_git_authors returns ranked authors
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_authors","arguments":{"repo":".","file":"Cargo.toml","top":5}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `authors` array (non-empty)
+- Authors ranked by commit count (descending)
+- Each author has `rank`, `name`, `email`, `commits`, `firstChange`, `lastChange`
+- `summary.totalCommits` > 0
+- `summary.totalAuthors` > 0
+
+**Validates:** `search_git_authors` tool with top limit.
+
+**Status:** ✅ Covered by unit tests: `test_top_authors_returns_ranked`, `test_top_authors_limits_results`
+
+---
+
+### T-GIT-04: `serve` — search_git_activity returns repo-wide changes
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_activity","arguments":{"repo":".","from":"2020-01-01","to":"2030-12-31"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `activity` array (non-empty)
+- Each entry has `path`, `commits` array, `commitCount`
+- `summary.filesChanged` > 0
+- `summary.commitsProcessed` > 0
+- Results sorted by commit count descending
+
+**Validates:** `search_git_activity` tool with date range.
+
+**Status:** ✅ Covered by unit tests: `test_repo_activity_returns_files`
+
+---
+
+### T-GIT-05: `serve` — search_git_history with date filter
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","date":"1970-01-01"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with empty `commits` array (no commits on that date)
+- `summary.totalCommits` = 0
+
+**Validates:** Date filtering narrows results correctly.
+
+**Status:** ✅ Covered by unit tests: `test_file_history_date_filter_narrows_results`, `test_repo_activity_empty_date_range`
+
+---
+
+### T-GIT-06: `serve` — search_git_history missing required parameter
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":"."}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `isError: true`
+- Error message: "Missing required parameter: file"
+
+**Validates:** Required parameter validation for git tools.
+
+---
+
+### T-GIT-07: `serve` — search_git_history bad repo path
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":"/nonexistent/repo","file":"main.rs"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `isError: true`
+- Error message indicates repository not found
+
+**Validates:** Graceful error handling for invalid repo paths.
+
+**Status:** ✅ Covered by unit tests: `test_file_history_bad_repo`, `test_repo_activity_bad_repo`
+
+---
+
+### T-GIT-08: `serve` — Git tools available without --definitions or --git flag
+
+**Scenario:** Git tools should always appear in `tools/list` regardless of `--definitions` flag.
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- `tools` array contains 13 entries (9 original + 4 git)
+- Git tools present: `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`
+- No `--git` flag needed
+
+**Validates:** Git tools are always available, no opt-in needed.
+
+**Status:** ✅ Covered by unit tests: `test_handle_tools_list` (13 tools), `test_tool_definitions_count` (13 tools)
+
+
+## Git History Cache — Unit Tests (PR 2a)
+
+The following test scenarios are covered by unit tests in
+[`cache_tests.rs`](../src/git/cache_tests.rs). They validate the core git history cache module
+without requiring a running MCP server or real git repository. All tests use mock data.
+
+### T-CACHE-01: Parser — Multi-commit git log output
+
+**Scenario:** Parse a mock git log with 3 commits, 2 authors, and 3 files. Verify commit count,
+author deduplication, file_commits mapping, and subject pool.
+
+**Expected:**
+- 3 commits parsed
+- 2 unique authors (Alice appears twice, deduplicated)
+- `src/main.rs` has 3 commit refs, `Cargo.toml` has 1, `src/lib.rs` has 1
+- Commit fields (hash, timestamp, author, subject) are correctly resolved
+
+**Unit tests:** `test_parser_multi_commit`, `test_parser_commit_fields`
+
+---
+
+### T-CACHE-02: Parser — Edge cases
+
+**Scenario:** Various parser edge cases including empty input, empty subject, subject containing
+the field separator `␞`, empty file list (merge commit), merge commit with 100 files, malformed
+lines, and bad hash values.
+
+**Expected:**
+- Empty input → 0 commits
+- Empty subject → preserved as ""
+- Subject with `␞` → rejoined via `fields[4..].join(sep)`
+- Empty file list → commit recorded, no file_commits entries
+- 100 files → all recorded
+- Malformed/bad hash lines → skipped silently, subsequent good commits still parsed
+
+**Unit tests:** `test_parser_empty_input`, `test_parser_empty_subject`, `test_parser_subject_with_field_sep`,
+`test_parser_empty_file_list`, `test_parser_merge_commit_many_files`, `test_parser_malformed_line_skipped`,
+`test_parser_bad_hash_skipped`
+
+---
+
+### T-CACHE-03: Path normalization
+
+**Scenario:** The `normalize_path()` function handles Windows/Unix path normalization.
+
+**Expected:**
+- `"src\\main.rs"` → `"src/main.rs"` (backslash → forward slash)
+- `"./src/main.rs"` → `"src/main.rs"` (strip `./`)
+- `""` → `""` (empty preserved)
+- `"."` → `""` (dot = root)
+- `"src/"` → `"src"` (strip trailing `/`)
+- `"src//main.rs"` → `"src/main.rs"` (collapse `//`)
+- `"  src/main.rs  "` → `"src/main.rs"` (trim whitespace)
+
+**Unit tests:** `test_normalize_path_backslash`, `test_normalize_path_dot_slash`, `test_normalize_path_empty`,
+`test_normalize_path_dot`, `test_normalize_path_trailing_slash`, `test_normalize_path_double_slash`,
+`test_normalize_path_whitespace`, `test_normalize_path_mixed`, `test_normalize_path_multiple_dot_slash`
+
+---
+
+### T-CACHE-04: Query — File history with filters
+
+**Scenario:** `query_file_history()` returns commits for a file, sorted by timestamp descending,
+respecting `maxResults` and `from`/`to` date filters.
+
+**Expected:**
+- Basic lookup: 3 commits for `src/main.rs`, sorted newest first
+- `maxResults=2`: returns 2 newest commits
+- `from` filter: excludes commits before timestamp
+- `to` filter: excludes commits after timestamp
+- `from+to`: returns only commits within range
+- Nonexistent file: empty result
+- Backslash/`./` paths: normalized before lookup (same results)
+
+**Unit tests:** `test_query_file_history_basic`, `test_query_file_history_max_results`,
+`test_query_file_history_from_date_filter`, `test_query_file_history_to_date_filter`,
+`test_query_file_history_from_to_filter`, `test_query_file_history_nonexistent_file`,
+`test_query_file_history_commit_info_fields`, `test_query_with_backslash_path`, `test_query_with_dot_slash_path`
+
+---
+
+### T-CACHE-05: Query — Authors aggregation
+
+**Scenario:** `query_authors()` aggregates authors for a file or directory, deduplicating commits
+that touch multiple files in the same directory.
+
+**Expected:**
+- File: 2 authors for `src/main.rs` (Alice: 2 commits, Bob: 1)
+- Directory: `src` matches `src/main.rs` and `src/lib.rs`, deduplicates shared commits
+- Empty path: matches all files
+
+**Unit tests:** `test_query_authors_single_file`, `test_query_authors_directory`, `test_query_authors_empty_path_matches_all`
+
+---
+
+### T-CACHE-06: Query — Activity with path prefix matching
+
+**Scenario:** `query_activity()` returns files changed in a directory, using correct prefix matching
+`== path || starts_with(path + "/")` to prevent false positives.
+
+**Expected:**
+- `src` matches `src/main.rs` and `src/lib.rs` but NOT `src2/other.rs`
+- Date filter narrows results
+- Empty path matches all files
+- Results sorted by `last_modified` descending
+
+**Unit tests:** `test_query_activity_directory_prefix`, `test_query_activity_prefix_no_false_positive`,
+`test_query_activity_date_filter`, `test_query_activity_empty_path_matches_all`,
+`test_query_activity_authors_list`, `test_query_activity_exact_file_match`,
+`test_query_activity_sorted_by_last_modified`
+
+---
+
+### T-CACHE-07: Cache validity
+
+**Scenario:** `is_valid_for()` checks HEAD hash and format version.
+
+**Expected:**
+- Matching HEAD hash → valid
+- Different HEAD hash → invalid
+- Mismatched format version → invalid
+
+**Unit tests:** `test_is_valid_for_matching_head`, `test_is_valid_for_non_matching_head`,
+`test_is_valid_for_checks_format_version`
+
+---
+
+### T-CACHE-08: Detect default branch
+
+**Scenario:** `detect_default_branch()` tries main, master, develop, trunk in order.
+
+**Expected:** Requires real git repo — test marked `#[ignore]`.
+
+**Unit test:** `test_detect_default_branch` (ignored)
+
+---
+
+### T-CACHE-09: CommitMeta struct size
+
+**Scenario:** Verify `CommitMeta` is compact (close to 38-byte design target).
+
+**Expected:** Size ≤ 48 bytes (actual: 40 bytes due to 8-byte alignment from `i64` field).
+
+**Unit test:** `test_commit_meta_size`
+
+---
+
+### T-CACHE-10: Serialization roundtrip
+
+**Scenario:** `GitHistoryCache` survives bincode serialization and LZ4-compressed serialization
+(reusing `save_compressed()`/`load_compressed()` from `src/index.rs`).
+
+**Expected:**
+- Bincode roundtrip preserves all fields
+- LZ4 compressed roundtrip preserves all fields
+- Queries work correctly after deserialization
+
+**Unit tests:** `test_cache_serialization_roundtrip`, `test_cache_lz4_compressed_roundtrip`
+
+---
+
+### T-CACHE-11: Author deduplication
+
+**Scenario:** Same author (name + email) across multiple commits is stored once in the author pool.
+
+**Expected:** 2 commits by same author → 1 entry in `authors`, both commits share `author_idx`.
+
+**Unit test:** `test_author_deduplication`
+
+---
+
+### T-CACHE-FALLBACK: Git handlers fall back to CLI when cache is None (PR 2b)
+
+**Scenario:** When the MCP server starts without a git cache (default state until PR 2c spawns the
+background builder), all git history tools (`search_git_history`, `search_git_authors`,
+`search_git_activity`) transparently fall back to the CLI path. No regression from PR 2b changes.
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":3}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `commits` array (non-empty, from CLI fallback)
+- `summary.hint` does NOT contain `"(from cache)"` (cache is not populated)
+- Same response format as T-GIT-01
+
+**Validates:** Cache-or-fallback routing with `git_cache: None` falls through to existing CLI code
+with zero behavioral regression.
+
+**Status:** ✅ Covered by existing git handler tests (all run with `git_cache: None`) + T-GIT-01 through T-GIT-08.
+
+---
+
+### T-CACHE-ROUTING: Git handlers use cache when populated (PR 2b)
+
+**Scenario:** When the git cache is populated (simulated by setting `git_cache_ready` to true and
+inserting a cache), `search_git_history` and `search_git_authors` use the cache for sub-millisecond
+responses. `search_git_diff` always uses CLI (no cache for patches).
+
+**Expected (when cache is available):**
+
+- `search_git_history`: response `summary.hint` contains `"(from cache)"`
+- `search_git_authors`: response `summary.hint` contains `"(from cache)"`
+- `search_git_activity`: response `summary.hint` contains `"(from cache)"`
+- `search_git_diff`: response does NOT contain `"(from cache)"` (always CLI)
+- `summary.elapsedMs` < 10 for cache responses (vs 2000+ for CLI)
+
+**Note:** Full integration test requires PR 2c (background cache builder). Until then, this
+behavior is verified by reading the handler code logic.
+
+---
+
+### T-CACHE-BACKGROUND: Git cache background build and disk persistence (PR 2c)
+
+**Scenario:** When the MCP server starts with `--dir` pointing to a git repository, a background
+thread builds the git history cache, saves it to disk (`<prefix>_<hash>.git-history`), and publishes
+it to the `Arc<RwLock<Option<GitHistoryCache>>>`. On subsequent server restarts, the cache is loaded
+from disk (~100 ms) instead of rebuilt (~59 sec). HEAD validation ensures the disk cache matches
+the current branch HEAD.
+
+**Command (first run — no cache on disk):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":3}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir . --ext rs
+```
+
+**Expected (first run):**
+
+- stderr: `[git-cache] Building git cache in background...`
+- stderr: `[git-cache] Hint: run 'git commit-graph write --reachable' to speed up...` (if no commit-graph)
+- stderr: `[git-cache] Built cache: N commits, M authors, K files, subjects=X bytes`
+- stderr: `[git-history] Saved X.X MB (compressed) in X.XXs to ...git-history`
+- stderr: `Git cache ready` with commit and file counts
+- A `.git-history` file is created in the index directory
+
+**Command (second run — cache loaded from disk):**
+
+```powershell
+echo $msgs | cargo run -- serve --dir . --ext rs
+```
+
+**Expected (second run):**
+
+- stderr: `[git-history] Loaded X.X MB in X.XXXs`
+- stderr: `Git cache loaded from disk (HEAD matches)` with commit and file counts
+- No `Building git cache` message (cache was loaded from disk)
+- Server starts faster (~100 ms cache load vs ~59 sec full rebuild)
+
+**Command (after git pull — HEAD changed):**
+
+```powershell
+# Pull new commits, then restart server
+git pull
+echo $msgs | cargo run -- serve --dir . --ext rs
+```
+
+**Expected (HEAD changed):**
+
+- stderr: `HEAD changed (fast-forward), rebuilding git cache` or `HEAD changed (not ancestor), full rebuild`
+- Cache is rebuilt and saved to disk
+- New cache reflects the updated HEAD
+
+**Validates:** Background cache build thread, disk persistence (save_to_disk/load_from_disk), HEAD validation, commit-graph hint, incremental detection (ancestor check).
+
+**Status:** ✅ Covered by unit tests: `test_save_load_disk_roundtrip`, `test_save_to_disk_atomic_write`, `test_load_from_disk_missing_file`, `test_load_from_disk_corrupt_file`, `test_load_from_disk_wrong_format_version`, `test_cache_path_for_extension`, `test_cache_path_for_deterministic`
+
+---
+
+### T-CACHE-AUTHORS-TIMESTAMPS: Authors query returns first and last commit timestamps
+
+**Scenario:** `query_authors()` returns both `first_commit_timestamp` and `last_commit_timestamp` for each author, enabling the cached `search_git_authors` handler to populate both `firstChange` and `lastChange` fields.
+
+**Expected:**
+- Alice with commits at 1700000000 and 1700002000: `first_commit_timestamp=1700000000`, `last_commit_timestamp=1700002000`
+- Bob with single commit at 1700001000: `first_commit_timestamp=last_commit_timestamp=1700001000`
+
+**Unit test:** `test_query_authors_timestamps`
+
+---
+
+### T-CACHE-PROGRESS: Git cache build emits progress logging
+
+**Scenario:** When building the git cache from scratch for a large repo, the background thread emits periodic progress messages to stderr so the user knows it's still working.
+
+**Expected:**
+- stderr: `[git-cache] Initializing for <dir>...` (immediately on thread start)
+- stderr: `[git-cache] Detected branch: <branch>` (after detect_default_branch)
+- stderr: `[git-cache] Building cache for branch '<branch>' (this may take a few minutes for large repos)...`
+- stderr: `[git-cache] Progress: 10000 commits parsed (X.Xs elapsed)...` (every 10K commits during build)
+- stderr: `[git-cache] Ready: N commits, M files in X.Xs`
+
+**Validates:** User-facing progress indication during long git cache builds.
+
+---
+
+### T-CACHE-GIT-ROUTING: Git cache routing — search_git_history returns commits (E2E)
+
+**Scenario:** Verify that `search_git_history` works end-to-end through the MCP server, regardless of whether the cache is ready or the CLI fallback is used. This confirms the cache routing code doesn't break existing git history functionality.
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":2}}}'
+) -join "`n"
+echo $msgs | search serve --dir . --ext rs
+```
+
+**Expected:**
+
+- JSON-RPC response (id=5) contains `commits` field
+- Response may come from cache or CLI fallback — both are valid
+- No errors or crashes
+
+**Validates:** Cache routing code in git handlers does not break existing search_git_history functionality.
+
+**Automated:** Test T-GIT-CACHE in [`e2e-test.ps1`](../e2e-test.ps1)
+
+---
+
+### T-CACHE-13: Bad timestamp parsing — commit skipped
+
+**Scenario:** When a commit line in git log output has a non-numeric timestamp (e.g., `not_a_number`), the parser should skip that commit and continue parsing subsequent commits. File paths listed after the bad commit should NOT be associated with any commit.
+
+**Expected:**
+- The commit with bad timestamp is skipped
+- Files listed after the bad commit are NOT in `file_commits`
+- Subsequent valid commits are parsed normally
+
+**Unit test:** `test_parser_bad_timestamp_skipped`
+
+---
+
+### T-CACHE-14: Author pool overflow boundary
+
+**Scenario:** The author pool uses `u16` indices, limiting the maximum number of unique authors to 65535. When the 65536th unique author is encountered, `intern_author()` returns an error which propagates through `parse_git_log_stream()`. Exactly 65535 unique authors should succeed.
+
+**Expected:**
+- 65535 unique authors: parsing succeeds, cache has 65535 authors
+- 65536 unique authors: parsing returns error containing "Too many unique authors"
+
+**Unit tests:** `test_author_pool_overflow_via_parser`, `test_author_pool_boundary_65535_succeeds`
+
+---
+
+### T-CACHE-15: cache_path_for() different directories → different paths
+
+**Scenario:** `cache_path_for()` produces different cache file paths for different input directories.
+
+**Expected:**
+- `cache_path_for("ProjectA")` ≠ `cache_path_for("ProjectB")`
+- Both have `.git-history` extension
+
+**Unit test:** `test_cache_path_for_different_dirs_produce_different_paths`
+
+---
+
+### T-CACHE-16: Integration test — build() with real temp git repo
+
+**Scenario:** End-to-end test for `GitHistoryCache::build()` using a real git repository created in a temp directory. Creates files, makes commits, then verifies the cache correctly reflects the commit history.
+
+**Expected:**
+- 2 commits in cache
+- 1 author ("Test")
+- `file_a.txt` has 2 commit refs, `file_b.txt` has 1
+- Query methods work correctly on the built cache
+
+**Unit test:** `test_build_with_real_git_repo` (marked `#[ignore]` — requires git CLI)
+
+---
+
+### T-CACHE-17: Date boundary — query_file_history exact-day filter
+
+**Scenario:** A commit at `2024-12-16 17:28:32 UTC` (timestamp 1734370112) should be found when querying with the exact date range `[2024-12-16 00:00:00, 2024-12-16 23:59:59]` UTC, and should NOT be found when querying with the wrong year `[2025-12-16 00:00:00, 2025-12-16 23:59:59]`.
+
+**Expected:**
+- `from=1734307200, to=1734393599` (2024-12-16 range) → 1 commit found
+- `from=1765843200, to=1765929599` (2025-12-16 range) → 0 commits found
+- `query_activity` and `query_file_history` return consistent results for the same date range
+
+**Unit tests:** `test_query_file_history_exact_date_boundary`, `test_query_file_history_wrong_year_returns_empty`, `test_query_activity_vs_file_history_consistency`
+
+---
+
+### T-CACHE-18: Path case sensitivity — HashMap exact match
+
+**Scenario:** Git stores file paths case-sensitively. `query_file_history()` uses HashMap exact lookup, so `src/Helpers/File.cs` ≠ `src/helpers/File.cs`. This is by-design behavior, not a bug.
+
+**Expected:**
+- Exact case match finds the commit
+- Case-mismatched path returns 0 results
+
+**Unit test:** `test_query_file_history_path_case_sensitivity`
+
+---
+
+### T-CACHE-19: Authors query — timestamps always non-zero
+
+**Scenario:** `query_authors()` should always return non-zero `first_commit_timestamp` and `last_commit_timestamp` for files that have commits.
+
+**Expected:**
+- Multi-commit author: `first_commit_timestamp` = earliest, `last_commit_timestamp` = latest
+- Single-commit author: `first_commit_timestamp == last_commit_timestamp`
+- Both values > 0
+
+**Unit tests:** `test_query_authors_first_last_timestamps_nonzero`, `test_query_authors_single_commit_timestamps_equal`
+
+---
+
+### T-GIT-DATE-UTC: CLI date filtering uses UTC
+
+**Scenario:** The `add_date_args()` function appends `T00:00:00Z` to date strings passed to git's `--after`/`--before` flags, ensuring UTC interpretation regardless of local timezone.
+
+**Expected:**
+- `--after=2025-12-16T00:00:00Z` (not `--after=2025-12-16`)
+- `--before=2025-12-17T00:00:00Z` (not `--before=2025-12-17`)
+- CLI behavior matches cache behavior (both use UTC)
+
+**Unit tests:** `test_date_2024_12_16_start`, `test_date_2025_12_16_start`, `test_commit_1734370112_is_2024_not_2025`, `test_format_timestamp_known_value`
+
+---
+
+### T-CACHE-12: Hex hash conversion
+
+**Scenario:** SHA-1 hex string ↔ `[u8; 20]` byte array conversion.
+
+**Expected:**
+- Roundtrip preserves value
+- Mixed-case hex → lowercase on output
+- Invalid length/chars → Err
+
+**Unit tests:** `test_hex_to_bytes_roundtrip`, `test_hex_to_bytes_mixed_case`,
+`test_hex_to_bytes_invalid_length`, `test_hex_to_bytes_invalid_chars`

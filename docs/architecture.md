@@ -29,6 +29,7 @@ graph TB
         CI[ContentIndex<br/>.word-search]
         TRI[TrigramIndex<br/>in .word-search]
         DI[DefinitionIndex<br/>.code-structure]
+        GC[GitHistoryCache<br/>.git-history]
     end
 
     subgraph MCP["MCP Server Layer"]
@@ -50,24 +51,27 @@ graph TB
     SERVE --> PROTO --> HAND
     HAND --> CI
     HAND --> DI
+    HAND --> GC
     WATCH --> CI
     WATCH --> DI
     FI --> DISK
     CI --> DISK
     DI --> DISK
+    GC --> DISK
 ```
 
 ## Component Architecture
 
 ### 1. Index Layer
 
-Three independent index types, each optimized for a different query pattern:
+Three independent index types plus a git history cache, each optimized for a different query pattern:
 
 | Index             | File    | Data Structure                  | Lookup                  | Purpose                  |
 | ----------------- | ------- | ------------------------------- | ----------------------- | ------------------------ |
 | `FileIndex`       | `.file-list`  | `Vec<FileEntry>`                | O(n) in-memory scan (~35ms / 100K files) | File name search         |
 | `ContentIndex`    | `.word-search` | `HashMap<String, Vec<Posting>>` + `TrigramIndex` | O(1) per token, O(1) substring via trigrams | Full-text content search + substring search |
 | `DefinitionIndex` | `.code-structure` | Multi-index `HashMap` set       | O(1) per name/kind/attr | Structural code search   |
+| `GitHistoryCache` | `.git-history` | `HashMap<String, Vec<u32>>` + commit/author pools | O(1) per file path | Git history queries (sub-millisecond) |
 
 All indexes are:
 
@@ -218,7 +222,49 @@ Rather than performing complex incremental updates to the trigram index on every
 
 This keeps the watcher fast (no O(n) index shifting) while amortizing the trigram rebuild cost.
 
-### 5. MCP Server
+### 5. Git History Cache
+
+Background-built compact in-memory cache for sub-millisecond git history queries. Replaces 2–6 sec CLI calls with HashMap lookups when the cache is ready.
+
+```
+Arc<RwLock<Option<GitHistoryCache>>>
+├── None → cache not ready, fallback to CLI (git log)
+└── Some(cache) → sub-millisecond queries
+```
+
+**Key properties:**
+
+- **Background build** — spawned in a separate thread on server startup (same pattern as content/definition index). Does not block the event loop.
+- **Build-then-swap** — new cache is built in a separate allocation (~59 sec for 50K commits), then swapped in under a write lock in microseconds (pointer swap)
+- **CLI fallback** — while the cache is building, all git history queries transparently fall back to CLI `git log` commands (Phase 1 behavior, zero regression)
+- **Disk persistence** — saved to `.git-history` file (bincode + LZ4, same format as `.word-search` and `.code-structure`). ~100 ms load on subsequent starts vs ~59 sec rebuild
+- **HEAD validation** — on startup, checks if cached HEAD matches current HEAD. If HEAD changed (fast-forward) → rebuild; if force push/rebase → rebuild; if repo re-cloned → rebuild
+- **Compact representation** — ~7.6 MB RAM for 50K commits × 65K files:
+  - `CommitMeta`: 40 bytes per commit (`[u8;20]` hash, `i64` timestamp, `u16` author index, `u32` subject offset/length)
+  - Author pool: deduplicated `(name, email)` pairs
+  - Subject pool: concatenated commit subjects
+  - `file_commits: HashMap<String, Vec<u32>>` — normalized file path → commit IDs
+
+**Query API:**
+
+| Method | Input | Output | Time |
+|---|---|---|---|
+| `query_file_history()` | file path, date range, maxResults | Vec of commits | <1 ms |
+| `query_authors()` | file/dir path, date range | Vec of authors with commit counts | <1 ms |
+| `query_activity()` | dir prefix, date range | Vec of changed files with commits | 1–3 ms |
+
+**What uses the cache:**
+
+| Tool | Cache | CLI fallback | Notes |
+|---|---|---|---|
+| `search_git_history` | ✅ | git log -- file | Cache response includes `"(from cache)"` hint |
+| `search_git_authors` | ✅ | git log -- file | Aggregation by author |
+| `search_git_activity` | ✅ | git log --name-only | Path prefix matching |
+| `search_git_diff` | ❌ Always CLI | git diff | Diff data too large to cache |
+
+**Module:** [`src/git/cache.rs`](../src/git/cache.rs) — self-contained, zero imports from `index.rs`, `definitions/`, or `mcp/`. Depends only on `std`, `serde`, `bincode`, `lz4_flex`.
+
+### 6. MCP Server
 
 JSON-RPC 2.0 event loop over stdio. Designed for AI agent integration (VS Code Copilot, Roo, Claude).
 
@@ -253,7 +299,7 @@ sequenceDiagram
 - **All logging to stderr** — stdout is exclusively for JSON-RPC protocol messages
 - **Response size truncation** — all tool responses are capped at ~32KB (~8K tokens) to prevent filling LLM context windows. Progressive truncation: cap line arrays → remove lineContent → cap matchedTokens → remove lines → reduce file count. Truncation metadata (`responseTruncated`, `truncationReason`, `hint`) is injected into the summary so the LLM knows to narrow its query.
 
-### 6. File Watcher
+### 7. File Watcher
 
 OS-level filesystem notifications (via `notify` crate / `ReadDirectoryChangesW` on Windows) with debounced batch processing.
 
@@ -462,6 +508,13 @@ src/
 │                               index_dir(), *_path_for(), build_index(), build_content_index()
 ├── error.rs                  # SearchError enum (thiserror) — unified error type
 ├── tips.rs                   # Best-practices guide text for search_help / CLI tips
+│
+├── git/                      # Git history: CLI tools + in-memory cache
+│   ├── mod.rs                # Phase 1 CLI functions (file_history, top_authors, repo_activity)
+│   ├── cache.rs              # GitHistoryCache: compact struct, streaming parser, query API,
+│   │                           disk persistence (save_to_disk/load_from_disk), HEAD validation
+│   ├── cache_tests.rs        # 49 unit tests (parser, queries, normalization, serialization)
+│   └── git_tests.rs          # Git CLI integration tests
 │
 ├── cli/                      # CLI layer: argument parsing + command implementations
 │   ├── mod.rs                # Cli struct, Commands enum, cmd_find/fast/grep dispatch

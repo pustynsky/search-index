@@ -12,6 +12,7 @@ use crate::{
     index_dir, ContentIndex, TrigramIndex, DEFAULT_MIN_TOKEN_LEN,
 };
 use crate::definitions;
+use crate::git::cache::GitHistoryCache;
 use crate::mcp;
 
 use super::args::{ServeArgs, ContentIndexArgs};
@@ -258,10 +259,150 @@ pub fn cmd_serve(args: ServeArgs) {
         }
     }
 
+    // ─── Git history cache: background build ───
+    let git_cache: Arc<RwLock<Option<GitHistoryCache>>> = Arc::new(RwLock::new(None));
+    let git_cache_ready = Arc::new(AtomicBool::new(false));
+
+    {
+        let bg_git_cache = Arc::clone(&git_cache);
+        let bg_git_ready = Arc::clone(&git_cache_ready);
+        let bg_dir = dir_str.clone();
+        let bg_idx_base = idx_base.clone();
+
+        std::thread::spawn(move || {
+            let start = Instant::now();
+            eprintln!("[git-cache] Initializing for {}...", bg_dir);
+
+            // Determine repo path — check if it's a git repository
+            let repo_path = PathBuf::from(&bg_dir);
+            let git_dir = repo_path.join(".git");
+            if !git_dir.exists() {
+                eprintln!("[git-cache] No .git directory found, skipping");
+                bg_git_ready.store(true, Ordering::Release);
+                return;
+            }
+
+            // Detect default branch
+            let branch = match GitHistoryCache::detect_default_branch(&repo_path) {
+                Ok(b) => {
+                    eprintln!("[git-cache] Detected branch: {}", b);
+                    b
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to detect default branch, skipping git cache");
+                    bg_git_ready.store(true, Ordering::Release);
+                    return;
+                }
+            };
+
+            let cache_path = GitHistoryCache::cache_path_for(&bg_dir, &bg_idx_base);
+
+            // Try to load cache from disk
+            let cache = if cache_path.exists() {
+                match GitHistoryCache::load_from_disk(&cache_path) {
+                    Ok(disk_cache) => {
+                        // Check if cached HEAD object still exists (re-clone detection)
+                        if !GitHistoryCache::object_exists(&repo_path, &disk_cache.head_hash) {
+                            info!("Cached HEAD object not found (repo re-cloned?), full rebuild");
+                            None
+                        } else {
+                            // Check current HEAD
+                            match std::process::Command::new("git")
+                                .args(["rev-parse", &branch])
+                                .current_dir(&repo_path)
+                                .output()
+                            {
+                                Ok(output) if output.status.success() => {
+                                    let current_head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                                    if disk_cache.is_valid_for(&current_head) {
+                                        // Cache is up to date
+                                        let elapsed = start.elapsed();
+                                        info!(
+                                            elapsed_ms = format_args!("{:.1}", elapsed.as_secs_f64() * 1000.0),
+                                            commits = disk_cache.commits.len(),
+                                            files = disk_cache.file_commits.len(),
+                                            "Git cache loaded from disk (HEAD matches)"
+                                        );
+                                        Some(disk_cache)
+                                    } else if GitHistoryCache::is_ancestor(&repo_path, &disk_cache.head_hash, &current_head) {
+                                        // Fast-forward: full rebuild for MVP simplicity
+                                        // (incremental update would be faster but adds complexity)
+                                        info!(
+                                            old_head = %&disk_cache.head_hash[..8],
+                                            new_head = %&current_head[..current_head.len().min(8)],
+                                            "HEAD changed (fast-forward), rebuilding git cache"
+                                        );
+                                        None
+                                    } else {
+                                        // Force push / rebase — full rebuild
+                                        info!(
+                                            old_head = %&disk_cache.head_hash[..8],
+                                            new_head = %&current_head[..current_head.len().min(8)],
+                                            "HEAD changed (not ancestor), full rebuild"
+                                        );
+                                        None
+                                    }
+                                }
+                                _ => {
+                                    warn!("Failed to get current HEAD, full rebuild");
+                                    None
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        info!(error = %e, "Failed to load git cache from disk, full rebuild");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // If we got a valid cache from disk, publish it; otherwise build from scratch
+            let cache = match cache {
+                Some(c) => c,
+                None => {
+                    eprintln!("[git-cache] Building cache for branch '{}' (this may take a few minutes for large repos)...", branch);
+                    match GitHistoryCache::build(&repo_path, &branch) {
+                        Ok(new_cache) => {
+                            // Save to disk
+                            if let Err(e) = new_cache.save_to_disk(&cache_path) {
+                                warn!(error = %e, "Failed to save git cache to disk");
+                            }
+                            new_cache
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to build git cache");
+                            bg_git_ready.store(true, Ordering::Release);
+                            return;
+                        }
+                    }
+                }
+            };
+
+            let commit_count = cache.commits.len();
+            let file_count = cache.file_commits.len();
+
+            // Publish: write to Arc<RwLock<Option<GitHistoryCache>>>
+            if let Ok(mut guard) = bg_git_cache.write() {
+                *guard = Some(cache);
+            }
+            bg_git_ready.store(true, Ordering::Release);
+
+            let elapsed = start.elapsed();
+            eprintln!(
+                "[git-cache] Ready: {} commits, {} files in {:.1}s",
+                commit_count, file_count, elapsed.as_secs_f64()
+            );
+        });
+    }
+
     let max_response_bytes = if args.max_response_kb == 0 { 0 } else { args.max_response_kb * 1024 };
     mcp::server::run_server(
         index, def_index, dir_str, exts_for_load,
         args.metrics, idx_base, max_response_bytes,
         content_ready, def_ready,
+        git_cache, git_cache_ready,
     );
 }

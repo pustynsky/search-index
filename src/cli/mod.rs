@@ -33,7 +33,12 @@ use crate::definitions;
 #[command(
     name = "search",
     version,
-    long_version = concat!(env!("CARGO_PKG_VERSION"), " (built ", env!("BUILD_DATETIME"), ")"),
+    author = "Sergey Pustynsky",
+    long_version = concat!(
+        env!("CARGO_PKG_VERSION"), " (built ", env!("BUILD_DATETIME"), ")\n",
+        "Author: Sergey Pustynsky\n",
+        "License: MIT OR Apache-2.0"
+    ),
     about,
     after_help = "\
 Run 'search <COMMAND> --help' for detailed options and examples.\n\

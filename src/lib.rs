@@ -354,17 +354,17 @@ mod lib_tests {
 
     #[test]
     fn test_clean_path_normalizes_backslashes() {
-        assert_eq!(clean_path(r"src\PowerBI\OnelakeCatalog"), "src/PowerBI/OnelakeCatalog");
+        assert_eq!(clean_path(r"src\Backend\Catalog"), "src/Backend/Catalog");
     }
 
     #[test]
     fn test_clean_path_preserves_forward_slashes() {
-        assert_eq!(clean_path("src/PowerBI/OnelakeCatalog"), "src/PowerBI/OnelakeCatalog");
+        assert_eq!(clean_path("src/Backend/Catalog"), "src/Backend/Catalog");
     }
 
     #[test]
     fn test_clean_path_mixed_separators() {
-        assert_eq!(clean_path(r"src/PowerBI\OnelakeCatalog\file.cs"), "src/PowerBI/OnelakeCatalog/file.cs");
+        assert_eq!(clean_path(r"src/Backend\Catalog\file.cs"), "src/Backend/Catalog/file.cs");
     }
 
     #[test]
@@ -450,7 +450,7 @@ mod lib_tests {
 
     #[test]
     fn test_sanitize_basic_alphanumeric() {
-        assert_eq!(sanitize_for_filename("PowerBIClients"), "powerbiclients");
+        assert_eq!(sanitize_for_filename("MyProject"), "myproject");
     }
 
     #[test]
@@ -542,9 +542,9 @@ mod lib_tests {
 
     #[test]
     fn test_prefix_two_components() {
-        let path = std::path::PathBuf::from(r"C:\Repos\PowerBIClients");
+        let path = std::path::PathBuf::from(r"C:\Repos\MyProject");
         let result = extract_semantic_prefix(&path);
-        assert_eq!(result, "repos_powerbiclients");
+        assert_eq!(result, "repos_myproject");
     }
 
     #[test]
@@ -595,7 +595,7 @@ mod lib_tests {
 
     #[test]
     fn test_prefix_deterministic() {
-        let path = std::path::PathBuf::from(r"C:\Repos\PowerBIClients");
+        let path = std::path::PathBuf::from(r"C:\Repos\MyProject");
         let a = extract_semantic_prefix(&path);
         let b = extract_semantic_prefix(&path);
         assert_eq!(a, b);

@@ -146,6 +146,11 @@ pub(crate) fn make_ctx_with_defs() -> HandlerContext {
         server_dir: ".".to_string(),
         server_ext: "cs".to_string(),
         metrics: false,
-        index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+        index_base: PathBuf::from("."),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+        git_cache: Arc::new(RwLock::new(None)),
+        git_cache_ready: Arc::new(AtomicBool::new(false)),
     }
 }

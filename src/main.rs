@@ -13,6 +13,7 @@ pub use search::{clean_path, read_file_lossy, tokenize, ContentIndex, FileEntry,
 mod cli;
 mod definitions;
 mod error;
+mod git;
 mod index;
 mod mcp;
 mod tips;

@@ -580,12 +580,12 @@ mod tests {
 
     #[test]
     fn test_is_under_dir_not_prefix_of_different_dir() {
-        assert!(!is_under_dir("C:/Repos/SharedExtra/file.cs", "C:/Repos/Shared"));
+        assert!(!is_under_dir("C:/Repos/MainProjectExtra/file.cs", "C:/Repos/MainProject"));
     }
 
     #[test]
     fn test_is_under_dir_exact_match() {
-        assert!(!is_under_dir("C:/Repos/Shared", "C:/Repos/Shared"));
+        assert!(!is_under_dir("C:/Repos/MainProject", "C:/Repos/MainProject"));
     }
 
     #[test]

@@ -252,6 +252,8 @@ fn make_ts_ctx_with_defs() -> HandlerContext {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     }
 }
 
@@ -362,6 +364,8 @@ fn make_ts_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
     (ctx, tmp_dir)
 }
@@ -834,6 +838,8 @@ fn test_ts_search_callers_inject_support() {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     // search_callers up: who calls getUser in UserService?
@@ -955,6 +961,8 @@ fn test_mixed_cs_ts_definitions_query() {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     // Query by name — should find both C# and TS versions
@@ -1094,6 +1102,8 @@ fn test_mixed_cs_ts_callers_ext_filter() {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     // Without ext filter — should find callers from both languages
@@ -1197,6 +1207,8 @@ fn test_tsx_file_support_through_handler() {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     // Find class in .tsx file
@@ -1288,6 +1300,8 @@ fn test_ts_incremental_update_through_handler() {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     // Verify OldService is found
@@ -1418,6 +1432,8 @@ fn test_ts_search_definitions_exclude_dir() {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     // Exclude __tests__ directory
@@ -1607,6 +1623,8 @@ fn test_ts_direction_down_with_typed_local_variable() {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
         content_ready: Arc::new(AtomicBool::new(true)),
         def_ready: Arc::new(AtomicBool::new(true)),
+    git_cache: Arc::new(RwLock::new(None)),
+    git_cache_ready: Arc::new(AtomicBool::new(false)),
     };
 
     // direction=down from Orchestrator.run() should find DataProcessor.transform()
