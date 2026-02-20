@@ -31,7 +31,34 @@ Every architectural decision has alternatives. This document captures what was c
 
 **When to reconsider:** If indexes exceed available RAM (>4GB), a memory-mapped approach (e.g., FST for the token map + mmap'd postings) would be necessary.
 
-## 2. Inverted Index: HashMap vs FST/Trie
+## 2. FileIndex: Vec Scan vs Inverted Lookup
+
+### Chosen: `Vec<FileEntry>` with O(n) linear scan
+
+**Why:**
+
+- **90× faster than the alternative** — `search_fast` scans the in-memory vec in ~35ms for 100K files. The alternative (`search_find`) does a live filesystem walk taking ~3s for the same files. The vec scan replaces disk I/O, not a faster algorithm.
+- Simple — no secondary data structures to build, maintain, or invalidate
+- Cache-friendly — sequential scan over a contiguous `Vec` has excellent CPU cache locality
+- Flexible matching — supports substring, regex, case-insensitive, comma-separated multi-term OR — all patterns that are hard to pre-index efficiently
+- Small index — `Vec<FileEntry>` is ~48MB for 334K entries, significantly less than a content inverted index (~242MB)
+
+**Rejected alternatives:**
+
+| Alternative | Why Not |
+|---|---|
+| **Inverted index on filename tokens** | Would enable O(1) exact-token lookup, but file name search is primarily substring-based (`UserService` matches `IUserServiceFactory.cs`). An inverted index would still need a trigram or suffix layer for substrings, adding complexity for marginal gain over 35ms. |
+| **Trie on file paths** | Good for prefix matching but not for substring/contains matching. File search patterns like `UserService` are rarely anchored to the start of the filename. |
+| **Trigram index on filenames** | Would reduce scan to O(k) candidates, but the trigram index alone adds ~56MB for content tokens. For filenames (which are much shorter), the benefit vs the ~35ms baseline is minimal. |
+
+**Known limitations:**
+
+- O(n) means performance degrades linearly with file count — 1M files would take ~350ms
+- No pre-filtering — every entry is checked even if the pattern could be pre-narrowed
+
+**When to reconsider:** If file counts exceed ~500K and the ~175ms+ scan time becomes noticeable in interactive use, adding a trigram index on filenames (similar to `ContentIndex.trigram`) would reduce search to O(k) candidates.
+
+## 3. Inverted Index: HashMap vs FST/Trie
 
 ### Chosen: `HashMap<String, Vec<Posting>>`
 
@@ -59,7 +86,7 @@ Every architectural decision has alternatives. This document captures what was c
 
 **When to reconsider:** If we add fuzzy/typo-tolerant search, an FST or Levenshtein automaton would be much more efficient than regex scanning all keys.
 
-## 3. Ranking: TF-IDF vs BM25
+## 4. Ranking: TF-IDF vs BM25
 
 ### Chosen: Classic TF-IDF
 
@@ -90,7 +117,7 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 
 **When to reconsider:** If user feedback shows ranking quality issues, BM25 with default parameters (k1=1.2, b=0.75) would be a minimal-effort upgrade.
 
-## 4. Concurrency: RwLock vs Lock-Free
+## 5. Concurrency: RwLock vs Lock-Free
 
 ### Chosen: `Arc<RwLock<ContentIndex>>`
 
@@ -115,7 +142,7 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 - Writer starvation is theoretically possible if search queries are continuous, but MCP queries are human-driven (~1/sec max) so this doesn't happen in practice
 - `RwLock` on Windows is not fair — but our usage pattern (rare writes) makes this irrelevant
 
-## 5. Tree-sitter vs Regex for Code Parsing
+## 6. Tree-sitter vs Regex for Code Parsing
 
 ### Chosen: tree-sitter AST parsing
 
@@ -142,7 +169,7 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 - Adding a new language requires a new tree-sitter grammar crate + parser implementation (~200 LOC per language)
 - SQL grammar (tree-sitter-sequel-tsql) may not cover all T-SQL dialects perfectly
 
-## 6. Tokenization: Simple Split vs Language-Aware
+## 7. Tokenization: Simple Split vs Language-Aware
 
 ### Chosen: Character-class split + lowercase
 
@@ -175,7 +202,7 @@ line.split(|c: char| !c.is_alphanumeric() && c != '_')
 - Numbers are included: `int32` is one token. This is usually desirable for code.
 - Very short tokens (1 char) are excluded by default (min_len=2)
 
-## 7. MCP Transport: Stdio vs HTTP
+## 8. MCP Transport: Stdio vs HTTP
 
 ### Chosen: Stdio (stdin/stdout)
 
@@ -200,7 +227,7 @@ line.split(|c: char| !c.is_alphanumeric() && c != '_')
 - No remote access — must run on same machine as the AI agent
 - Debugging requires stderr logging — cannot use stdout for diagnostics
 
-## 8. Positioning: search-index vs Existing Code Search Tools
+## 9. Positioning: search-index vs Existing Code Search Tools
 
 ### Chosen: Custom single-binary engine (inverted index + trigram + tree-sitter AST + call graph)
 
@@ -253,7 +280,8 @@ search-index occupies the **"fast enough for interactive AI agents, structured e
 | Decision        | Chosen                 | Key Reason                  | Reconsider When              |
 | --------------- | ---------------------- | --------------------------- | ---------------------------- |
 | Storage         | Bincode                | Fast, simple, single-file   | Index > 4GB RAM              |
-| Index structure | HashMap                | O(1) lookup, easy updates   | Need fuzzy search            |
+| File index      | Vec + O(n) scan        | 90× faster than FS walk, simple | File count > 500K        |
+| Content index   | HashMap                | O(1) lookup, easy updates   | Need fuzzy search            |
 | Ranking         | TF-IDF                 | Simple, effective for code  | Ranking quality complaints   |
 | Concurrency     | RwLock                 | Correct, minimal contention | High-throughput multi-client |
 | Code parsing    | tree-sitter            | Full AST, structured output | n/a (correct choice)         |
