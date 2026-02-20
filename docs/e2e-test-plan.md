@@ -1221,7 +1221,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 - stdout: JSON-RPC response with `searchMode` containing `"substring"` (not `"or"` or `"and"`)
 - Results should include compound token matches (e.g., `"tokenize_basic"` if present)
 
-**Validates:** `substring` defaults to `true` when no explicit `substring` parameter is passed. This ensures compound C# identifiers (e.g., `ICatalogQueryManager`, `m_catalogQueryManager`) are always found without the LLM needing to remember to pass `substring: true`.
+**Validates:** `substring` defaults to `true` when no explicit `substring` parameter is passed. This ensures compound C# identifiers (e.g., `IStorageIndexManager`, `m_storageIndexManager`) are always found without the LLM needing to remember to pass `substring: true`.
 
 **Status:** ✅ Implemented (covered by `test_substring_default_finds_compound_identifiers` unit test + T28 in e2e-test.ps1)
 
@@ -1250,6 +1250,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 **Status:** ✅ Implemented (covered by `test_regex_auto_disables_substring` unit test + T29 in e2e-test.ps1)
 
 ---
+
 ### T37c: `serve` — search_grep substring AND-mode correctness (no false positives from multi-token match)
 
 **Command:**
@@ -1299,7 +1300,6 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext xml
 **Status:** ✅ Implemented (covered by `test_phrase_postfilter_xml_literal_match`, `test_phrase_postfilter_no_punctuation_no_filter`, `test_phrase_postfilter_angle_brackets` unit tests)
 
 ---
-
 
 ### T38: `serve` — search_reindex rebuilds trigram index
 
@@ -1506,7 +1506,6 @@ cargo run -- tips
 **Validates:** New efficiency guidance tips are visible in CLI output and MCP `search_help`.
 
 ---
-
 
 ## TypeScript Support Tests
 
@@ -2120,7 +2119,6 @@ if ($failed -gt 0) { exit 1 }
 - ✅ After merging a large PR
 - ✅ When switching Rust toolchain versions
 
-
 ### T30: `serve` — MCP search_grep with subdirectory `dir` parameter
 
 **Scenario:** When the MCP server is started with `--dir C:\Repos\MainProject`, a `search_grep` call
@@ -2160,7 +2158,6 @@ $msgs | cargo run -- serve -d . -e rs 2>$null
 - Response contains error: "Server started with --dir"
 - Tool result `isError: true`
 
-
 ---
 
 ### T42: `serve` — Response size truncation for broad queries
@@ -2168,6 +2165,7 @@ $msgs | cargo run -- serve -d . -e rs 2>$null
 **Scenario:** When a search query returns massive results (e.g., short substring query matching
 thousands of files), the MCP server automatically truncates the JSON response to stay within
 ~32KB to prevent filling the LLM context window. Truncation is progressive:
+
 1. Cap `lines` arrays per file to 10 entries
 2. Remove `lineContent` blocks
 3. Cap `matchedTokens` to 20 entries
@@ -2212,7 +2210,6 @@ $msgs | cargo run -- serve -d . -e rs --metrics 2>$null
 - `summary.responseBytes` < 32768
 
 **Validates:** Progressive response truncation, LLM context budget protection, summary metadata accuracy.
-
 
 ---
 
@@ -2277,7 +2274,6 @@ $msgs | cargo run -- serve -d . -e rs 2>$null
 
 **Status:** ✅ Implemented (covered by `test_validate_search_dir_subdirectory` and `test_validate_search_dir_outside_rejects` unit tests)
 
-
 ---
 
 ### T-LOSSY: Non-UTF8 file indexing (lossy UTF-8 conversion)
@@ -2335,7 +2331,6 @@ Then send `search_definitions` with `file: "Program.cs"` — should return `Data
 Remove-Item -Recurse -Force $testDir
 ```
 
-
 ---
 
 ### T-AUDIT: Definition index audit mode
@@ -2370,6 +2365,7 @@ Remove-Item -Recurse -Force $testDir
 ```
 
 **Assertions:**
+
 - `audit.totalFiles` > 0
 - `audit.filesWithDefinitions` > 0
 - `audit.filesWithDefinitions` + `audit.filesWithoutDefinitions` ≤ `audit.totalFiles`
@@ -2380,11 +2376,18 @@ Remove-Item -Recurse -Force $testDir
 **With custom threshold:**
 
 ```json
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_definitions","arguments":{"audit":true,"auditMinBytes":10000}}}
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "search_definitions",
+    "arguments": { "audit": true, "auditMinBytes": 10000 }
+  }
+}
 ```
 
 Should return fewer suspicious files (only those >10KB with 0 definitions).
-
 
 ---
 
@@ -2428,7 +2431,6 @@ search def-audit --dir C:\nonexistent --ext cs
 
 - stderr contains `No definition index found`
 - Exit code: 0
-
 
 ---
 
@@ -2560,6 +2562,7 @@ cargo run -- grep "fn" -d $TEST_DIR -e $TEST_EXT
 ```
 
 **Expected:**
+
 - Index file starts with `LZ4S` magic bytes
 - stderr shows compression ratio log: `Saved X.X MB → Y.Y MB (Z.Z× compression)`
 - grep returns results (index deserializes correctly after compression)
@@ -2573,13 +2576,13 @@ cargo run -- grep "fn" -d $TEST_DIR -e $TEST_EXT
 ```
 
 **Expected:**
+
 - `load_compressed` reads both LZ4-compressed and legacy uncompressed files
 - No data loss or deserialization errors
 
 **Validates:** LZ4 compression, magic byte detection, backward compatibility, compression ratio logging.
 
 **Status:** ✅ Covered by unit tests: `test_save_load_compressed_roundtrip`, `test_load_compressed_legacy_uncompressed`, `test_load_compressed_missing_file_returns_none`, `test_compressed_file_smaller_than_uncompressed`
-
 
 ---
 
@@ -2595,7 +2598,16 @@ while indexes are built in the background.
 **MCP Request (sent immediately after server process starts):**
 
 ```json
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "initialize",
+  "params": {
+    "protocolVersion": "2025-03-26",
+    "capabilities": {},
+    "clientInfo": { "name": "test", "version": "1.0" }
+  }
+}
 ```
 
 **Expected:** Immediate response with `protocolVersion`, `serverInfo`, `capabilities`.
@@ -2603,7 +2615,12 @@ while indexes are built in the background.
 **Then send:**
 
 ```json
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"HttpClient"}}}
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "method": "tools/call",
+  "params": { "name": "search_grep", "arguments": { "terms": "HttpClient" } }
+}
 ```
 
 **Expected:** `isError: true`, message contains "being built in the background".
@@ -2619,7 +2636,15 @@ while indexes are built in the background.
 **MCP Request:**
 
 ```json
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"UserService"}}}
+{
+  "jsonrpc": "2.0",
+  "id": 3,
+  "method": "tools/call",
+  "params": {
+    "name": "search_definitions",
+    "arguments": { "name": "UserService" }
+  }
+}
 ```
 
 **Expected:** `isError: true`, message contains "being built in the background".
@@ -2633,7 +2658,15 @@ while indexes are built in the background.
 **MCP Request:**
 
 ```json
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"GetUserAsync"}}}
+{
+  "jsonrpc": "2.0",
+  "id": 4,
+  "method": "tools/call",
+  "params": {
+    "name": "search_callers",
+    "arguments": { "method": "GetUserAsync" }
+  }
+}
 ```
 
 **Expected:** `isError: true`, message contains "being built in the background".
@@ -2647,7 +2680,12 @@ while indexes are built in the background.
 **MCP Request:**
 
 ```json
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_fast","arguments":{"pattern":"UserService"}}}
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "tools/call",
+  "params": { "name": "search_fast", "arguments": { "pattern": "UserService" } }
+}
 ```
 
 **Expected:** `isError: true`, message contains "being built in the background".
@@ -2661,7 +2699,12 @@ while indexes are built in the background.
 **MCP Request:**
 
 ```json
-{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_reindex","arguments":{}}}
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "tools/call",
+  "params": { "name": "search_reindex", "arguments": {} }
+}
 ```
 
 **Expected:** `isError: true`, message contains "already being built".
@@ -2690,7 +2733,12 @@ while indexes are built in the background.
 **MCP Request:**
 
 ```json
-{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"search_find","arguments":{"pattern":"main"}}}
+{
+  "jsonrpc": "2.0",
+  "id": 9,
+  "method": "tools/call",
+  "params": { "name": "search_find", "arguments": { "pattern": "main" } }
+}
 ```
 
 **Expected:** `isError: false`, returns file system results (not dependent on content index).
@@ -2706,7 +2754,12 @@ while indexes are built in the background.
 **MCP Request:**
 
 ```json
-{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"HttpClient"}}}
+{
+  "jsonrpc": "2.0",
+  "id": 10,
+  "method": "tools/call",
+  "params": { "name": "search_grep", "arguments": { "terms": "HttpClient" } }
+}
 ```
 
 **Expected:** `isError: false`, returns normal search results.
@@ -2765,6 +2818,7 @@ $stderr = Get-Content "$dir\stderr.txt" -Raw
 ```
 
 **Expected:**
+
 - Server stderr contains `saving indexes before shutdown`
 - Server stderr contains `Content index saved on shutdown`
 - The `.word-search` file in `%LOCALAPPDATA%\search-index` has a recent modification timestamp
@@ -2774,7 +2828,6 @@ $stderr = Get-Content "$dir\stderr.txt" -Raw
 **Unit test:** `test_watch_index_survives_save_load_roundtrip` in [`watcher.rs`](../src/mcp/watcher.rs) verifies that watch-mode fields (`forward`, `path_to_id`) survive serialization roundtrip.
 
 **Automated:** Test T-SHUTDOWN in [`e2e-test.ps1`](../e2e-test.ps1) runs this scenario automatically.
-
 
 ---
 
@@ -3048,6 +3101,7 @@ and the file filter comparison normalizes user input for defense-in-depth.
 - All stored paths in indexes use forward slashes (via `clean_path()`)
 
 **Unit tests:**
+
 - [`test_search_definitions_file_filter_forward_slash`](../src/mcp/handlers/handlers_tests_csharp.rs)
 - [`test_search_definitions_file_filter_backslash`](../src/mcp/handlers/handlers_tests_csharp.rs)
 - [`test_search_definitions_file_filter_mixed_separators`](../src/mcp/handlers/handlers_tests_csharp.rs)
@@ -3117,6 +3171,7 @@ matching.
 **Tool:** `search_find`
 
 **Scenario:** Tests combined parameter usage:
+
 - `countOnly: true` returns only the match count without file paths
 - `maxDepth` limits directory traversal depth
 - `ignoreCase: true` + `regex: true` performs case-insensitive regex matching
@@ -3201,7 +3256,6 @@ and returns build metrics.
 
 **Unit test:** [`test_search_reindex_invalid_directory`](../src/mcp/handlers/handlers_tests.rs)
 
-
 ---
 
 ## Additional Test Scenarios (from upstream merge)
@@ -3211,7 +3265,7 @@ and returns build metrics.
 **Tool:** `search_definitions` (audit mode)
 
 **Scenario:** In TypeScript projects, `.spec.ts` files typically contain `describe()` and `it()`
-blocks which are function *calls*, not syntactic definitions (function declarations, class
+blocks which are function _calls_, not syntactic definitions (function declarations, class
 declarations, etc.). When running `search_definitions` with `audit: true`, these files are
 expected to appear in the audit report with 0 definitions. This is **by-design behavior**, not
 a bug or a parsing failure.
@@ -3283,6 +3337,7 @@ stay within the configured server directory. Tests cover subdirectory acceptance
 sibling directory rejection, path traversal rejection, and absolute path rejection.
 
 **Unit tests:**
+
 - [`test_validate_search_dir_subdir_accepted`](../src/mcp/handlers/handlers_tests.rs)
 - [`test_validate_search_dir_outside_rejected`](../src/mcp/handlers/handlers_tests.rs)
 - [`test_validate_search_dir_path_traversal_rejected`](../src/mcp/handlers/handlers_tests.rs)
@@ -3297,6 +3352,7 @@ the response includes an ambiguity warning showing which classes contain the met
 The warning is truncated for common methods with many implementations.
 
 **Unit tests:**
+
 - [`test_search_callers_no_ambiguity_warning_single_class`](../src/mcp/handlers/handlers_tests_csharp.rs)
 - [`test_search_callers_ambiguity_warning_few_classes`](../src/mcp/handlers/handlers_tests_csharp.rs)
 - [`test_search_callers_ambiguity_warning_truncated`](../src/mcp/handlers/handlers_tests_csharp.rs)
@@ -3704,25 +3760,24 @@ correctly parsed as variable definitions.
 
 **Unit test:** [`test_parse_ts_injection_token_variable`](../src/definitions/definitions_tests_typescript.rs)
 
-
 ---
 
 ## Changes Not CLI-Testable (Covered by Unit Tests)
 
 The following internal optimizations are covered by unit tests in `src/mcp/watcher.rs` and `src/definitions/incremental.rs`, but have no CLI-observable behavior for E2E testing:
 
-| Change | Unit Test | Description |
-|--------|-----------|-------------|
-| `.git/` directory filtering in watcher | `test_is_inside_git_dir` | Watcher now skips files inside `.git/` directories to avoid indexing git internals (e.g., `.git/config` matching "config" extension) |
-| `shrink_to_fit()` after `retain()` | (behavioral — no dedicated test) | After incremental updates, all `HashMap`/`Vec` collections call `shrink_to_fit()` to release excess capacity from `retain()` operations |
+| Change                                               | Unit Test                        | Description                                                                                                                                                                                              |
+| ---------------------------------------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.git/` directory filtering in watcher               | `test_is_inside_git_dir`         | Watcher now skips files inside `.git/` directories to avoid indexing git internals (e.g., `.git/config` matching "config" extension)                                                                     |
+| `shrink_to_fit()` after `retain()`                   | (behavioral — no dedicated test) | After incremental updates, all `HashMap`/`Vec` collections call `shrink_to_fit()` to release excess capacity from `retain()` operations                                                                  |
 | `sorted_intersect` in `collect_substring_file_ids()` | (behavioral — no dedicated test) | Replaced `HashSet`-based intersection with sorted two-pointer `sorted_intersect` in `callers.rs` for better cache locality and reduced allocations. Same results, faster execution on large file ID sets |
-
 
 ---
 
 ### T65: Local Variable Type Extraction — TypeScript
 
 **Background:** The TypeScript parser extracts type information from local variable declarations to resolve `receiver_type` on call sites. This covers:
+
 1. Explicit type annotations: `const result: UserResult = ...` → `result.validate()` has `receiver_type = "UserResult"`
 2. `new` expressions: `const v = new OrderValidator()` → `v.check()` has `receiver_type = "OrderValidator"`
 3. Generic `new` expressions: `const c = new DataCache<string>()` → `c.get()` has `receiver_type = "DataCache"` (generics stripped)
@@ -3738,6 +3793,7 @@ The following internal optimizations are covered by unit tests in `src/mcp/watch
 ### T66: Local Variable Type Extraction — C#
 
 **Background:** The C# parser extracts type information from local variable declarations to resolve `receiver_type` on call sites. This covers:
+
 1. Explicit type: `UserResult result = ...` → `result.Validate()` has `receiver_type = "UserResult"`
 2. `var = new`: `var v = new OrderValidator()` → `v.Check()` has `receiver_type = "OrderValidator"`
 3. `var` without `new` (preserved): `var r = Calculate()` → `r.Process()` has `receiver_type = Some("r")` — the variable name is preserved so that `verify_call_site_target` can correctly reject it as a non-matching receiver (prevents false positives where `r.Process()` would otherwise be treated as `this.Process()`)
@@ -3757,15 +3813,18 @@ The following internal optimizations are covered by unit tests in `src/mcp/watch
 **Background:** When `direction=down` traces callees of a method, local variables with explicit type annotations (`const x: Foo = ...`) are used to resolve the receiver type of method calls. This ensures that `x.method()` is correctly attributed to class `Foo` rather than being unresolved.
 
 **Setup:** Create TypeScript files:
+
 - `DataProcessor.ts`: `export class DataProcessor { transform(data: string): string { return data.toUpperCase(); } }`
 - `Orchestrator.ts`:
   ```typescript
   export class Orchestrator {
-      run() {
-          const proc: DataProcessor = this.getProcessor();
-          proc.transform("hello");
-      }
-      getProcessor(): DataProcessor { return new DataProcessor(); }
+    run() {
+      const proc: DataProcessor = this.getProcessor();
+      proc.transform("hello");
+    }
+    getProcessor(): DataProcessor {
+      return new DataProcessor();
+    }
   }
   ```
 
@@ -3790,7 +3849,6 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 
 **Status:** ✅ Covered by unit test `test_ts_direction_down_with_typed_local_variable` in `handlers_tests_typescript.rs`
 
-
 ---
 
 ### T67: Direction=up — False Positive Filtering with Receiver Type Mismatch
@@ -3798,6 +3856,7 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 **Background:** When `search_callers` runs with `direction=up`, the `verify_call_site_target()` function filters out false positive callers where the `receiver_type` on a call site doesn't match the target class. For example, if searching for callers of `TaskRunner.resolve()`, a file containing `path.resolve()` should NOT appear as a caller because the `receiver_type` is `"Path"`, not `"TaskRunner"`.
 
 **Setup:** Create TypeScript files:
+
 - `task.ts`: `export class TaskRunner { resolve() { return true; } }`
 - `caller_good.ts`: `import { TaskRunner } from './task'; const t = new TaskRunner(); t.resolve();` (inside a function/method)
 - `caller_false.ts`: `import * as path from 'path'; function build() { path.resolve('/tmp'); }` (unrelated `resolve()` call)
@@ -3830,6 +3889,7 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 **Background:** When `verify_call_site_target()` encounters a caller file that has no call-site data (e.g., the file was not parsed by tree-sitter, or the method call was in a pattern not recognized by the parser), the verification should gracefully fall back to including the caller (no false negatives from missing data).
 
 **Setup:** Create TypeScript files:
+
 - `service.ts`: `export class DataService { fetch() { return []; } }`
 - `consumer.ts`: Contains a call to `fetch()` but in a pattern where call-site data may not have `receiver_type` (e.g., via destructuring or dynamic dispatch)
 
@@ -3854,7 +3914,6 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 
 **Status:** ✅ Covered by unit tests in `handlers_tests_typescript.rs`
 
-
 ---
 
 ### T69: Direction=up — Comment-Line False Positive Filtered
@@ -3862,6 +3921,7 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 **Background:** When the content index matches a method name appearing in a **comment** (not a real call), `verify_call_site_target()` should filter it out. This is language-agnostic (affects both C# and TypeScript). Before the fix, comment lines containing the method name were incorrectly treated as valid call sites, producing false positive callers.
 
 **Setup:** Create TypeScript files:
+
 - `task-runner.ts`: `export class TaskRunner { resolve(): void { console.log("resolved"); } }`
 - `consumer.ts`: Contains "resolve" in comments (lines 5-6) AND a real call `runner.resolve()` (line 8)
 
@@ -3870,12 +3930,12 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 import { TaskRunner } from "./task-runner";
 
 export class Consumer {
-    processData(): void {
-        // We need to resolve the task before proceeding
-        // The resolve method handles cleanup
-        const runner = new TaskRunner();
-        runner.resolve();
-    }
+  processData(): void {
+    // We need to resolve the task before proceeding
+    // The resolve method handles cleanup
+    const runner = new TaskRunner();
+    runner.resolve();
+  }
 }
 ```
 
@@ -3900,7 +3960,6 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 
 **Status:** ✅ Covered by E2E test in `e2e-test.ps1` and unit tests in `handlers_tests_typescript.rs`
 
-
 ---
 
 ## Fix 3 — Bypass Gate Closure and Lambda/Expression Body Parsing
@@ -3918,6 +3977,7 @@ the function returns `false` (reject) when call-site data is missing, ensuring o
 with actual call-site evidence are included in the call tree.
 
 **Setup:** Create C# files:
+
 - `Service.cs`: A class with a method (e.g., `DataService.Process()`)
 - `RealCaller.cs`: Contains a method that genuinely calls `service.Process()`
 - `FalseCaller.cs`: Contains a method that mentions "Process" in a string or comment but has
@@ -3954,6 +4014,7 @@ not `arrow_expression_clause` (`=> expr;`). After Fix 3, call sites inside expre
 properties are extracted and included in the caller tree.
 
 **Setup:** Create C# files:
+
 - `NameProvider.cs`: `public class NameProvider { public string GetName() => "test"; }`
 - `Consumer.cs`: Contains an expression body property that calls `GetName()`:
   ```csharp
@@ -3994,6 +4055,7 @@ contain call sites that should be attributed to the enclosing method. The parser
 sites from lambda bodies, resolving the call to the containing method definition.
 
 **Setup:** Create C# files:
+
 - `Validator.cs`: `public class Validator { public bool Validate(string s) => s.Length > 0; }`
 - `Processor.cs`: Contains a method with a lambda that calls `Validate()`:
   ```csharp
@@ -4075,7 +4137,6 @@ redundant lookup and the bypass where verification was skipped.
 **Status:** ✅ Internal refactor — covered by all existing caller unit tests which exercise the
 full verification pipeline. No separate test needed.
 
-
 ---
 
 ### T-OVERLOAD-DEDUP-UP: Overloaded callers not collapsed (direction=up)
@@ -4086,6 +4147,7 @@ the dedup key used `(file_id, method_name)` which collapsed all overloads into o
 adds `line_start` to the dedup key: `(file_id, method_name, line_start)`.
 
 **Setup:** Create C# files:
+
 - `Validator.cs`: `public class Validator { public bool Validate() => true; }`
 - `Processor.cs`: Contains two overloads of `Process` that both call `Validate()`:
   ```csharp
@@ -4127,6 +4189,7 @@ and `Execute(string)` in the same class), the callee tree should show BOTH overl
 entries. The same dedup fix applies to direction=down.
 
 **Setup:** Create C# files:
+
 - `TaskRunner.cs`: Contains two overloads of `Execute`:
   ```csharp
   public class TaskRunner {
@@ -4181,6 +4244,7 @@ The fix filters the interface resolution to only include interfaces that are act
 to the target class (i.e., interfaces listed in the class's `base_types`).
 
 **Setup:** Create C# files:
+
 - `IServiceA.cs`: `public interface IServiceA { void Execute(); }`
 - `IServiceB.cs`: `public interface IServiceB { void Execute(); }`
 - `ServiceA.cs`: `public class ServiceA : IServiceA { public void Execute() { } }`
@@ -4233,7 +4297,6 @@ with the same method name do not cause false positive callers.
 
 **Status:** ✅ Covered by unit test `test_search_callers_same_name_different_receiver_interface_resolution` in `handlers_tests_csharp.rs`
 
-
 ---
 
 ### T-BUILTIN-BLOCKLIST: Built-in type blocklist prevents false positives in direction=down
@@ -4245,6 +4308,7 @@ built-in type blocklist (`BUILTIN_RECEIVER_TYPES`) prevents this by skipping can
 the receiver type is a known built-in JavaScript/TypeScript or C# type.
 
 **Setup:** Create TypeScript files:
+
 - `deferred.ts`: `export class Deferred { resolve(): void { } }`
 - `worker.ts`: `export class Worker { doWork(): void { Promise.resolve(42); } }`
 
@@ -4282,6 +4346,7 @@ matching: the stem `DataModelService` (from `IDataModelService`) is checked as a
 the implementation class name `DataModelWebService`.
 
 **Setup:** Create TypeScript files:
+
 - `interface.ts`: `export interface IDataModelService { loadModel(): void; }`
 - `impl.ts`: `export class DataModelWebService implements IDataModelService { loadModel() { } }`
 - `caller.ts`: A method with parameter `svc: IDataModelService` that calls `svc.loadModel()`
@@ -4326,23 +4391,24 @@ most relevant result appears first.
 **Function:** [`best_match_tier()`](../src/mcp/handlers/utils.rs:527)
 
 **Scenario:** The function classifies a name against search terms into three tiers:
+
 - Tier 0: exact match (case-insensitive)
 - Tier 1: prefix match (name starts with term)
 - Tier 2: contains/default (name contains term or doesn't match)
 
 **Tests (9 tests in `utils.rs`):**
 
-| Test | Input | Expected |
-|------|-------|----------|
-| Exact match | `"UserService"` vs `["userservice"]` | 0 |
-| Case insensitive | `"USERSERVICE"` vs `["userservice"]` | 0 |
-| Prefix match | `"UserServiceFactory"` vs `["userservice"]` | 1 |
-| Contains only | `"IUserService"` vs `["userservice"]` | 2 |
-| No match | `"OrderProcessor"` vs `["userservice"]` | 2 |
-| Multiple terms best wins | `"UserService"` vs `["order", "userservice"]` | 0 |
-| Empty terms | `"UserService"` vs `[]` | 2 |
-| Exact beats prefix | `"IUserService"` vs `["iuserservice", "userservice"]` | 0 |
-| Prefix beats contains | `"UserService"` vs `["user"]` → 1; `"IUserService"` vs `["user"]` → 2 |
+| Test                     | Input                                                                 | Expected |
+| ------------------------ | --------------------------------------------------------------------- | -------- |
+| Exact match              | `"UserService"` vs `["userservice"]`                                  | 0        |
+| Case insensitive         | `"USERSERVICE"` vs `["userservice"]`                                  | 0        |
+| Prefix match             | `"UserServiceFactory"` vs `["userservice"]`                           | 1        |
+| Contains only            | `"IUserService"` vs `["userservice"]`                                 | 2        |
+| No match                 | `"OrderProcessor"` vs `["userservice"]`                               | 2        |
+| Multiple terms best wins | `"UserService"` vs `["order", "userservice"]`                         | 0        |
+| Empty terms              | `"UserService"` vs `[]`                                               | 2        |
+| Exact beats prefix       | `"IUserService"` vs `["iuserservice", "userservice"]`                 | 0        |
+| Prefix beats contains    | `"UserService"` vs `["user"]` → 1; `"IUserService"` vs `["user"]` → 2 |
 
 **Status:** ✅ Covered by unit tests `test_best_match_tier_*` in [`utils.rs`](../src/mcp/handlers/utils.rs)
 
@@ -4358,10 +4424,10 @@ delegate, event, enumMember, typeAlias, variable). Used as a tiebreaker when mat
 
 **Tests (16 tests in `definitions.rs`):**
 
-| Kind | Expected Priority |
-|------|-------------------|
-| Class, Interface, Enum, Struct, Record | 0 |
-| Method, Function, Property, Field, Constructor, Delegate, Event, EnumMember, TypeAlias, Variable | 1 |
+| Kind                                                                                             | Expected Priority |
+| ------------------------------------------------------------------------------------------------ | ----------------- |
+| Class, Interface, Enum, Struct, Record                                                           | 0                 |
+| Method, Function, Property, Field, Constructor, Delegate, Event, EnumMember, TypeAlias, Variable | 1                 |
 
 **Status:** ✅ Covered by unit tests `test_kind_priority_*` in [`definitions.rs`](../src/mcp/handlers/definitions.rs)
 
@@ -4372,18 +4438,21 @@ delegate, event, enumMember, typeAlias, variable). Used as a tiebreaker when mat
 **Tool:** `search_definitions`
 
 **Scenario:** When searching for `"UserService"`, results are sorted by:
+
 1. Match tier (exact=0 → prefix=1 → contains=2)
 2. Kind priority (class/interface=0 → method/property=1)
 3. Name length (shorter first)
 4. Alphabetical
 
 **Expected order:**
+
 1. `UserService` (class) — exact match, kind=0
 2. `UserServiceFactory` (class) — prefix match, kind=0
 3. `UserServiceHelper` (method) — prefix match, kind=1
 4. `IUserService` (interface) — contains match, kind=0
 
 **Unit tests (4 tests in `handlers_tests.rs`):**
+
 - [`test_search_definitions_ranking_exact_first`](../src/mcp/handlers/handlers_tests.rs) — exact match appears first
 - [`test_search_definitions_ranking_prefix_before_contains`](../src/mcp/handlers/handlers_tests.rs) — prefix matches before contains
 - [`test_search_definitions_ranking_kind_and_length_tiebreak`](../src/mcp/handlers/handlers_tests.rs) — class before method among prefix matches
@@ -4398,17 +4467,20 @@ delegate, event, enumMember, typeAlias, variable). Used as a tiebreaker when mat
 **Tool:** `search_fast`
 
 **Scenario:** When searching for `"UserService"` with `ignoreCase: true`, file results are sorted by:
+
 1. Best match tier on file stem (without extension)
 2. Stem length (shorter first)
 3. Full path alphabetical
 
 **Expected order:**
+
 1. `UserService.cs` — exact stem match (tier 0)
 2. `UserServiceFactory.cs` — prefix match (tier 1), shorter stem
 3. `UserServiceHelpers.cs` — prefix match (tier 1), longer stem
 4. `IUserService.cs` — contains match (tier 2)
 
 **Unit tests (2 tests in `handlers_tests.rs`):**
+
 - [`test_search_fast_ranking_exact_stem_first`](../src/mcp/handlers/handlers_tests.rs) — exact stem match first, prefix before contains
 - [`test_search_fast_ranking_shorter_stem_first`](../src/mcp/handlers/handlers_tests.rs) — shorter stems before longer among same tier
 
@@ -4424,13 +4496,13 @@ delegate, event, enumMember, typeAlias, variable). Used as a tiebreaker when mat
 lines) in descending order — files with more matches appear first.
 
 **Expected:**
+
 - File with 3 occurrences appears before file with 2, which appears before file with 1
 - `files[i].occurrences >= files[i+1].occurrences` for all i
 
 **Unit test:** [`test_search_grep_phrase_sort_by_occurrences`](../src/mcp/handlers/handlers_tests.rs)
 
 **Status:** ✅ Covered by unit test
-
 
 ---
 
@@ -4531,7 +4603,6 @@ lines) in descending order — files with more matches appear first.
 
 - Response is an error (`isError: true`)
 - Error message recommends `search_reindex_definitions`
-
 
 ---
 
@@ -4739,7 +4810,6 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 **Status:** ✅ Covered by unit tests: `test_handle_tools_list` (13 tools), `test_tool_definitions_count` (13 tools)
 
-
 ## Git History Cache — Unit Tests (PR 2a)
 
 The following test scenarios are covered by unit tests in
@@ -4752,6 +4822,7 @@ without requiring a running MCP server or real git repository. All tests use moc
 author deduplication, file_commits mapping, and subject pool.
 
 **Expected:**
+
 - 3 commits parsed
 - 2 unique authors (Alice appears twice, deduplicated)
 - `src/main.rs` has 3 commit refs, `Cargo.toml` has 1, `src/lib.rs` has 1
@@ -4768,6 +4839,7 @@ the field separator `␞`, empty file list (merge commit), merge commit with 100
 lines, and bad hash values.
 
 **Expected:**
+
 - Empty input → 0 commits
 - Empty subject → preserved as ""
 - Subject with `␞` → rejoined via `fields[4..].join(sep)`
@@ -4786,6 +4858,7 @@ lines, and bad hash values.
 **Scenario:** The `normalize_path()` function handles Windows/Unix path normalization.
 
 **Expected:**
+
 - `"src\\main.rs"` → `"src/main.rs"` (backslash → forward slash)
 - `"./src/main.rs"` → `"src/main.rs"` (strip `./`)
 - `""` → `""` (empty preserved)
@@ -4806,6 +4879,7 @@ lines, and bad hash values.
 respecting `maxResults` and `from`/`to` date filters.
 
 **Expected:**
+
 - Basic lookup: 3 commits for `src/main.rs`, sorted newest first
 - `maxResults=2`: returns 2 newest commits
 - `from` filter: excludes commits before timestamp
@@ -4827,6 +4901,7 @@ respecting `maxResults` and `from`/`to` date filters.
 that touch multiple files in the same directory.
 
 **Expected:**
+
 - File: 2 authors for `src/main.rs` (Alice: 2 commits, Bob: 1)
 - Directory: `src` matches `src/main.rs` and `src/lib.rs`, deduplicates shared commits
 - Empty path: matches all files
@@ -4841,6 +4916,7 @@ that touch multiple files in the same directory.
 `== path || starts_with(path + "/")` to prevent false positives.
 
 **Expected:**
+
 - `src` matches `src/main.rs` and `src/lib.rs` but NOT `src2/other.rs`
 - Date filter narrows results
 - Empty path matches all files
@@ -4858,6 +4934,7 @@ that touch multiple files in the same directory.
 **Scenario:** `is_valid_for()` checks HEAD hash and format version.
 
 **Expected:**
+
 - Matching HEAD hash → valid
 - Different HEAD hash → invalid
 - Mismatched format version → invalid
@@ -4893,6 +4970,7 @@ that touch multiple files in the same directory.
 (reusing `save_compressed()`/`load_compressed()` from `src/index.rs`).
 
 **Expected:**
+
 - Bincode roundtrip preserves all fields
 - LZ4 compressed roundtrip preserves all fields
 - Queries work correctly after deserialization
@@ -5026,6 +5104,7 @@ echo $msgs | cargo run -- serve --dir . --ext rs
 **Scenario:** `query_authors()` returns both `first_commit_timestamp` and `last_commit_timestamp` for each author, enabling the cached `search_git_authors` handler to populate both `firstChange` and `lastChange` fields.
 
 **Expected:**
+
 - Alice with commits at 1700000000 and 1700002000: `first_commit_timestamp=1700000000`, `last_commit_timestamp=1700002000`
 - Bob with single commit at 1700001000: `first_commit_timestamp=last_commit_timestamp=1700001000`
 
@@ -5038,6 +5117,7 @@ echo $msgs | cargo run -- serve --dir . --ext rs
 **Scenario:** When building the git cache from scratch for a large repo, the background thread emits periodic progress messages to stderr so the user knows it's still working.
 
 **Expected:**
+
 - stderr: `[git-cache] Initializing for <dir>...` (immediately on thread start)
 - stderr: `[git-cache] Detected branch: <branch>` (after detect_default_branch)
 - stderr: `[git-cache] Building cache for branch '<branch>' (this may take a few minutes for large repos)...`
@@ -5080,6 +5160,7 @@ echo $msgs | search serve --dir . --ext rs
 **Scenario:** When a commit line in git log output has a non-numeric timestamp (e.g., `not_a_number`), the parser should skip that commit and continue parsing subsequent commits. File paths listed after the bad commit should NOT be associated with any commit.
 
 **Expected:**
+
 - The commit with bad timestamp is skipped
 - Files listed after the bad commit are NOT in `file_commits`
 - Subsequent valid commits are parsed normally
@@ -5093,6 +5174,7 @@ echo $msgs | search serve --dir . --ext rs
 **Scenario:** The author pool uses `u16` indices, limiting the maximum number of unique authors to 65535. When the 65536th unique author is encountered, `intern_author()` returns an error which propagates through `parse_git_log_stream()`. Exactly 65535 unique authors should succeed.
 
 **Expected:**
+
 - 65535 unique authors: parsing succeeds, cache has 65535 authors
 - 65536 unique authors: parsing returns error containing "Too many unique authors"
 
@@ -5105,6 +5187,7 @@ echo $msgs | search serve --dir . --ext rs
 **Scenario:** `cache_path_for()` produces different cache file paths for different input directories.
 
 **Expected:**
+
 - `cache_path_for("ProjectA")` ≠ `cache_path_for("ProjectB")`
 - Both have `.git-history` extension
 
@@ -5117,6 +5200,7 @@ echo $msgs | search serve --dir . --ext rs
 **Scenario:** End-to-end test for `GitHistoryCache::build()` using a real git repository created in a temp directory. Creates files, makes commits, then verifies the cache correctly reflects the commit history.
 
 **Expected:**
+
 - 2 commits in cache
 - 1 author ("Test")
 - `file_a.txt` has 2 commit refs, `file_b.txt` has 1
@@ -5131,6 +5215,7 @@ echo $msgs | search serve --dir . --ext rs
 **Scenario:** A commit at `2024-12-16 17:28:32 UTC` (timestamp 1734370112) should be found when querying with the exact date range `[2024-12-16 00:00:00, 2024-12-16 23:59:59]` UTC, and should NOT be found when querying with the wrong year `[2025-12-16 00:00:00, 2025-12-16 23:59:59]`.
 
 **Expected:**
+
 - `from=1734307200, to=1734393599` (2024-12-16 range) → 1 commit found
 - `from=1765843200, to=1765929599` (2025-12-16 range) → 0 commits found
 - `query_activity` and `query_file_history` return consistent results for the same date range
@@ -5144,6 +5229,7 @@ echo $msgs | search serve --dir . --ext rs
 **Scenario:** Git stores file paths case-sensitively. `query_file_history()` uses HashMap exact lookup, so `src/Helpers/File.cs` ≠ `src/helpers/File.cs`. This is by-design behavior, not a bug.
 
 **Expected:**
+
 - Exact case match finds the commit
 - Case-mismatched path returns 0 results
 
@@ -5156,6 +5242,7 @@ echo $msgs | search serve --dir . --ext rs
 **Scenario:** `query_authors()` should always return non-zero `first_commit_timestamp` and `last_commit_timestamp` for files that have commits.
 
 **Expected:**
+
 - Multi-commit author: `first_commit_timestamp` = earliest, `last_commit_timestamp` = latest
 - Single-commit author: `first_commit_timestamp == last_commit_timestamp`
 - Both values > 0
@@ -5169,6 +5256,7 @@ echo $msgs | search serve --dir . --ext rs
 **Scenario:** The `add_date_args()` function appends `T00:00:00Z` to date strings passed to git's `--after`/`--before` flags, ensuring UTC interpretation regardless of local timezone.
 
 **Expected:**
+
 - `--after=2025-12-16T00:00:00Z` (not `--after=2025-12-16`)
 - `--before=2025-12-17T00:00:00Z` (not `--before=2025-12-17`)
 - CLI behavior matches cache behavior (both use UTC)
@@ -5182,6 +5270,7 @@ echo $msgs | search serve --dir . --ext rs
 **Scenario:** SHA-1 hex string ↔ `[u8; 20]` byte array conversion.
 
 **Expected:**
+
 - Roundtrip preserves value
 - Mixed-case hex → lowercase on output
 - Invalid length/chars → Err

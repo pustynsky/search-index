@@ -21,29 +21,29 @@ Unless noted, numbers are from Machine 1. Cross-machine comparisons are shown wh
 
 Real production C# codebase (enterprise backend monorepo):
 
-| Metric                       | Value              |
-| ---------------------------- | ------------------ |
-| Total files indexed          | 48,599–48,639 (varies by run) |
-| File types                   | C# (.cs)           |
-| Unique tokens                | 754,350            |
-| Total token occurrences      | 33,082,236         |
-| Definitions (AST)            | ~846,000           |
-| Call sites                   | ~2.4M              |
+| Metric                       | Value                                                   |
+| ---------------------------- | ------------------------------------------------------- |
+| Total files indexed          | 48,599–48,639 (varies by run)                           |
+| File types                   | C# (.cs)                                                |
+| Unique tokens                | 754,350                                                 |
+| Total token occurrences      | 33,082,236                                              |
+| Definitions (AST)            | ~846,000                                                |
+| Call sites                   | ~2.4M                                                   |
 | Content index size           | 223.7 MB on disk (LZ4 compressed; ~350 MB uncompressed) |
 | Definition index size        | 103.1 MB on disk (LZ4 compressed; ~328 MB uncompressed) |
-| Files parsed for definitions | 48,599–48,649 (varies by run) |
+| Files parsed for definitions | 48,599–48,649 (varies by run)                           |
 
 ## Content Search: search vs ripgrep
 
 Single-term search for `HttpClient` across the full codebase. search.exe token matching finds 1,072 files; rg substring matching finds 2,092 files (includes `IHttpClientFactory`, `HttpClientHandler`, etc.):
 
-| Tool                                           | Operation                         | Total Time | Speedup      |
-| ---------------------------------------------- | --------------------------------- | --------- | ------------ |
-| `rg HttpClient -g '*.cs' -l`                   | Live file scan                    | 32.0s     | baseline     |
-| `search find "HttpClient" --contents -e cs -c` | Live parallel walk (24 threads)   | 14.5s     | **2×**       |
-| `search grep "HttpClient" -e cs -c`            | Inverted index (total incl. load) | 1.76s     | **18×**      |
-| ↳ index load from disk                         | LZ4 decompress + bincode deserialize (223.7 MB on disk) | 1.19s | — |
-| ↳ search + TF-IDF rank                         | HashMap lookup + scoring          | 0.757ms   | **42,300×**  |
+| Tool                                           | Operation                                               | Total Time | Speedup     |
+| ---------------------------------------------- | ------------------------------------------------------- | ---------- | ----------- |
+| `rg HttpClient -g '*.cs' -l`                   | Live file scan                                          | 32.0s      | baseline    |
+| `search find "HttpClient" --contents -e cs -c` | Live parallel walk (24 threads)                         | 14.5s      | **2×**      |
+| `search grep "HttpClient" -e cs -c`            | Inverted index (total incl. load)                       | 1.76s      | **18×**     |
+| ↳ index load from disk                         | LZ4 decompress + bincode deserialize (223.7 MB on disk) | 1.19s      | —           |
+| ↳ search + TF-IDF rank                         | HashMap lookup + scoring                                | 0.757ms    | **42,300×** |
 
 > **Note:** In MCP server mode, the index is loaded once at startup. All subsequent queries pay only the search+rank cost (0.6–4ms depending on hardware), not the load cost.
 >
@@ -53,15 +53,15 @@ Single-term search for `HttpClient` across the full codebase. search.exe token m
 
 Measured via `search grep` on 48,779-file C# index (754K unique tokens). Search+Rank is the pure in-memory search time; total CLI time also includes index load from disk (~1.2s, LZ4 decompress + bincode deserialize):
 
-| Query Type                                | Search+Rank Time | Files Matched | Notes |
-| ----------------------------------------- | ---------------- | ------------- | ----- |
-| Single token (`BlockServiceProvider`)     | 1.69ms           | 2,718         | rg: 2,745 files (31.2s) |
-| Single token (`HttpClient`)              | 0.76ms           | 1,072         | rg: 2,092 files (32.0s) |
-| Multi-term OR (3 class variants)          | 0.04ms           | 13            | rg: 26 files (35.3s) |
-| Multi-term AND (`IFlightResolver` + `MonitoredScope`) | 1.01ms | 19        | rg: 369 files (64.8s) |
-| Phrase (`new ConcurrentDictionary`)       | 345ms            | 311           | rg: 311 files (34.4s) |
-| Regex (`I.*Cache`)                        | 60.6ms           | 1,425         | rg: 2,650 files (33.6s) |
-| Exclude filters (`CatalogQueryManager`)  | 0.025ms          | 2             | rg: 4 files (22.9s) |
+| Query Type                                            | Search+Rank Time | Files Matched | Notes                   |
+| ----------------------------------------------------- | ---------------- | ------------- | ----------------------- |
+| Single token (`OrderServiceProvider`)                 | 1.69ms           | 2,718         | rg: 2,745 files (31.2s) |
+| Single token (`HttpClient`)                           | 0.76ms           | 1,072         | rg: 2,092 files (32.0s) |
+| Multi-term OR (3 class variants)                      | 0.04ms           | 13            | rg: 26 files (35.3s)    |
+| Multi-term AND (`IFeatureResolver` + `MonitoredTask`) | 1.01ms           | 19            | rg: 369 files (64.8s)   |
+| Phrase (`new ConcurrentDictionary`)                   | 345ms            | 311           | rg: 311 files (34.4s)   |
+| Regex (`I.*Cache`)                                    | 60.6ms           | 1,425         | rg: 2,650 files (33.6s) |
+| Exclude filters (`StorageIndexManager`)               | 0.025ms          | 2             | rg: 4 files (22.9s)     |
 
 **File count differences**: search.exe uses exact token matching by default in CLI mode (no `--substring` flag). rg does substring content matching. In MCP mode, `substring=true` is the default, so MCP file counts typically match rg.
 
@@ -76,7 +76,7 @@ Comprehensive comparison of MCP `tools/call` JSON-RPC queries vs `rg` (ripgrep v
 | 1   | Token single (`OrderServiceProvider`)                 | 2,714     | 2,741      | **1.76**      | 38,025       | **21,600×**    |
 | 2   | Multi-term OR (3 variants)                            | 13        | 26         | **0.03**      | 36,921       | **1,230,700×** |
 | 3   | Multi-term AND (`IFeatureResolver` + `MonitoredTask`) | 298       | 0¹         | **1.13**      | 78,717       | **69,700×**    |
-| 4   | Substring compound (`FindAsyncWithQuery`)            | 3         | 3          | **1.03**      | 37,561       | **36,500×**    |
+| 4   | Substring compound (`FindAsyncWithQuery`)             | 3         | 3          | **1.03**      | 37,561       | **36,500×**    |
 | 5   | Substring short (`ProductQuery`)                      | 28        | 28         | **0.94**      | 40,485       | **43,100×**    |
 | 6   | Phrase (`new ConcurrentDictionary`)                   | 310       | 310        | **455.26**    | 39,729       | **87×**        |
 | 7   | Regex (`I\w*Cache`)                                   | 1,418     | 2,642      | **131.63**    | 37,809       | **287×**       |
@@ -166,13 +166,13 @@ Comprehensive comparison of MCP `tools/call` JSON-RPC queries vs `rg` (ripgrep v
 
 MCP and ripgrep may return different file counts for the same query when using `substring=false` (exact token mode). With the current default (`substring=true`), MCP file counts match ripgrep in most cases:
 
-| Test       | MCP (`substring=false`) | MCP (`substring=true`, default) | rg    | Reason (when `substring=false`)                                                                 | Status                                                |
-| ---------- | ----------------------- | ------------------------------- | ----- | ----------------------------------------------------------------------------------------------- | ----------------------------------------------------- |
-| **Test 1** | 2,714                   | ~2,741                          | 2,741 | Exact token mode misses partial matches in compound identifiers                                  | ✅ Fixed — `substring=true` is now the default        |
-| **Test 2** | 13                      | 26                              | 26    | Exact tokens miss e.g. `UserMapperCache` inside `DeleteUserMapperCacheEntry`                    | ✅ Fixed — `substring=true` is now the default        |
-| **Test 3** | 298                     | 298                             | 0¹    | rg AND script has PowerShell pipeline issue; MCP AND mode works natively with set intersection  | N/A (MCP is correct)                                  |
-| **Test 7** | 1,418                   | 1,418                           | 2,642 | MCP regex runs on tokenized index (whole tokens); rg matches raw substrings anywhere            | Expected — regex mode auto-disables substring         |
-| **Test 9** | 3                       | 3                               | 6     | MCP exclude filters match more aggressively on path substrings vs rg glob patterns              | Check exclude patterns                                |
+| Test       | MCP (`substring=false`) | MCP (`substring=true`, default) | rg    | Reason (when `substring=false`)                                                                | Status                                         |
+| ---------- | ----------------------- | ------------------------------- | ----- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| **Test 1** | 2,714                   | ~2,741                          | 2,741 | Exact token mode misses partial matches in compound identifiers                                | ✅ Fixed — `substring=true` is now the default |
+| **Test 2** | 13                      | 26                              | 26    | Exact tokens miss e.g. `UserMapperCache` inside `DeleteUserMapperCacheEntry`                   | ✅ Fixed — `substring=true` is now the default |
+| **Test 3** | 298                     | 298                             | 0¹    | rg AND script has PowerShell pipeline issue; MCP AND mode works natively with set intersection | N/A (MCP is correct)                           |
+| **Test 7** | 1,418                   | 1,418                           | 2,642 | MCP regex runs on tokenized index (whole tokens); rg matches raw substrings anywhere           | Expected — regex mode auto-disables substring  |
+| **Test 9** | 3                       | 3                               | 6     | MCP exclude filters match more aggressively on path substrings vs rg glob patterns             | Check exclude patterns                         |
 
 ### Deep Dive: How substring search eliminates file count gaps
 
@@ -206,43 +206,43 @@ Both modes complete in ~1ms. The default substring mode finds **28 matched token
 
 Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O on queries.
 
-| # | Task | ripgrep (`rg`) | search-index MCP | Speedup | MCP Tool |
-|---|------|---------------|-----------------|---------|----------|
-| 1 | Find a method definition by name | 48,993 ms | 38.7 ms | **1,266×** | `search_definitions` |
-| 2 | Build a call tree (3 levels deep) | 52,121 ms ¹ | 0.51 ms | **~100,000×** | `search_callers` |
-| 3 | Find which method contains line N | 195 ms ² | 7.7 ms | **25×** | `search_definitions` (containsLine) |
-| 4 | Find all implementations of an interface | 56,222 ms | 0.63 ms | **~89,000×** | `search_definitions` (baseType) |
-| 5 | Find interfaces matching a regex | 45,370 ms | 58.2 ms | **780×** | `search_definitions` (regex) |
-| 6 | Find classes with a specific attribute | 38,699 ms | 29.2 ms | **1,325×** | `search_definitions` (attribute) |
+| #   | Task                                     | ripgrep (`rg`) | search-index MCP | Speedup       | MCP Tool                            |
+| --- | ---------------------------------------- | -------------- | ---------------- | ------------- | ----------------------------------- |
+| 1   | Find a method definition by name         | 48,993 ms      | 38.7 ms          | **1,266×**    | `search_definitions`                |
+| 2   | Build a call tree (3 levels deep)        | 52,121 ms ¹    | 0.51 ms          | **~100,000×** | `search_callers`                    |
+| 3   | Find which method contains line N        | 195 ms ²       | 7.7 ms           | **25×**       | `search_definitions` (containsLine) |
+| 4   | Find all implementations of an interface | 56,222 ms      | 0.63 ms          | **~89,000×**  | `search_definitions` (baseType)     |
+| 5   | Find interfaces matching a regex         | 45,370 ms      | 58.2 ms          | **780×**      | `search_definitions` (regex)        |
+| 6   | Find classes with a specific attribute   | 38,699 ms      | 29.2 ms          | **1,325×**    | `search_definitions` (attribute)    |
 
 > ¹ `rg` only provides flat text search — it cannot build a call tree. The 52s is for a single `rg` query; building a 3-level tree manually would require 3–7 sequential queries totaling 150–350 seconds.
 > ² For containsLine, `rg` only reads a single file (not the full repo), so the speedup is smaller.
 
 ## Performance Summary by Search Mode
 
-| Mode | Latency (MCP, in-memory) | Speedup vs rg | Notes |
-|------|-------------------------|---------------|-------|
-| **Substring (trigram, default)** | 0.9–1.7 ms | 18,000–42,300× | Default mode since substring=true; uses trigram index |
-| **Token (exact, substring=false)** | 0.02–1.7 ms | 18,000–1,680,000× | Single HashMap lookup, O(1); opt-in with `substring=false` |
-| **Multi-term OR** | 0.04–5.6 ms | 950,000× | Depends on term rarity and result set size |
-| **Multi-term AND** | 1.0 ms | 64,000× | Set intersection |
-| **Phrase** | ~345 ms | 100× | Requires line-by-line file scan for phrase verification |
-| **Regex** | 61–68 ms | 500–555× | Linear scan of all token keys |
-| **Exclusion filters** | ~0.025 ms | 915,000× | Path-based filtering on indexed data |
-| **AST definitions** | 0.6–38.7 ms | 780–89,000× | Depends on query type (name, baseType, regex) |
-| **AST defs + includeBody** | ~33 ms | 1,310× | Includes file I/O to read source code |
-| **Call tree (3 levels)** | ~0.5 ms | ∞ (no rg equivalent) | Recursive traversal, zero file I/O |
+| Mode                               | Latency (MCP, in-memory) | Speedup vs rg        | Notes                                                      |
+| ---------------------------------- | ------------------------ | -------------------- | ---------------------------------------------------------- |
+| **Substring (trigram, default)**   | 0.9–1.7 ms               | 18,000–42,300×       | Default mode since substring=true; uses trigram index      |
+| **Token (exact, substring=false)** | 0.02–1.7 ms              | 18,000–1,680,000×    | Single HashMap lookup, O(1); opt-in with `substring=false` |
+| **Multi-term OR**                  | 0.04–5.6 ms              | 950,000×             | Depends on term rarity and result set size                 |
+| **Multi-term AND**                 | 1.0 ms                   | 64,000×              | Set intersection                                           |
+| **Phrase**                         | ~345 ms                  | 100×                 | Requires line-by-line file scan for phrase verification    |
+| **Regex**                          | 61–68 ms                 | 500–555×             | Linear scan of all token keys                              |
+| **Exclusion filters**              | ~0.025 ms                | 915,000×             | Path-based filtering on indexed data                       |
+| **AST definitions**                | 0.6–38.7 ms              | 780–89,000×          | Depends on query type (name, baseType, regex)              |
+| **AST defs + includeBody**         | ~33 ms                   | 1,310×               | Includes file I/O to read source code                      |
+| **Call tree (3 levels)**           | ~0.5 ms                  | ∞ (no rg equivalent) | Recursive traversal, zero file I/O                         |
 
 **Note:** These latencies are stable and unchanged by recent optimizations. Core algorithm complexity remains the same; synthetic benchmarks show 25–37% micro-optimization gains in pure computational layers (tokenization, TF-IDF).
 
 ### Unique Capabilities (no rg equivalent)
 
-| Capability               | Tool                 | What it does                                                                                           |
-| ------------------------ | -------------------- | ------------------------------------------------------------------------------------------------------ |
-| **AST definitions**      | `search_definitions` | Find classes/methods/interfaces by name, kind, parent, base type, attributes — with inline source code |
-| **Call trees**           | `search_callers`     | Build hierarchical caller/callee trees across the entire codebase in < 1ms                             |
-| **Structured results**   | `search_grep`        | TF-IDF ranked files with occurrence counts, line numbers, context groups                               |
-| **Substring matching**   | `search_grep`        | Default `substring=true` matches inside compound identifiers (e.g., `TenantMapper` finds `DeleteTenantMapperCacheEntry`) |
+| Capability             | Tool                 | What it does                                                                                                             |
+| ---------------------- | -------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| **AST definitions**    | `search_definitions` | Find classes/methods/interfaces by name, kind, parent, base type, attributes — with inline source code                   |
+| **Call trees**         | `search_callers`     | Build hierarchical caller/callee trees across the entire codebase in < 1ms                                               |
+| **Structured results** | `search_grep`        | TF-IDF ranked files with occurrence counts, line numbers, context groups                                                 |
+| **Substring matching** | `search_grep`        | Default `substring=true` matches inside compound identifiers (e.g., `TenantMapper` finds `DeleteTenantMapperCacheEntry`) |
 
 ### When to Use ripgrep Instead
 
@@ -255,30 +255,30 @@ Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O
 
 Verified measurements from two machines:
 
-| Tool | Query Type | Machine 1 (24 threads) | Machine 2 (16 threads) |
-|------|-----------|------------------------|------------------------|
-| `search_grep` | Single token (substring=true, default) | ~1 ms | 1.7 ms |
-| `search_grep` | Single token (substring=false) | 0.6 ms | 0.8 ms |
-| `search_grep` | Multi-term OR (3) | 5.6 ms | 0.06 ms |
-| `search_grep` | Regex (i.*cache) | 44 ms | 340 ms |
-| `search_grep` | Phrase | ~345 ms | 55 ms |
-| `search_grep` | Exclusion filters | ~0.03 ms | 0.04 ms |
-| `search_grep` | Context lines (top 5) | ~6 ms | — |
-| `search_definitions` | Find by name | 38.7 ms | — |
-| `search_definitions` | Find implementations (baseType) | 0.63 ms | — |
-| `search_definitions` | containsLine | 7.7 ms | — |
-| `search_definitions` | Attribute filter | 29.2 ms | — |
-| `search_definitions` | With includeBody | ~33 ms | — |
-| `search_callers` | Call tree (3 levels) | 0.5 ms | — |
-| `search_find` | Live filesystem walk | — | 983 ms |
+| Tool                 | Query Type                             | Machine 1 (24 threads) | Machine 2 (16 threads) |
+| -------------------- | -------------------------------------- | ---------------------- | ---------------------- |
+| `search_grep`        | Single token (substring=true, default) | ~1 ms                  | 1.7 ms                 |
+| `search_grep`        | Single token (substring=false)         | 0.6 ms                 | 0.8 ms                 |
+| `search_grep`        | Multi-term OR (3)                      | 5.6 ms                 | 0.06 ms                |
+| `search_grep`        | Regex (i.\*cache)                      | 44 ms                  | 340 ms                 |
+| `search_grep`        | Phrase                                 | ~345 ms                | 55 ms                  |
+| `search_grep`        | Exclusion filters                      | ~0.03 ms               | 0.04 ms                |
+| `search_grep`        | Context lines (top 5)                  | ~6 ms                  | —                      |
+| `search_definitions` | Find by name                           | 38.7 ms                | —                      |
+| `search_definitions` | Find implementations (baseType)        | 0.63 ms                | —                      |
+| `search_definitions` | containsLine                           | 7.7 ms                 | —                      |
+| `search_definitions` | Attribute filter                       | 29.2 ms                | —                      |
+| `search_definitions` | With includeBody                       | ~33 ms                 | —                      |
+| `search_callers`     | Call tree (3 levels)                   | 0.5 ms                 | —                      |
+| `search_find`        | Live filesystem walk                   | —                      | 983 ms                 |
 
 ## File Name Search
 
 Searching for `notepad` in 333,875 indexed entries (C:\Windows):
 
 | Tool                                     | Operation            | Total Time |
-| ---------------------------------------- | -------------------- | --------- |
-| `search fast "notepad" -d C:\Windows -c` | Pre-built file index | 0.091s    |
+| ---------------------------------------- | -------------------- | ---------- |
+| `search fast "notepad" -d C:\Windows -c` | Pre-built file index | 0.091s     |
 
 Index load: 0.055s, search: 0.036s.
 
@@ -286,19 +286,19 @@ Index load: 0.055s, search: 0.036s.
 
 Three distinct indexes, each built independently:
 
-| Index Type | What it stores | CLI command | MCP tool |
-|---|---|---|---|
-| **FileIndex** (.file-list) | File paths, sizes, timestamps | `search index` | — |
-| **ContentIndex** (.word-search) | Inverted token→file map for TF-IDF search | `search content-index` | `search_reindex` |
-| **DefinitionIndex** (.code-structure) | AST definitions + call graph | `search def-index` | `search_reindex_definitions` |
+| Index Type                            | What it stores                            | CLI command            | MCP tool                     |
+| ------------------------------------- | ----------------------------------------- | ---------------------- | ---------------------------- |
+| **FileIndex** (.file-list)            | File paths, sizes, timestamps             | `search index`         | —                            |
+| **ContentIndex** (.word-search)       | Inverted token→file map for TF-IDF search | `search content-index` | `search_reindex`             |
+| **DefinitionIndex** (.code-structure) | AST definitions + call graph              | `search def-index`     | `search_reindex_definitions` |
 
 ### Build times across machines
 
-| Index Type                 | Files           | Machine 1 (24 threads) | Machine 2 (16 threads) | Disk Size (LZ4 compressed) |
-| -------------------------- | --------------- | ---------------------- | ---------------------- | -------------------------- |
-| FileIndex (C:\Windows)     | 333,875 entries | ~3s                    | —                      | 47.8 MB                    |
-| ContentIndex (C# files)    | 48,599 files    | 7.0s                   | 15.9s                  | 223.7 MB (1.6× compression) |
-| DefinitionIndex (C#)       | ~48,600 files   | 16.1s                  | 32.0s                  | 103.1 MB (3.2× compression) |
+| Index Type              | Files           | Machine 1 (24 threads) | Machine 2 (16 threads) | Disk Size (LZ4 compressed)  |
+| ----------------------- | --------------- | ---------------------- | ---------------------- | --------------------------- |
+| FileIndex (C:\Windows)  | 333,875 entries | ~3s                    | —                      | 47.8 MB                     |
+| ContentIndex (C# files) | 48,599 files    | 7.0s                   | 15.9s                  | 223.7 MB (1.6× compression) |
+| DefinitionIndex (C#)    | ~48,600 files   | 16.1s                  | 32.0s                  | 103.1 MB (3.2× compression) |
 
 **Why is def-index 2× slower than content-index?**
 
@@ -362,57 +362,57 @@ Extrapolated for real 241.7 MB index: ~700ms deserialize (matches measured 689ms
 
 ## Index Load Times (measured)
 
-| Index Type             | Files   | Disk Size (LZ4)  | Load Time (LZ4 decompress + deserialize)             |
-| ---------------------- | ------- | ---------------- | ---------------------------------------------------- |
-| ContentIndex           | 48,599  | 223.7 MB         | 1.186s                                               |
-| FileIndex (C:\Windows) | 333,875 | 47.8 MB          | 0.055s                                               |
-| DefinitionIndex        | ~48,600 | 103.1 MB         | 1.284s                                               |
+| Index Type             | Files   | Disk Size (LZ4) | Load Time (LZ4 decompress + deserialize) |
+| ---------------------- | ------- | --------------- | ---------------------------------------- |
+| ContentIndex           | 48,599  | 223.7 MB        | 1.186s                                   |
+| FileIndex (C:\Windows) | 333,875 | 47.8 MB         | 0.055s                                   |
+| DefinitionIndex        | ~48,600 | 103.1 MB        | 1.284s                                   |
 
 ## Comparison with ripgrep
 
 Measured on 48,779-file C# codebase (see `docs/run-benchmarks.ps1` for automated reproduction):
 
-| Metric                          | ripgrep | search (indexed)       | Speedup     |
-| ------------------------------- | ------- | ---------------------- | ----------- |
-| First query (CLI, cold)         | 32.0s   | 1.76s (incl. load)     | **18×**     |
-| Subsequent queries (MCP server) | 32.0s   | 0.02–1.7ms             | **18,000–1,600,000×** |
-| Phrase search (MCP)             | ~34s    | ~345ms                 | **100×**    |
-| Regex search (MCP)              | ~34s    | 61–68ms                | **500–555×** |
-| AST definitions (MCP)           | 39–56s  | 0.6–38.7ms             | **780–89,000×** |
-| Call tree (MCP)                 | N/A     | ~0.5ms                 | ∞           |
-| Index build (content, one-time) | N/A     | 7–16s                  | —           |
-| Index build (defs, one-time)    | N/A     | 16–32s                 | —           |
-| Disk overhead                   | None    | ~327 MB (LZ4 compressed content+defs) | —  |
-| RAM (server mode, estimated)    | None    | ~500 MB (not measured) | —           |
+| Metric                          | ripgrep | search (indexed)                      | Speedup               |
+| ------------------------------- | ------- | ------------------------------------- | --------------------- |
+| First query (CLI, cold)         | 32.0s   | 1.76s (incl. load)                    | **18×**               |
+| Subsequent queries (MCP server) | 32.0s   | 0.02–1.7ms                            | **18,000–1,600,000×** |
+| Phrase search (MCP)             | ~34s    | ~345ms                                | **100×**              |
+| Regex search (MCP)              | ~34s    | 61–68ms                               | **500–555×**          |
+| AST definitions (MCP)           | 39–56s  | 0.6–38.7ms                            | **780–89,000×**       |
+| Call tree (MCP)                 | N/A     | ~0.5ms                                | ∞                     |
+| Index build (content, one-time) | N/A     | 7–16s                                 | —                     |
+| Index build (defs, one-time)    | N/A     | 16–32s                                | —                     |
+| Disk overhead                   | None    | ~327 MB (LZ4 compressed content+defs) | —                     |
+| RAM (server mode, estimated)    | None    | ~500 MB (not measured)                | —                     |
 
 ## Bottlenecks and Scaling Limits
 
-| Bottleneck              | Measured Value       | Cause                                | Mitigation                               |
-| ----------------------- | -------------------- | ------------------------------------ | ---------------------------------------- |
-| Index load              | ~1.2s for 224 MB (LZ4) | LZ4 decompression + bincode deserialization | Memory-map + lazy load (not implemented) |
-| Phrase search           | ~345ms               | Line-by-line file scan for phrase verification | Consider positional index (not implemented) |
-| Regex search            | 61–68ms for 754K tokens | Linear scan of all keys           | FST for prefix queries (not implemented) |
-| Multi-term OR (3 terms) | 5.6ms                | Scoring 13K+ posting entries         | Acceptable for interactive use           |
-| Content index build     | 7.0s                 | Parallel I/O + tokenization          | Already parallelized (24 threads)        |
-| Def index build         | 16.1s                | tree-sitter parsing CPU-bound        | Already parallelized (24 threads)        |
+| Bottleneck              | Measured Value          | Cause                                          | Mitigation                                  |
+| ----------------------- | ----------------------- | ---------------------------------------------- | ------------------------------------------- |
+| Index load              | ~1.2s for 224 MB (LZ4)  | LZ4 decompression + bincode deserialization    | Memory-map + lazy load (not implemented)    |
+| Phrase search           | ~345ms                  | Line-by-line file scan for phrase verification | Consider positional index (not implemented) |
+| Regex search            | 61–68ms for 754K tokens | Linear scan of all keys                        | FST for prefix queries (not implemented)    |
+| Multi-term OR (3 terms) | 5.6ms                   | Scoring 13K+ posting entries                   | Acceptable for interactive use              |
+| Content index build     | 7.0s                    | Parallel I/O + tokenization                    | Already parallelized (24 threads)           |
+| Def index build         | 16.1s                   | tree-sitter parsing CPU-bound                  | Already parallelized (24 threads)           |
 
 ## Cross-Machine Variability
 
 Benchmarks measured on two machines using the same benchmark script (`run-benchmarks.ps1`). Machine 2 is an Azure VM with DevDrive (ReFS) on NVMe-backed storage:
 
-| Metric | i7-12850HX (24 threads) | Xeon 8370C (16 threads) | Ratio | Bottleneck |
-|---|---|---|---|---|
-| Single token search | 1.69ms | 1.69ms | 1.0× | CPU |
-| Multi-term OR (3) | 0.013ms | 0.063ms | 4.8× | CPU |
-| Multi-term AND (2) | 0.034ms | 1.14ms | 33× | CPU |
-| Phrase search | 345ms | 55ms | 0.16× (M2 faster) | Disk I/O |
-| Regex (I.*Cache) | 61ms | 340ms | 5.6× | CPU |
-| HttpClient (token) | 0.757ms | 0.848ms | 1.1× | CPU |
-| Live file walk | 14.4s | 983ms | 0.07× (M2 faster) | Disk I/O |
-| Index load (startup) | ~1.2s | ~4.0s | 3.3× | CPU (LZ4 decompress + deserialize) |
-| Content index build | 7.0s | 15.9s | 2.3× | CPU + I/O |
-| Def index build | 16.1s | 32.0s | 2× | CPU |
-| Watcher update (1 file) | ~5ms (from logs) | ~0.9s | 180× | CPU (tree-sitter) |
+| Metric                  | i7-12850HX (24 threads) | Xeon 8370C (16 threads) | Ratio             | Bottleneck                         |
+| ----------------------- | ----------------------- | ----------------------- | ----------------- | ---------------------------------- |
+| Single token search     | 1.69ms                  | 1.69ms                  | 1.0×              | CPU                                |
+| Multi-term OR (3)       | 0.013ms                 | 0.063ms                 | 4.8×              | CPU                                |
+| Multi-term AND (2)      | 0.034ms                 | 1.14ms                  | 33×               | CPU                                |
+| Phrase search           | 345ms                   | 55ms                    | 0.16× (M2 faster) | Disk I/O                           |
+| Regex (I.\*Cache)       | 61ms                    | 340ms                   | 5.6×              | CPU                                |
+| HttpClient (token)      | 0.757ms                 | 0.848ms                 | 1.1×              | CPU                                |
+| Live file walk          | 14.4s                   | 983ms                   | 0.07× (M2 faster) | Disk I/O                           |
+| Index load (startup)    | ~1.2s                   | ~4.0s                   | 3.3×              | CPU (LZ4 decompress + deserialize) |
+| Content index build     | 7.0s                    | 15.9s                   | 2.3×              | CPU + I/O                          |
+| Def index build         | 16.1s                   | 32.0s                   | 2×                | CPU                                |
+| Watcher update (1 file) | ~5ms (from logs)        | ~0.9s                   | 180×              | CPU (tree-sitter)                  |
 
 **Key insight:** CPU-bound operations (regex, index deserialization, tree-sitter parsing) are 2–6× slower on the Xeon due to lower single-thread clock speed (2.80GHz vs i7 turbo 4.8GHz). I/O-bound operations (phrase verification, live file walk) are significantly faster on the Azure VM with DevDrive.
 
@@ -422,18 +422,18 @@ The watcher update discrepancy is notable — the original "~5ms" figure appears
 
 Latest `cargo bench` run (2026-02-17) shows consistent micro-optimizations across synthetic benchmarks:
 
-| Layer | Improvement | Magnitude |
-|-------|-------------|-----------|
-| Tokenization | Short lines | -28.6% |
-| Tokenization | Medium lines | -27.1% |
-| Tokenization | Long lines | -37.9% |
-| Tokenization | Code blocks | -30.0% |
-| Index lookup | All sizes | ~30% avg |
-| TF-IDF single term | All sizes | ~25-30% |
-| TF-IDF multi-term | All sizes | ~25-36% |
-| Regex token scan | All patterns | ~15-25% |
-| Trigram building | All sizes | ~18-37% |
-| Substring search | All queries | ~24-35% |
+| Layer              | Improvement  | Magnitude |
+| ------------------ | ------------ | --------- |
+| Tokenization       | Short lines  | -28.6%    |
+| Tokenization       | Medium lines | -27.1%    |
+| Tokenization       | Long lines   | -37.9%    |
+| Tokenization       | Code blocks  | -30.0%    |
+| Index lookup       | All sizes    | ~30% avg  |
+| TF-IDF single term | All sizes    | ~25-30%   |
+| TF-IDF multi-term  | All sizes    | ~25-36%   |
+| Regex token scan   | All patterns | ~15-25%   |
+| Trigram building   | All sizes    | ~18-37%   |
+| Substring search   | All queries  | ~24-35%   |
 
 **Impact:** These improvements are algorithmic micro-optimizations in CPU-bound operations (tokenization, scoring, trigram generation). End-to-end MCP query latencies (0.6–5.6ms for most queries) remain unchanged because they are dominated by:
 
@@ -473,3 +473,4 @@ search serve --dir <YOUR_DIR> --ext cs --watch --definitions
 # Automated benchmark suite (PowerShell)
 # Runs 9 tests comparing rg vs search.exe CLI with real class/method names
 .\docs\run-benchmarks.ps1 -SearchDir <YOUR_DIR>
+```
