@@ -8,11 +8,12 @@ After every code change, before completing the task, verify ALL of the following
 2. **E2E test plan** — `docs/e2e-test-plan.md` is updated with test scenarios for the change
 3. **E2E test script** — evaluate whether `e2e-test.ps1` should also get new test cases for the change (CLI-testable scenarios). If yes — add them
 4. **Documentation** — `README.md` and the rest relevant GIT-tracked documents are updated
-5. **Neutral names** — all class/method names in docs, tests, and tool descriptions are generic (e.g., `UserService`, `OrderProcessor`) — never expose internal/proprietary names
-6. **All tests pass** — run `cargo test --bin search` and confirm 0 failures
-7. **Ask user to stop MCP server** — before reinstalling the binary, ask the user to stop the MCP server (restart VS Code or stop the search-index server)
-8. **Reinstall binary** — `cargo install --path . --force`
-9. **Run E2E tests** — after the binary is installed, run `.\e2e-test.ps1` and confirm 0 failures
+5. **Changelog** — `CHANGELOG.md` is updated with a concise entry describing the change (categorized as Features, Bug Fixes, Performance, or Internal)
+6. **Neutral names** — all class/method names in docs, tests, and tool descriptions are generic (e.g., `UserService`, `OrderProcessor`) — never expose internal/proprietary names
+7. **All tests pass** — run `cargo test --bin search` and confirm 0 failures
+8. **Ask user to stop MCP server** — before reinstalling the binary, ask the user to stop the MCP server (restart VS Code or stop the search-index server)
+9. **Reinstall binary** — `cargo install --path . --force`
+10. **Run E2E tests** — after the binary is installed, run `.\e2e-test.ps1` and confirm 0 failures
 
 ## Git Workflow — After All Tests Pass
 
