@@ -10,12 +10,12 @@ pub(crate) fn parse_typescript_definitions(
     parser: &mut tree_sitter::Parser,
     source: &str,
     file_id: u32,
-) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>) {
+) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>) {
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => {
             eprintln!("[def-index] WARNING: tree-sitter TS parse returned None for file_id={}", file_id);
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new());
         }
     };
 
@@ -76,7 +76,19 @@ pub(crate) fn parse_typescript_definitions(
         }
     }
 
-    (defs, call_sites)
+    // Compute code stats for pre-collected method/constructor/function nodes
+    let call_count_map: HashMap<usize, u16> = call_sites.iter()
+        .map(|(idx, calls)| (*idx, calls.len() as u16))
+        .collect();
+
+    let mut code_stats_entries: Vec<(usize, CodeStats)> = Vec::new();
+    for &(def_local_idx, method_node) in &method_nodes {
+        let mut stats = compute_code_stats_typescript(method_node, source);
+        stats.call_count = call_count_map.get(&def_local_idx).copied().unwrap_or(0);
+        code_stats_entries.push((def_local_idx, stats));
+    }
+
+    (defs, call_sites, code_stats_entries)
 }
 
 // ─── AST walking ────────────────────────────────────────────────────
@@ -1387,6 +1399,151 @@ fn resolve_ts_receiver_type(
             } else {
                 None
             }
+        }
+    }
+}
+
+// ─── Code stats computation ─────────────────────────────────────────
+
+fn compute_code_stats_typescript(
+    method_node: tree_sitter::Node,
+    _source: &str,
+) -> CodeStats {
+    let mut stats = CodeStats::default();
+    stats.cyclomatic_complexity = 1; // base complexity
+
+    // paramCount from formal_parameters (not from body walk)
+    stats.param_count = count_parameters_typescript(method_node);
+
+    // Find body node — statement_block for methods/functions, or arrow body
+    let body = find_child_by_kind(method_node, "statement_block")
+        .or_else(|| {
+            // For arrow functions assigned to fields: public_field_definition -> value -> arrow_function -> body
+            find_child_by_field(method_node, "value")
+                .and_then(|v| if v.kind() == "arrow_function" {
+                    find_child_by_kind(v, "statement_block")
+                        .or(Some(v)) // expression body arrow
+                } else {
+                    None
+                })
+        });
+
+    if let Some(body_node) = body {
+        walk_code_stats_typescript(body_node, 0, &mut stats);
+    }
+
+    // callCount is filled separately from call_sites after invocations walk
+    stats
+}
+
+pub(crate) fn count_parameters_typescript(method_node: tree_sitter::Node) -> u8 {
+    // Direct formal_parameters child
+    find_child_by_kind(method_node, "formal_parameters")
+        .or_else(|| {
+            // For arrow function fields: public_field_definition -> value -> arrow_function -> formal_parameters
+            find_child_by_field(method_node, "value")
+                .filter(|v| v.kind() == "arrow_function")
+                .and_then(|v| find_child_by_kind(v, "formal_parameters"))
+        })
+        .map(|params| {
+            (0..params.child_count())
+                .filter(|&i| params.child(i).map(|c| c.is_named()).unwrap_or(false))
+                .count() as u8
+        })
+        .unwrap_or(0)
+}
+
+fn walk_code_stats_typescript(
+    node: tree_sitter::Node,
+    nesting: u32,
+    stats: &mut CodeStats,
+) {
+    let kind = node.kind();
+
+    // ═══ Complexity increments ═══
+    match kind {
+        // B2: structural increment + nesting penalty (cognitive)
+        "if_statement" | "for_statement" | "for_in_statement"
+        | "while_statement" | "do_statement"
+        | "switch_statement"
+        | "catch_clause" | "ternary_expression" => {
+            stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
+            stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1 + nesting as u16);
+        }
+
+        // else/else-if handling
+        // Note: else does NOT add +1 cyclomatic (it's not a decision point).
+        "else_clause" => {
+            let is_else_if = (0..node.child_count())
+                .any(|i| node.child(i).map(|c| c.kind() == "if_statement").unwrap_or(false));
+            if !is_else_if {
+                // standalone else: +1 cognitive, no nesting penalty
+                stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1);
+            }
+            // else-if: child if_statement handles its own +1
+        }
+
+        // Logical operators (cognitive: sequence tracking via parent check)
+        "binary_expression" => {
+            if let Some(op) = node.child(1) {
+                let op_kind = op.kind();
+                if op_kind == "&&" || op_kind == "||" {
+                    // Cyclomatic: always +1 per operator
+                    stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
+                    // Cognitive: +1 only at start of new operator sequence
+                    let parent_same_op = node.parent()
+                        .filter(|p| p.kind() == "binary_expression")
+                        .and_then(|p| p.child(1))
+                        .map(|pop| pop.kind() == op_kind)
+                        .unwrap_or(false);
+                    if !parent_same_op {
+                        stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        // Switch cases: cyclomatic only (switch_statement already counted cognitive)
+        "switch_case" => {
+            stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
+        }
+
+        // Return/throw
+        "return_statement" | "throw_statement" => {
+            stats.return_count = stats.return_count.saturating_add(1);
+        }
+
+        // Lambdas
+        "arrow_function" | "function_expression" => {
+            stats.lambda_count = stats.lambda_count.saturating_add(1);
+        }
+
+        _ => {}
+    }
+
+    // ═══ Nesting for children ═══
+    let body_nesting = match kind {
+        "if_statement" | "for_statement" | "for_in_statement"
+        | "while_statement" | "do_statement" | "switch_statement"
+        | "catch_clause" | "ternary_expression"
+        | "try_statement" | "arrow_function"
+        | "function_expression" => nesting + 1,
+        _ => nesting,
+    };
+
+    stats.max_nesting_depth = stats.max_nesting_depth.max(body_nesting as u8);
+
+    // ═══ Recurse with else_clause nesting rules ═══
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            let child_nesting = match (kind, child.kind()) {
+                ("if_statement", "else_clause") => nesting,    // else at same level as if
+                ("else_clause", "if_statement") => nesting,    // else-if continuation
+                ("else_clause", _) => nesting + 1,             // else body is nested
+                _ => body_nesting,
+            };
+
+            walk_code_stats_typescript(child, child_nesting, stats);
         }
     }
 }

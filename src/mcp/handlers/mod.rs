@@ -170,7 +170,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_reindex_definitions".to_string(),
-            description: "Force rebuild the AST definition index (tree-sitter) and reload it into the server's in-memory cache. Returns build metrics: files parsed, definitions extracted, call sites, parse errors, build time, and index size. Requires server started with --definitions flag.".to_string(),
+            description: "Force rebuild the AST definition index (tree-sitter) and reload it into the server's in-memory cache. Returns build metrics: files parsed, definitions extracted, call sites, codeStatsEntries (methods with complexity metrics), parse errors, build time, and index size. After rebuild, code stats are available for includeCodeStats/sortBy/min* queries. Requires server started with --definitions flag.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -250,6 +250,39 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "auditMinBytes": {
                         "type": "integer",
                         "description": "Minimum file size in bytes to flag as suspicious when audit=true. Files with 0 definitions but more than this many bytes are reported as potentially failed parses. (default: 500)"
+                    },
+                    "includeCodeStats": {
+                        "type": "boolean",
+                        "description": "Include code complexity metrics in the response. Only applies to methods, constructors, and functions (classes, fields, enum members have no codeStats). Each qualifying definition gets a 'codeStats' object with: lines, cyclomaticComplexity, cognitiveComplexity, maxNestingDepth, paramCount, returnCount, callCount, lambdaCount. Metrics are always computed during indexing — this flag just controls whether they appear in the response. For old indexes without metrics, returns results normally with summary.codeStatsAvailable=false (run search_reindex_definitions to compute). (default: false)"
+                    },
+                    "sortBy": {
+                        "type": "string",
+                        "enum": ["cyclomaticComplexity", "cognitiveComplexity", "maxNestingDepth", "paramCount", "returnCount", "callCount", "lambdaCount", "lines"],
+                        "description": "Sort results by metric (descending — worst first). Automatically enables includeCodeStats=true. Only definitions with code stats (methods/functions/constructors) are returned when sorting by a metric. 'lines' sorts by definition length and works without code stats. Overrides relevance ranking. Example: sortBy='cognitiveComplexity' maxResults=20 returns the 20 most complex methods."
+                    },
+                    "minComplexity": {
+                        "type": "integer",
+                        "description": "Filter: minimum cyclomatic complexity. Only methods/functions/constructors with complexity >= this value are returned. Automatically enables includeCodeStats=true. Multiple min* filters combine with AND logic."
+                    },
+                    "minCognitive": {
+                        "type": "integer",
+                        "description": "Filter: minimum cognitive complexity (SonarSource). Only methods with cognitive complexity >= this value are returned. Automatically enables includeCodeStats=true."
+                    },
+                    "minNesting": {
+                        "type": "integer",
+                        "description": "Filter: minimum nesting depth. Only methods with max nesting >= this value are returned. Automatically enables includeCodeStats=true."
+                    },
+                    "minParams": {
+                        "type": "integer",
+                        "description": "Filter: minimum parameter count. Only methods with params >= this value are returned. Automatically enables includeCodeStats=true."
+                    },
+                    "minReturns": {
+                        "type": "integer",
+                        "description": "Filter: minimum return/throw count. Only methods with returns >= this value are returned. Automatically enables includeCodeStats=true."
+                    },
+                    "minCalls": {
+                        "type": "integer",
+                        "description": "Filter: minimum call count (fan-out). Only methods with calls >= this value are returned. Automatically enables includeCodeStats=true."
                     }
                 },
                 "required": []
@@ -529,6 +562,7 @@ fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> Tool
     let file_count = new_index.files.len();
     let def_count = new_index.definitions.len();
     let call_site_count: usize = new_index.method_calls.values().map(|v| v.len()).sum();
+    let code_stats_count = new_index.code_stats.len();
 
     // Compute index size without allocating (uses bincode::serialized_size)
     let size_mb = bincode::serialized_size(&new_index)
@@ -550,6 +584,7 @@ fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> Tool
         "files": file_count,
         "definitions": def_count,
         "callSites": call_site_count,
+        "codeStatsEntries": code_stats_count,
         "sizeMb": (size_mb * 10.0).round() / 10.0,
         "rebuildTimeMs": elapsed.as_secs_f64() * 1000.0,
     });

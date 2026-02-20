@@ -10,12 +10,12 @@ pub(crate) fn parse_csharp_definitions(
     parser: &mut tree_sitter::Parser,
     source: &str,
     file_id: u32,
-) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>) {
+) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>) {
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => {
             eprintln!("[def-index] WARNING: tree-sitter C# parse returned None for file_id={}", file_id);
-            return (Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new());
         }
     };
 
@@ -95,7 +95,19 @@ pub(crate) fn parse_csharp_definitions(
         }
     }
 
-    (defs, call_sites)
+    // Compute code stats for pre-collected method/constructor/property nodes
+    let call_count_map: HashMap<usize, u16> = call_sites.iter()
+        .map(|(idx, calls)| (*idx, calls.len() as u16))
+        .collect();
+
+    let mut code_stats_entries: Vec<(usize, CodeStats)> = Vec::new();
+    for &(def_local_idx, method_node) in &method_nodes {
+        let mut stats = compute_code_stats_csharp(method_node, source_bytes);
+        stats.call_count = call_count_map.get(&def_local_idx).copied().unwrap_or(0);
+        code_stats_entries.push((def_local_idx, stats));
+    }
+
+    (defs, call_sites, code_stats_entries)
 }
 
 // ─── Field/Constructor signature parsing ────────────────────────────
@@ -838,6 +850,150 @@ fn extract_csharp_type_from_new_expr(
         Some(base)
     } else {
         None
+    }
+}
+
+// ─── Code stats computation ─────────────────────────────────────────
+
+fn compute_code_stats_csharp(
+    method_node: tree_sitter::Node,
+    _source: &[u8],
+) -> CodeStats {
+    let mut stats = CodeStats::default();
+    stats.cyclomatic_complexity = 1; // base complexity
+
+    // paramCount from parameter_list (not from body walk)
+    stats.param_count = count_parameters_csharp(method_node);
+
+    // Find body node
+    let body = find_child_by_kind(method_node, "block")
+        .or_else(|| find_child_by_kind(method_node, "arrow_expression_clause"));
+
+    if let Some(body_node) = body {
+        walk_code_stats_csharp(body_node, 0, &mut stats);
+    }
+
+    // callCount is filled separately from method_calls after invocations walk
+    stats
+}
+
+pub(crate) fn count_parameters_csharp(method_node: tree_sitter::Node) -> u8 {
+    find_child_by_kind(method_node, "parameter_list")
+        .map(|params| {
+            (0..params.child_count())
+                .filter(|&i| params.child(i).map(|c| c.is_named()).unwrap_or(false))
+                .count() as u8
+        })
+        .unwrap_or(0)
+}
+
+fn walk_code_stats_csharp(
+    node: tree_sitter::Node,
+    nesting: u32,
+    stats: &mut CodeStats,
+) {
+    let kind = node.kind();
+
+    // ═══ Complexity increments ═══
+    match kind {
+        // B2: structural increment + nesting penalty (cognitive)
+        "if_statement" | "for_statement" | "foreach_statement"
+        | "while_statement" | "do_statement"
+        | "switch_statement" | "switch_expression"
+        | "catch_clause" | "conditional_expression" => {
+            stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
+            stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1 + nesting as u16);
+        }
+
+        // else/else-if handling
+        // Note: else does NOT add +1 cyclomatic (it's not a decision point — it's the
+        // complement of the if branch). Only the child if_statement adds cyclomatic.
+        "else_clause" => {
+            let is_else_if = (0..node.child_count())
+                .any(|i| node.child(i).map(|c| c.kind() == "if_statement").unwrap_or(false));
+            if !is_else_if {
+                // standalone else: +1 cognitive, no nesting penalty
+                stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1);
+            }
+            // else-if: child if_statement handles its own +1 (both cyclomatic and cognitive)
+        }
+
+        // Logical operators (cognitive: sequence tracking via parent check)
+        "binary_expression" => {
+            if let Some(op) = node.child(1) {
+                let op_kind = op.kind();
+                if op_kind == "&&" || op_kind == "||" {
+                    // Cyclomatic: always +1 per operator
+                    stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
+                    // Cognitive: +1 only at start of new operator sequence
+                    let parent_same_op = node.parent()
+                        .filter(|p| p.kind() == "binary_expression")
+                        .and_then(|p| p.child(1))
+                        .map(|pop| pop.kind() == op_kind)
+                        .unwrap_or(false);
+                    if !parent_same_op {
+                        stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        // goto: B1 cognitive increment (no nesting)
+        "goto_statement" => {
+            stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1);
+        }
+
+        // Switch cases/sections: cyclomatic only (switch_statement already counted cognitive)
+        // tree-sitter C# uses "switch_section" for each case branch (no "case_switch_label" node)
+        "switch_expression_arm" | "switch_section" => {
+            stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
+        }
+
+        // Return/throw
+        "return_statement" | "throw_statement" | "throw_expression" => {
+            stats.return_count = stats.return_count.saturating_add(1);
+        }
+
+        // Lambdas
+        "lambda_expression" | "anonymous_method_expression" => {
+            stats.lambda_count = stats.lambda_count.saturating_add(1);
+        }
+
+        _ => {}
+    }
+
+    // ═══ Nesting for children ═══
+    let body_nesting = match kind {
+        "if_statement" | "for_statement" | "foreach_statement"
+        | "while_statement" | "do_statement" | "switch_statement"
+        | "switch_expression" | "catch_clause" | "conditional_expression"
+        | "try_statement" | "lambda_expression"
+        | "anonymous_method_expression" => nesting + 1,
+        _ => nesting,
+    };
+
+    stats.max_nesting_depth = stats.max_nesting_depth.max(body_nesting as u8);
+
+    // ═══ Recurse with else-if nesting rules ═══
+    // tree-sitter C# does NOT have else_clause nodes.
+    // else-if is parsed as: if_statement -> "else" keyword -> if_statement (direct child).
+    // We must detect this pattern and keep nesting flat for else-if continuations.
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            let child_nesting = match (kind, child.kind()) {
+                // else_clause handling (some tree-sitter versions)
+                ("if_statement", "else_clause") => nesting,    // else at same level as if
+                ("else_clause", "if_statement") => nesting,    // else-if continuation
+                ("else_clause", _) => nesting + 1,             // else body is nested
+                // tree-sitter C# specific: else-if without else_clause wrapper.
+                // if_statement -> if_statement (direct child) = else-if continuation.
+                // Keep nesting flat (same as parent if).
+                ("if_statement", "if_statement") => nesting,
+                _ => body_nesting,
+            };
+
+            walk_code_stats_csharp(child, child_nesting, stats);
+        }
     }
 }
 

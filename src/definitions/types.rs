@@ -119,6 +119,30 @@ pub struct DefinitionEntry {
     pub base_types: Vec<String>,
 }
 
+// ─── Code Stats ──────────────────────────────────────────────────────
+
+/// Code complexity metrics computed during AST walk.
+/// Only populated for Method, Constructor, Function, Property (expression body).
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct CodeStats {
+    /// Cyclomatic complexity: number of linearly independent execution paths.
+    /// Base = 1, each branching node adds +1.
+    pub cyclomatic_complexity: u16,
+    /// SonarSource Cognitive Complexity: penalizes nesting depth.
+    /// Measures code readability, not just structural complexity.
+    pub cognitive_complexity: u16,
+    /// Maximum nesting depth of control flow structures.
+    pub max_nesting_depth: u8,
+    /// Number of parameters in the method/function signature.
+    pub param_count: u8,
+    /// Number of return + throw statements (exit points).
+    pub return_count: u8,
+    /// Number of method/function calls in the body (fan-out).
+    pub call_count: u16,
+    /// Number of lambda/arrow function expressions in the body.
+    pub lambda_count: u8,
+}
+
 /// A call site found in a method/constructor body via AST analysis.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CallSite {
@@ -173,6 +197,33 @@ pub struct DefinitionIndex {
     /// Each entry is (file_id, byte_size). Files >500 bytes with 0 defs are suspicious.
     #[serde(default)]
     pub empty_file_ids: Vec<(u32, u64)>,
+    /// def_idx -> CodeStats for methods/constructors/functions.
+    /// Always populated when --definitions is used.
+    #[serde(default)]
+    pub code_stats: HashMap<u32, CodeStats>,
+}
+
+impl Default for DefinitionIndex {
+    fn default() -> Self {
+        Self {
+            root: String::new(),
+            created_at: 0,
+            extensions: Vec::new(),
+            files: Vec::new(),
+            definitions: Vec::new(),
+            name_index: HashMap::new(),
+            kind_index: HashMap::new(),
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index: HashMap::new(),
+            path_to_id: HashMap::new(),
+            method_calls: HashMap::new(),
+            code_stats: HashMap::new(),
+            parse_errors: 0,
+            lossy_file_count: 0,
+            empty_file_ids: Vec::new(),
+        }
+    }
 }
 
 // ─── CLI Args ────────────────────────────────────────────────────────

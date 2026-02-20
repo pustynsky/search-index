@@ -236,6 +236,7 @@ fn make_ts_ctx_with_defs() -> HandlerContext {
         file_index,
         path_to_id,
         method_calls,
+        code_stats: HashMap::new(),
         parse_errors: 0,
         lossy_file_count: 0,
         empty_file_ids: Vec::new(),
@@ -338,6 +339,7 @@ fn make_ts_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -820,6 +822,7 @@ fn test_ts_search_callers_inject_support() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls,
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -940,6 +943,7 @@ fn test_mixed_cs_ts_definitions_query() {
         definitions, name_index, kind_index,
         attribute_index, base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -1078,6 +1082,7 @@ fn test_mixed_cs_ts_callers_ext_filter() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls,
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -1180,6 +1185,7 @@ fn test_tsx_file_support_through_handler() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index,
         file_index, path_to_id, method_calls: HashMap::new(),
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -1256,6 +1262,7 @@ fn test_ts_incremental_update_through_handler() {
         kind_index: HashMap::new(), attribute_index: HashMap::new(),
         base_type_index: HashMap::new(), file_index: HashMap::new(),
         path_to_id: HashMap::new(), method_calls: HashMap::new(),
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -1399,6 +1406,7 @@ fn test_ts_search_definitions_exclude_dir() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -1587,6 +1595,7 @@ fn test_ts_direction_down_with_typed_local_variable() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls,
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 

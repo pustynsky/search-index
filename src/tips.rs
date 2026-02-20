@@ -117,6 +117,11 @@ pub fn tips() -> Vec<Tip> {
             example: "If responseTruncated=true appears, narrow your query: add ext, dir, excludeDir, or use countOnly=true. Server flag --max-response-kb adjusts the limit (0=unlimited).",
         },
         Tip {
+            rule: "Code health: find complex methods with includeCodeStats/sortBy/min*",
+            why: "Instant code quality scan across entire codebase. sortBy='cognitiveComplexity' ranks worst methods first. Combine min* filters (AND logic) to find God Methods. Only methods/functions/constructors have stats.",
+            example: "search_definitions sortBy='cognitiveComplexity' maxResults=20  |  search_definitions minComplexity=10 minParams=5 sortBy='cyclomaticComplexity'",
+        },
+        Tip {
             rule: "Multi-term name in search_definitions: find ALL types in ONE call",
             why: "The name parameter accepts comma-separated terms (OR logic). Find a class + its interface + related types in a single query instead of 3 separate calls.",
             example: "search_definitions name='UserService,IUserService,UserController' -> finds ALL matching definitions in one call",
@@ -169,6 +174,20 @@ pub fn strategies() -> Vec<Strategy> {
             anti_patterns: &[
                 "Don't use read_file to manually scan for the method -- containsLine finds it instantly with proper class context",
                 "Don't guess the method name from the stack trace -- use containsLine for precise AST-based lookup",
+            ],
+        },
+        Strategy {
+            name: "Code Health Scan",
+            when: "User asks 'find complex methods', 'code quality', 'refactoring candidates', or 'technical debt'",
+            steps: &[
+                "Step 1 - Top offenders (1 call): search_definitions sortBy='cognitiveComplexity' maxResults=20 -> worst 20 methods by cognitive complexity",
+                "Step 2 (optional) - Narrow to module (1 call): search_definitions file='Services' minComplexity=10 sortBy='cyclomaticComplexity' -> complex methods in specific directory",
+                "Step 3 (optional) - God Method detection (1 call): search_definitions minComplexity=20 minParams=5 minCalls=15 -> methods that are too large, have too many params, and high fan-out",
+            ],
+            anti_patterns: &[
+                "Don't read every file to count if/else -- sortBy computes metrics from the AST index in <1ms",
+                "Don't forget includeCodeStats is auto-enabled by sortBy and min* -- no need to pass it explicitly",
+                "Don't use sortBy on old indexes without code stats -- run search_reindex_definitions first",
             ],
         },
     ]
@@ -319,6 +338,7 @@ pub fn render_instructions() -> String {
     out.push_str("3. USE search_grep for content search -- substring ON by default, multi-term OR with commas, countOnly for reconnaissance.\n");
     out.push_str("4. USE search_fast for file lookup -- 90x faster than search_find.\n");
     out.push_str("5. AIM for <=3 search calls per task. Call search_help for full guide with examples.\n");
+    out.push_str("6. USE sortBy/min* in search_definitions for code health scans -- sortBy='cognitiveComplexity' ranks worst methods first.\n");
 
     // --- Strategy recipes (kept unchanged -- highest-value content) ---
     out.push_str("\nSTRATEGY RECIPES (aim for <=3 search calls per task):\n");

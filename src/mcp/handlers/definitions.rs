@@ -6,7 +6,7 @@ use std::time::Instant;
 use serde_json::{json, Value};
 
 use crate::mcp::protocol::ToolCallResult;
-use crate::definitions::{DefinitionEntry, DefinitionKind};
+use crate::definitions::{DefinitionEntry, DefinitionKind, CodeStats};
 
 use super::utils::{inject_body_into_obj, best_match_tier};
 use super::HandlerContext;
@@ -58,6 +58,39 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
     let max_body_lines = args.get("maxBodyLines").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
     let max_total_body_lines = args.get("maxTotalBodyLines").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
     let audit = args.get("audit").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Code stats parameters
+    let sort_by = args.get("sortBy").and_then(|v| v.as_str());
+    let min_complexity = args.get("minComplexity").and_then(|v| v.as_u64()).map(|v| v as u16);
+    let min_cognitive = args.get("minCognitive").and_then(|v| v.as_u64()).map(|v| v as u16);
+    let min_nesting = args.get("minNesting").and_then(|v| v.as_u64()).map(|v| v as u8);
+    let min_params = args.get("minParams").and_then(|v| v.as_u64()).map(|v| v as u8);
+    let min_returns = args.get("minReturns").and_then(|v| v.as_u64()).map(|v| v as u8);
+    let min_calls = args.get("minCalls").and_then(|v| v.as_u64()).map(|v| v as u16);
+
+    let has_stats_filter = sort_by.is_some()
+        || min_complexity.is_some()
+        || min_cognitive.is_some()
+        || min_nesting.is_some()
+        || min_params.is_some()
+        || min_returns.is_some()
+        || min_calls.is_some();
+
+    // sortBy and min* imply includeCodeStats=true
+    let include_code_stats = args.get("includeCodeStats").and_then(|v| v.as_bool()).unwrap_or(false)
+        || has_stats_filter;
+
+    // Validate sortBy value
+    if let Some(sort_field) = sort_by {
+        let valid = ["cyclomaticComplexity", "cognitiveComplexity", "maxNestingDepth",
+                     "paramCount", "returnCount", "callCount", "lambdaCount", "lines"];
+        if !valid.contains(&sort_field) {
+            return ToolCallResult::error(format!(
+                "Invalid sortBy value '{}'. Valid values: {}",
+                sort_field, valid.join(", ")
+            ));
+        }
+    }
 
     // --- audit mode: return index coverage report ---
     if audit {
@@ -273,7 +306,8 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
     candidates.dedup();
 
     // Apply remaining filters (file, parent, excludeDir) on actual entries
-    let mut results: Vec<&DefinitionEntry> = candidates.iter()
+    // Track (def_idx, &DefinitionEntry) for code_stats lookup
+    let mut results: Vec<(u32, &DefinitionEntry)> = candidates.iter()
         .filter_map(|&idx| {
             let def = index.definitions.get(idx as usize)?;
             let file_path = index.files.get(def.file_id as usize)?;
@@ -303,20 +337,73 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
                 return None;
             }
 
-            Some(def)
+            Some((idx, def))
         })
         .collect();
 
+    // ── Stats error check & filtering ──
+    let mut stats_filters_applied = false;
+    let before_stats_count = results.len();
+    if has_stats_filter {
+        // sortBy='lines' works without code_stats
+        let needs_code_stats = sort_by != Some("lines");
+
+        if needs_code_stats && index.code_stats.is_empty() {
+            return ToolCallResult::error(
+                "Code stats not available for this index. Run search_reindex_definitions to compute metrics.".to_string()
+            );
+        }
+
+        if needs_code_stats {
+            // Filter to only definitions with code_stats, apply min* thresholds
+            results.retain(|(def_idx, _def)| {
+                let stats = match index.code_stats.get(def_idx) {
+                    Some(s) => s,
+                    None => return false, // skip classes, fields, etc.
+                };
+
+                if let Some(min) = min_complexity {
+                    if stats.cyclomatic_complexity < min { return false; }
+                }
+                if let Some(min) = min_cognitive {
+                    if stats.cognitive_complexity < min { return false; }
+                }
+                if let Some(min) = min_nesting {
+                    if stats.max_nesting_depth < min { return false; }
+                }
+                if let Some(min) = min_params {
+                    if stats.param_count < min { return false; }
+                }
+                if let Some(min) = min_returns {
+                    if stats.return_count < min { return false; }
+                }
+                if let Some(min) = min_calls {
+                    if stats.call_count < min { return false; }
+                }
+                true
+            });
+            stats_filters_applied = true;
+        }
+    }
+
     let total_results = results.len();
 
-    // ── Relevance ranking (only when name filter is active and not regex) ──
-    if name_filter.is_some() && !use_regex {
+    // ── Sorting ──
+    if let Some(sort_field) = sort_by {
+        // Sort by metric (descending — worst first)
+        results.sort_by(|(idx_a, def_a), (idx_b, def_b)| {
+            let va = get_sort_value(index.code_stats.get(idx_a), def_a, sort_field);
+            let vb = get_sort_value(index.code_stats.get(idx_b), def_b, sort_field);
+            vb.cmp(&va) // descending — worst first
+        });
+    } else if name_filter.is_some() && !use_regex {
+        // Relevance ranking (only when name filter is active and not regex)
         let terms: Vec<String> = name_filter.unwrap().split(',')
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
             .collect();
 
-        results.sort_by(|a, b| {
+        results.sort_by(|(_, a), (_, b)| {
             let tier_a = best_match_tier(&a.name, &terms);
             let tier_b = best_match_tier(&b.name, &terms);
             tier_a.cmp(&tier_b)
@@ -336,7 +423,7 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
     // Build output JSON
     let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
-    let defs_json: Vec<Value> = results.iter().map(|def| {
+    let defs_json: Vec<Value> = results.iter().map(|(def_idx, def)| {
         let file_path = index.files.get(def.file_id as usize)
             .map(|s| s.as_str())
             .unwrap_or("");
@@ -371,6 +458,23 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
             );
         }
 
+        // Inject codeStats if requested
+        if include_code_stats {
+            if let Some(stats) = index.code_stats.get(def_idx) {
+                let lines = def.line_end.saturating_sub(def.line_start) + 1;
+                obj["codeStats"] = json!({
+                    "lines": lines,
+                    "cyclomaticComplexity": stats.cyclomatic_complexity,
+                    "cognitiveComplexity": stats.cognitive_complexity,
+                    "maxNestingDepth": stats.max_nesting_depth,
+                    "paramCount": stats.param_count,
+                    "returnCount": stats.return_count,
+                    "callCount": stats.call_count,
+                    "lambdaCount": stats.lambda_count,
+                });
+            }
+        }
+
         obj
     }).collect();
 
@@ -390,12 +494,46 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
     if include_body {
         summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
     }
+    if let Some(sort_field) = sort_by {
+        summary["sortedBy"] = json!(sort_field);
+    }
+    if stats_filters_applied {
+        summary["statsFiltersApplied"] = json!(true);
+        summary["afterStatsFilter"] = json!(total_results);
+        summary["beforeStatsFilter"] = json!(before_stats_count);
+    }
+    if include_code_stats && index.code_stats.is_empty() {
+        summary["codeStatsAvailable"] = json!(false);
+    }
     let output = json!({
         "definitions": defs_json,
         "summary": summary,
     });
 
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
+}
+
+/// Extract a numeric value from CodeStats for sorting.
+fn get_sort_value(stats: Option<&CodeStats>, def: &DefinitionEntry, field: &str) -> u32 {
+    match field {
+        "lines" => def.line_end.saturating_sub(def.line_start) + 1,
+        _ => {
+            let s = match stats {
+                Some(s) => s,
+                None => return 0,
+            };
+            match field {
+                "cyclomaticComplexity" => s.cyclomatic_complexity as u32,
+                "cognitiveComplexity" => s.cognitive_complexity as u32,
+                "maxNestingDepth" => s.max_nesting_depth as u32,
+                "paramCount" => s.param_count as u32,
+                "returnCount" => s.return_count as u32,
+                "callCount" => s.call_count as u32,
+                "lambdaCount" => s.lambda_count as u32,
+                _ => 0,
+            }
+        }
+    }
 }
 
 #[cfg(test)]
