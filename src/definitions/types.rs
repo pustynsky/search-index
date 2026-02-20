@@ -191,7 +191,7 @@ use clap::Parser;
   Each definition includes: name, kind, file path, line range, signature,
   modifiers, attributes (e.g. [ServiceProvider]), and base types.
 
-  The index is saved to disk as a .didx file and can be loaded instantly
+  The index is saved to disk as a .code-structure file and can be loaded instantly
   by 'search serve --definitions'.
 
 EXAMPLES:
@@ -225,7 +225,7 @@ pub struct DefIndexArgs {
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = r#"WHAT IT DOES:
-  Loads a previously built definition index (.didx file) from disk and
+  Loads a previously built definition index (.code-structure file) from disk and
   reports coverage statistics: how many files have definitions, how many
   are empty, and which "suspicious" files (>N bytes but 0 definitions)
   may have parsing issues.

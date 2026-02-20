@@ -293,12 +293,12 @@ graph LR
     C -->|read content| D[File Contents]
     D -->|tokenize| E[Token Streams]
     E -->|build inverted index| F[ContentIndex]
-    F -->|bincode serialize| G[.cidx file]
+    F -->|bincode serialize| G[.word-search file]
 
     C -->|tree-sitter parse| H[AST Trees]
     H -->|extract definitions| I[DefinitionEntries]
     I -->|build multi-index| J[DefinitionIndex]
-    J -->|bincode serialize| K[.didx file]
+    J -->|bincode serialize| K[.code-structure file]
 ```
 
 ### Query Pipeline
@@ -407,7 +407,7 @@ A single consolidated reference for all indexing scenarios. For detailed interna
 |---------|-------------|-----------------|------|
 | `search content-index -d DIR -e EXT` | Full parallel walk + tokenization | ContentIndex (`.word-search`) | ~7–16s |
 | `search def-index -d DIR -e EXT` | Full parallel walk + tree-sitter parse | DefinitionIndex (`.code-structure`) | ~16–32s |
-| `search index -d DIR` | Full parallel walk | FileIndex (`.idx`) | ~2–4s |
+| `search index -d DIR` | Full parallel walk | FileIndex (`.file-list`) | ~2–4s |
 | MCP server first start (no index on disk) | Background thread builds indexes; tools return "index is building" until ready | ContentIndex + DefinitionIndex (if `--definitions`) | Same as above |
 | `search_reindex` (MCP tool) | Full rebuild + reload in-memory | ContentIndex | ~7–16s |
 | `search_reindex_definitions` (MCP tool) | Full rebuild + reload in-memory | DefinitionIndex | ~16–32s |

@@ -152,7 +152,7 @@ pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -
     load_compressed(&path, "content-index")
 }
 
-/// Try to find any content index (.cidx) file matching the given directory
+/// Try to find any content index (.word-search) file matching the given directory
 pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path) -> Option<ContentIndex> {
     if !index_base.exists() {
         return None;
@@ -237,7 +237,7 @@ pub fn cleanup_orphaned_indexes(index_base: &std::path::Path) -> usize {
     removed
 }
 
-/// Remove all index files (.idx, .cidx, .didx) whose root matches the given directory.
+/// Remove all index files (.file-list, .word-search, .code-structure) whose root matches the given directory.
 /// Comparison is case-insensitive on the canonicalized paths (Windows-safe).
 /// Returns the number of files removed.
 pub fn cleanup_indexes_for_dir(dir: &str, index_base: &std::path::Path) -> usize {

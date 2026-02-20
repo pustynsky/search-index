@@ -6,6 +6,10 @@ todo*.md
 proptest-regressions/
 
 # Index files (safety net — should never be created in repo)
+*.file-list
+*.word-search
+*.code-structure
+# Legacy extensions (pre-rename, kept for safety)
 *.idx
 *.cidx
 *.didx
