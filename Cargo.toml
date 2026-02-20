@@ -33,6 +33,7 @@ mimalloc = { version = "0.1", features = ["override"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+ctrlc = "3"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

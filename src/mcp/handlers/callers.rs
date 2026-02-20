@@ -13,6 +13,7 @@ use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionK
 use search::generate_trigrams;
 
 use super::HandlerContext;
+use super::utils::sorted_intersect;
 
 /// Built-in JavaScript/TypeScript types whose methods should never be resolved
 /// to user-defined classes. When a call site has one of these as its receiver type,
@@ -297,10 +298,7 @@ fn collect_substring_file_ids(
         if let Some(posting_list) = trigram_idx.trigram_map.get(tri) {
             candidates = Some(match candidates {
                 None => posting_list.clone(),
-                Some(prev) => {
-                    let set: HashSet<u32> = prev.into_iter().collect();
-                    posting_list.iter().filter(|&&x| set.contains(&x)).copied().collect()
-                }
+                Some(prev) => sorted_intersect(&prev, posting_list),
             });
         } else {
             // Trigram not found → no tokens can contain this term
