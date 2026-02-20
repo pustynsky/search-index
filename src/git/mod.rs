@@ -39,6 +39,17 @@ pub struct DateFilter {
     pub to_date: Option<String>,
 }
 
+/// Information about a single blamed line.
+#[derive(Clone, Debug)]
+pub struct BlameLine {
+    pub line: usize,
+    pub hash: String,
+    pub author_name: String,
+    pub author_email: String,
+    pub date: String,
+    pub content: String,
+}
+
 // ─── Date helpers ───────────────────────────────────────────────────
 
 /// Validate a YYYY-MM-DD date string. Returns Ok(()) or Err with message.
@@ -195,6 +206,8 @@ pub fn file_history(
     filter: &DateFilter,
     include_diff: bool,
     max_results: usize,
+    author_filter: Option<&str>,
+    message_filter: Option<&str>,
 ) -> Result<(Vec<CommitInfo>, usize), String> {
     // First, get the commit list (always fast with git CLI + commit-graph)
     let format = format!("{}%H{}%ai{}%an{}%ae{}%s{}", RECORD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP);
@@ -206,6 +219,13 @@ pub fn file_history(
         .arg("--follow"); // follow renames
 
     add_date_args(&mut cmd, filter);
+
+    if let Some(author) = author_filter {
+        cmd.arg(format!("--author={}", author));
+    }
+    if let Some(message) = message_filter {
+        cmd.arg(format!("--grep={}", message));
+    }
 
     cmd.arg("--").arg(file);
 
@@ -256,14 +276,18 @@ fn get_commit_diff(repo_path: &str, hash: &str, file: &str) -> Result<String, St
     }
 }
 
-/// Get top authors for a file, ranked by commit count.
+/// Get top authors for a file or directory, ranked by commit count.
+///
+/// `path` can be a file, directory, or empty string (entire repo).
+/// When empty, queries all commits in the repo.
 ///
 /// Returns `(authors, total_commits, total_authors)`.
 pub fn top_authors(
     repo_path: &str,
-    file: &str,
+    path: &str,
     filter: &DateFilter,
     top: usize,
+    message_filter: Option<&str>,
 ) -> Result<(Vec<AuthorStats>, usize, usize), String> {
     // Use git shortlog for author aggregation (much faster than manual counting)
     // But git shortlog doesn't give us first/last dates, so we use git log
@@ -272,12 +296,23 @@ pub fn top_authors(
     let mut cmd = Command::new("git");
     cmd.current_dir(repo_path)
         .arg("log")
-        .arg(format!("--format={}", format))
-        .arg("--follow");
+        .arg(format!("--format={}", format));
+
+    // --follow only works for single files, not directories or empty path
+    // Heuristic: use --follow when path has a file extension (contains '.')
+    if !path.is_empty() && path.contains('.') {
+        cmd.arg("--follow");
+    }
 
     add_date_args(&mut cmd, filter);
 
-    cmd.arg("--").arg(file);
+    if let Some(message) = message_filter {
+        cmd.arg(format!("--grep={}", message));
+    }
+
+    if !path.is_empty() {
+        cmd.arg("--").arg(path);
+    }
 
     let output = run_git(&mut cmd)?;
 
@@ -342,6 +377,8 @@ pub fn top_authors(
 pub fn repo_activity(
     repo_path: &str,
     filter: &DateFilter,
+    author_filter: Option<&str>,
+    message_filter: Option<&str>,
 ) -> Result<(HashMap<String, Vec<CommitInfo>>, u64), String> {
     // Use git log with --name-only to get changed files per commit
     let format = format!("{}%H{}%ai{}%an{}%ae{}%s{}", RECORD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP);
@@ -353,6 +390,13 @@ pub fn repo_activity(
         .arg("--name-only");
 
     add_date_args(&mut cmd, filter);
+
+    if let Some(author) = author_filter {
+        cmd.arg(format!("--author={}", author));
+    }
+    if let Some(message) = message_filter {
+        cmd.arg(format!("--grep={}", message));
+    }
 
     let output = run_git(&mut cmd)?;
 
@@ -389,6 +433,180 @@ pub fn repo_activity(
     }
 
     Ok((file_history, commits_processed))
+}
+
+// ─── Blame ──────────────────────────────────────────────────────────
+
+/// Run `git blame` for a line range and parse the porcelain output.
+///
+/// `start_line` and `end_line` are 1-based inclusive.
+/// If `end_line` is None, only `start_line` is blamed.
+pub fn blame_lines(
+    repo_path: &str,
+    file: &str,
+    start_line: usize,
+    end_line: Option<usize>,
+) -> Result<Vec<BlameLine>, String> {
+    let end = end_line.unwrap_or(start_line);
+
+    let mut cmd = Command::new("git");
+    cmd.current_dir(repo_path)
+        .arg("blame")
+        .arg(format!("-L{},{}", start_line, end))
+        .arg("--porcelain")
+        .arg("--")
+        .arg(file);
+
+    let output = run_git(&mut cmd)?;
+    parse_blame_porcelain(&output)
+}
+
+/// Metadata cached for a commit hash seen earlier in porcelain output.
+/// Git only emits full headers the first time a commit appears; subsequent
+/// lines from the same commit only have the hash line + content.
+#[derive(Clone)]
+struct BlameCommitMeta {
+    author_name: String,
+    author_email: String,
+    author_time: i64,
+    author_tz: String,
+}
+
+/// Parse git blame --porcelain output into BlameLine entries.
+///
+/// Porcelain format (first occurrence of a commit):
+/// ```text
+/// <hash> <orig_line> <final_line> [<num_lines>]
+/// author <name>
+/// author-mail <<email>>
+/// author-time <timestamp>
+/// author-tz <timezone>
+/// committer ...
+/// committer-mail ...
+/// committer-time ...
+/// committer-tz ...
+/// summary <subject>
+/// [previous <hash> <file>]
+/// [boundary]
+/// filename <current_file>
+/// \t<content line>
+/// ```
+///
+/// Subsequent occurrences of the same commit only have:
+/// ```text
+/// <hash> <orig_line> <final_line>
+/// \t<content line>
+/// ```
+pub(crate) fn parse_blame_porcelain(output: &str) -> Result<Vec<BlameLine>, String> {
+    let mut results: Vec<BlameLine> = Vec::new();
+    let mut seen: HashMap<String, BlameCommitMeta> = HashMap::new();
+    let mut lines_iter = output.lines().peekable();
+
+    while let Some(line) = lines_iter.next() {
+        // Skip empty lines
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Parse hash line: "<hash> <orig_line> <final_line> [<num_lines>]"
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() < 3 {
+            continue;
+        }
+
+        let hash = parts[0];
+        // Validate it looks like a hash (40 hex chars)
+        if hash.len() != 40 || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+            continue;
+        }
+
+        let final_line: usize = match parts[2].parse() {
+            Ok(n) => n,
+            Err(_) => continue,
+        };
+
+        let mut author_name = String::new();
+        let mut author_email = String::new();
+        let mut author_time: i64 = 0;
+        let mut author_tz = String::new();
+        let mut content = String::new();
+        let mut has_headers = false;
+
+        // Read header fields until we hit the content line (starts with \t)
+        while let Some(header_line) = lines_iter.next() {
+            if header_line.starts_with('\t') {
+                // Content line — strip the leading tab
+                content = header_line[1..].to_string();
+                break;
+            }
+
+            if let Some(val) = header_line.strip_prefix("author ") {
+                author_name = val.to_string();
+                has_headers = true;
+            } else if let Some(val) = header_line.strip_prefix("author-mail ") {
+                // Remove angle brackets: <email> -> email
+                author_email = val.trim_start_matches('<').trim_end_matches('>').to_string();
+            } else if let Some(val) = header_line.strip_prefix("author-time ") {
+                author_time = val.parse().unwrap_or(0);
+            } else if let Some(val) = header_line.strip_prefix("author-tz ") {
+                author_tz = val.to_string();
+            }
+            // Skip other headers (committer, summary, filename, previous, boundary)
+        }
+
+        // If we got headers, cache them for later reuse
+        if has_headers {
+            seen.insert(hash.to_string(), BlameCommitMeta {
+                author_name: author_name.clone(),
+                author_email: author_email.clone(),
+                author_time,
+                author_tz: author_tz.clone(),
+            });
+        } else if let Some(cached) = seen.get(hash) {
+            // Reuse cached metadata from first occurrence
+            author_name = cached.author_name.clone();
+            author_email = cached.author_email.clone();
+            author_time = cached.author_time;
+            author_tz = cached.author_tz.clone();
+        }
+
+        // Format date from timestamp + timezone
+        let date = format_blame_date(author_time, &author_tz);
+
+        results.push(BlameLine {
+            line: final_line,
+            hash: hash[..8.min(hash.len())].to_string(), // short hash for readability
+            author_name,
+            author_email,
+            date,
+            content,
+        });
+    }
+
+    Ok(results)
+}
+
+/// Format a Unix timestamp + timezone offset into "YYYY-MM-DD HH:MM:SS <tz>" string.
+pub(crate) fn format_blame_date(timestamp: i64, tz: &str) -> String {
+    let secs_per_day: i64 = 86400;
+    let days = if timestamp >= 0 { timestamp / secs_per_day } else { (timestamp - secs_per_day + 1) / secs_per_day };
+    let time_of_day = timestamp - days * secs_per_day;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+
+    let days_civil = days + 719468;
+    let era = if days_civil >= 0 { days_civil } else { days_civil - 146096 } / 146097;
+    let doe = (days_civil - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02} {}", y, m, d, hours, minutes, seconds, tz)
 }
 
 pub mod cache;

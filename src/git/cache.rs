@@ -560,13 +560,15 @@ impl GitHistoryCache {
 
     /// Query file history — returns commits touching this file.
     ///
-    /// Order: filter by date → sort by timestamp descending → truncate to maxResults.
+    /// Order: filter by date/author/message → sort by timestamp descending → truncate to maxResults.
     pub fn query_file_history(
         &self,
         file: &str,
         max_results: Option<usize>,
         from: Option<i64>,
         to: Option<i64>,
+        author_filter: Option<&str>,
+        message_filter: Option<&str>,
     ) -> Vec<CommitInfo> {
         let normalized = Self::normalize_path(file);
 
@@ -574,6 +576,17 @@ impl GitHistoryCache {
             Some(ids) => ids,
             None => return Vec::new(),
         };
+
+        // Pre-compute matching author indices for O(1) lookup
+        let matching_author_idxs: Option<std::collections::HashSet<u16>> = author_filter.map(|pattern| {
+            let pattern_lower = pattern.to_lowercase();
+            self.authors.iter().enumerate()
+                .filter(|(_, a)| a.name.to_lowercase().contains(&pattern_lower) || a.email.to_lowercase().contains(&pattern_lower))
+                .map(|(i, _)| i as u16)
+                .collect()
+        });
+
+        let message_filter_lower = message_filter.map(|m| m.to_lowercase());
 
         let mut commits: Vec<CommitInfo> = commit_ids
             .iter()
@@ -588,6 +601,21 @@ impl GitHistoryCache {
                 }
                 if let Some(to_ts) = to {
                     if meta.timestamp > to_ts {
+                        return None;
+                    }
+                }
+
+                // Filter by author
+                if let Some(ref idxs) = matching_author_idxs {
+                    if !idxs.contains(&meta.author_idx) {
+                        return None;
+                    }
+                }
+
+                // Filter by message
+                if let Some(ref msg_pattern) = message_filter_lower {
+                    let subject = self.get_subject(meta);
+                    if !subject.to_lowercase().contains(msg_pattern.as_str()) {
                         return None;
                     }
                 }
@@ -612,8 +640,27 @@ impl GitHistoryCache {
     /// Query authors — aggregate authors for a file or directory.
     ///
     /// For a directory path, aggregates across all files with matching prefix.
-    pub fn query_authors(&self, path: &str) -> Vec<AuthorSummary> {
+    /// Supports optional filtering by author, message, and date range.
+    pub fn query_authors(
+        &self,
+        path: &str,
+        author_filter: Option<&str>,
+        message_filter: Option<&str>,
+        from: Option<i64>,
+        to: Option<i64>,
+    ) -> Vec<AuthorSummary> {
         let normalized = Self::normalize_path(path);
+
+        // Pre-compute matching author indices for O(1) lookup
+        let matching_author_idxs: Option<std::collections::HashSet<u16>> = author_filter.map(|pattern| {
+            let pattern_lower = pattern.to_lowercase();
+            self.authors.iter().enumerate()
+                .filter(|(_, a)| a.name.to_lowercase().contains(&pattern_lower) || a.email.to_lowercase().contains(&pattern_lower))
+                .map(|(i, _)| i as u16)
+                .collect()
+        });
+
+        let message_filter_lower = message_filter.map(|m| m.to_lowercase());
 
         // Collect all commit indices matching the path
         let mut all_commit_ids: Vec<u32> = Vec::new();
@@ -633,6 +680,33 @@ impl GitHistoryCache {
 
         for &commit_idx in &all_commit_ids {
             if let Some(meta) = self.commits.get(commit_idx as usize) {
+                // Filter by date range
+                if let Some(from_ts) = from {
+                    if meta.timestamp < from_ts {
+                        continue;
+                    }
+                }
+                if let Some(to_ts) = to {
+                    if meta.timestamp > to_ts {
+                        continue;
+                    }
+                }
+
+                // Filter by author
+                if let Some(ref idxs) = matching_author_idxs {
+                    if !idxs.contains(&meta.author_idx) {
+                        continue;
+                    }
+                }
+
+                // Filter by message
+                if let Some(ref msg_pattern) = message_filter_lower {
+                    let subject = self.get_subject(meta);
+                    if !subject.to_lowercase().contains(msg_pattern.as_str()) {
+                        continue;
+                    }
+                }
+
                 let entry = author_stats.entry(meta.author_idx).or_insert((0, i64::MAX, i64::MIN));
                 entry.0 += 1;
                 if meta.timestamp < entry.1 {
@@ -667,13 +741,27 @@ impl GitHistoryCache {
     /// Query activity — files changed in a directory within a time range.
     ///
     /// Uses path prefix matching: `== path || starts_with(path + "/")`.
+    /// Supports optional filtering by author and message.
     pub fn query_activity(
         &self,
         path: &str,
         from: Option<i64>,
         to: Option<i64>,
+        author_filter: Option<&str>,
+        message_filter: Option<&str>,
     ) -> Vec<FileActivity> {
         let normalized = Self::normalize_path(path);
+
+        // Pre-compute matching author indices for O(1) lookup
+        let matching_author_idxs: Option<std::collections::HashSet<u16>> = author_filter.map(|pattern| {
+            let pattern_lower = pattern.to_lowercase();
+            self.authors.iter().enumerate()
+                .filter(|(_, a)| a.name.to_lowercase().contains(&pattern_lower) || a.email.to_lowercase().contains(&pattern_lower))
+                .map(|(i, _)| i as u16)
+                .collect()
+        });
+
+        let message_filter_lower = message_filter.map(|m| m.to_lowercase());
 
         let mut activities: Vec<FileActivity> = Vec::new();
 
@@ -696,6 +784,22 @@ impl GitHistoryCache {
                             return None;
                         }
                     }
+
+                    // Filter by author
+                    if let Some(ref idxs) = matching_author_idxs {
+                        if !idxs.contains(&meta.author_idx) {
+                            return None;
+                        }
+                    }
+
+                    // Filter by message
+                    if let Some(ref msg_pattern) = message_filter_lower {
+                        let subject = self.get_subject(meta);
+                        if !subject.to_lowercase().contains(msg_pattern.as_str()) {
+                            return None;
+                        }
+                    }
+
                     Some(meta)
                 })
                 .collect();
@@ -762,6 +866,17 @@ impl GitHistoryCache {
     }
 
     // ─── Internal helpers ───────────────────────────────────────────
+
+    /// Get subject string for a commit meta.
+    fn get_subject(&self, meta: &CommitMeta) -> &str {
+        let start = meta.subject_offset as usize;
+        let end = start + meta.subject_len as usize;
+        if end <= self.subjects.len() {
+            &self.subjects[start..end]
+        } else {
+            "<invalid>"
+        }
+    }
 
     /// Get the HEAD hash of a branch.
     fn get_branch_head(repo_path: &Path, branch: &str) -> Result<String, String> {

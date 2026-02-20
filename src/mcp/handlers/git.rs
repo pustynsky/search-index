@@ -54,6 +54,14 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
                     "maxResults": {
                         "type": "integer",
                         "description": "Maximum number of commits to return (default: 50, 0 = unlimited)"
+                    },
+                    "author": {
+                        "type": "string",
+                        "description": "Filter by author name or email (substring, case-insensitive). Example: 'john', 'john@example.com'"
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Filter by commit message (substring, case-insensitive). Example: 'fix bug', 'PR 12345', '[GI]'"
                     }
                 },
                 "required": ["repo", "file"]
@@ -88,6 +96,14 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
                     "maxResults": {
                         "type": "integer",
                         "description": "Maximum number of commits to return (default: 50, 0 = unlimited)"
+                    },
+                    "author": {
+                        "type": "string",
+                        "description": "Filter by author name or email (substring, case-insensitive). Example: 'john', 'john@example.com'"
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Filter by commit message (substring, case-insensitive). Example: 'fix bug', 'PR 12345', '[GI]'"
                     }
                 },
                 "required": ["repo", "file"]
@@ -95,7 +111,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
         },
         crate::mcp::protocol::ToolDefinition {
             name: "search_git_authors".to_string(),
-            description: "Get top authors for a file ranked by number of commits. Shows who changed this file the most, with commit count and date range of their changes.".to_string(),
+            description: "Get top authors/contributors for a file or directory, ranked by number of commits. Shows who changed this path the most, with commit count and date range. For directories, aggregates across all files within. If no path specified, returns ownership for the entire repo.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -103,9 +119,13 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
                         "type": "string",
                         "description": "Path to local git repository"
                     },
+                    "path": {
+                        "type": "string",
+                        "description": "Path to file or directory (relative to repo root). For directories, returns aggregated author statistics across all files inside. If omitted, returns ownership for the entire repo. Example: 'src/controllers'"
+                    },
                     "file": {
                         "type": "string",
-                        "description": "File path relative to repo root"
+                        "description": "File path relative to repo root (alias for 'path', kept for backward compatibility)"
                     },
                     "from": {
                         "type": "string",
@@ -118,9 +138,39 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
                     "top": {
                         "type": "integer",
                         "description": "Number of top authors to return (default: 10)"
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Filter by commit message (substring, case-insensitive). Example: 'fix bug', 'PR 12345', '[GI]'"
                     }
                 },
-                "required": ["repo", "file"]
+                "required": ["repo"]
+            }),
+        },
+        crate::mcp::protocol::ToolDefinition {
+            name: "search_git_blame".to_string(),
+            description: "Show author, date, and commit for each line in a given range of a file. Useful for finding who wrote specific code, when it was last changed, and which commit introduced it.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "repo": {
+                        "type": "string",
+                        "description": "Path to local git repository"
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "File path relative to repo root"
+                    },
+                    "startLine": {
+                        "type": "integer",
+                        "description": "Start line number (1-based, inclusive)"
+                    },
+                    "endLine": {
+                        "type": "integer",
+                        "description": "End line number (1-based, inclusive). If omitted, only startLine is blamed."
+                    }
+                },
+                "required": ["repo", "file", "startLine"]
             }),
         },
         crate::mcp::protocol::ToolDefinition {
@@ -144,6 +194,14 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
                     "date": {
                         "type": "string",
                         "description": "Exact date (YYYY-MM-DD). Overrides from/to."
+                    },
+                    "author": {
+                        "type": "string",
+                        "description": "Filter by author name or email (substring, case-insensitive). Example: 'john', 'john@example.com'"
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Filter by commit message (substring, case-insensitive). Example: 'fix bug', 'PR 12345', '[GI]'"
                     }
                 },
                 "required": ["repo"]
@@ -163,6 +221,7 @@ pub(crate) fn dispatch_git_tool(
         "search_git_diff" => handle_git_history(ctx, arguments, true),
         "search_git_authors" => handle_git_authors(ctx, arguments),
         "search_git_activity" => handle_git_activity(ctx, arguments),
+        "search_git_blame" => handle_git_blame(ctx, arguments),
         _ => ToolCallResult::error(format!("Unknown git tool: {}", tool_name)),
     }
 }
@@ -264,6 +323,8 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
     let to = args.get("to").and_then(|v| v.as_str());
     let date = args.get("date").and_then(|v| v.as_str());
     let max_results = args.get("maxResults").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    let author_filter = args.get("author").and_then(|v| v.as_str());
+    let message_filter = args.get("message").and_then(|v| v.as_str());
 
     // ── Cache path (history only, not diff — cache has no patch data) ──
     if !include_diff && ctx.git_cache_ready.load(Ordering::Relaxed) {
@@ -278,7 +339,7 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                 };
 
                 let max = if max_results == 0 { None } else { Some(max_results) };
-                let commits = cache.query_file_history(&normalized, max, from_ts, to_ts);
+                let commits = cache.query_file_history(&normalized, max, from_ts, to_ts, author_filter, message_filter);
                 let total_count = commits.len();
                 let elapsed = start.elapsed();
 
@@ -323,7 +384,7 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
 
     let start = Instant::now();
 
-    match git::file_history(repo, file, &filter, include_diff, max_results) {
+    match git::file_history(repo, file, &filter, include_diff, max_results, author_filter, message_filter) {
         Ok((commits, total_count)) => {
             let elapsed = start.elapsed();
 
@@ -371,23 +432,30 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         Some(r) => r,
         None => return ToolCallResult::error("Missing required parameter: repo".to_string()),
     };
-    let file = match args.get("file").and_then(|v| v.as_str()) {
-        Some(f) => f,
-        None => return ToolCallResult::error("Missing required parameter: file".to_string()),
-    };
+
+    // path takes priority, file is backward-compatible alias
+    let query_path = args.get("path").and_then(|v| v.as_str())
+        .or_else(|| args.get("file").and_then(|v| v.as_str()))
+        .unwrap_or("");
 
     let from = args.get("from").and_then(|v| v.as_str());
     let to = args.get("to").and_then(|v| v.as_str());
     let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let message_filter = args.get("message").and_then(|v| v.as_str());
 
     // ── Cache path ──
     if ctx.git_cache_ready.load(Ordering::Relaxed) {
         if let Ok(cache_guard) = ctx.git_cache.read() {
             if let Some(cache) = cache_guard.as_ref() {
                 let start = Instant::now();
-                let normalized = GitHistoryCache::normalize_path(file);
+                let normalized = GitHistoryCache::normalize_path(query_path);
 
-                let mut authors = cache.query_authors(&normalized);
+                let (from_ts, to_ts) = match parse_cache_date_range(from, to, None) {
+                    Ok(range) => range,
+                    Err(e) => return ToolCallResult::error(e),
+                };
+
+                let mut authors = cache.query_authors(&normalized, None, message_filter, from_ts, to_ts);
                 let total_authors = authors.len();
 
                 // Compute total commits across all authors
@@ -415,7 +483,7 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                         "totalCommits": total_commits,
                         "totalAuthors": total_authors,
                         "returned": authors_json.len(),
-                        "file": file,
+                        "path": query_path,
                         "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
                         "hint": "(from cache)"
                     }
@@ -434,7 +502,7 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
     let start = Instant::now();
 
-    match git::top_authors(repo, file, &filter, top) {
+    match git::top_authors(repo, query_path, &filter, top, message_filter) {
         Ok((authors, total_commits, total_authors)) => {
             let elapsed = start.elapsed();
 
@@ -456,7 +524,7 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                     "totalCommits": total_commits,
                     "totalAuthors": total_authors,
                     "returned": authors_json.len(),
-                    "file": file,
+                    "path": query_path,
                     "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
                 }
             });
@@ -477,6 +545,8 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let from = args.get("from").and_then(|v| v.as_str());
     let to = args.get("to").and_then(|v| v.as_str());
     let date = args.get("date").and_then(|v| v.as_str());
+    let author_filter = args.get("author").and_then(|v| v.as_str());
+    let message_filter = args.get("message").and_then(|v| v.as_str());
 
     // ── Cache path ──
     if ctx.git_cache_ready.load(Ordering::Relaxed) {
@@ -493,7 +563,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                     Err(e) => return ToolCallResult::error(e),
                 };
 
-                let activities = cache.query_activity(&normalized, from_ts, to_ts);
+                let activities = cache.query_activity(&normalized, from_ts, to_ts, author_filter, message_filter);
                 let elapsed = start.elapsed();
 
                 let total_files = activities.len();
@@ -533,7 +603,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
     let start = Instant::now();
 
-    match git::repo_activity(repo, &filter) {
+    match git::repo_activity(repo, &filter, author_filter, message_filter) {
         Ok((file_map, commits_processed)) => {
             let elapsed = start.elapsed();
 
@@ -585,6 +655,83 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         Err(e) => ToolCallResult::error(e),
     }
 }
+/// Handle search_git_blame — always uses CLI (no cache for blame data).
+fn handle_git_blame(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+    let repo = match args.get("repo").and_then(|v| v.as_str()) {
+        Some(r) => r,
+        None => return ToolCallResult::error("Missing required parameter: repo".to_string()),
+    };
+    let file = match args.get("file").and_then(|v| v.as_str()) {
+        Some(f) => f,
+        None => return ToolCallResult::error("Missing required parameter: file".to_string()),
+    };
+    let start_line = match args.get("startLine").and_then(|v| v.as_u64()) {
+        Some(n) if n >= 1 => n as usize,
+        Some(_) => return ToolCallResult::error("startLine must be >= 1".to_string()),
+        None => return ToolCallResult::error("Missing required parameter: startLine".to_string()),
+    };
+    let end_line = args.get("endLine").and_then(|v| v.as_u64()).map(|n| n as usize);
+
+    // Validate endLine >= startLine if provided
+    if let Some(end) = end_line {
+        if end < start_line {
+            return ToolCallResult::error(format!(
+                "endLine ({}) must be >= startLine ({})", end, start_line
+            ));
+        }
+    }
+
+    let start = Instant::now();
+
+    match git::blame_lines(repo, file, start_line, end_line) {
+        Ok(blame_lines) => {
+            let elapsed = start.elapsed();
+            let effective_end = end_line.unwrap_or(start_line);
+
+            // Collect unique authors and commits
+            let mut unique_authors: Vec<&str> = blame_lines.iter().map(|b| b.author_name.as_str()).collect();
+            unique_authors.sort();
+            unique_authors.dedup();
+
+            let mut unique_commits: Vec<&str> = blame_lines.iter().map(|b| b.hash.as_str()).collect();
+            unique_commits.sort();
+            unique_commits.dedup();
+
+            // Find oldest and newest dates
+            let oldest = blame_lines.iter().map(|b| &b.date).min().cloned().unwrap_or_default();
+            let newest = blame_lines.iter().map(|b| &b.date).max().cloned().unwrap_or_default();
+
+            let blame_json: Vec<Value> = blame_lines.iter().map(|b| {
+                json!({
+                    "line": b.line,
+                    "hash": b.hash,
+                    "author": b.author_name,
+                    "email": b.author_email,
+                    "date": b.date,
+                    "content": b.content,
+                })
+            }).collect();
+
+            let output = json!({
+                "blame": blame_json,
+                "summary": {
+                    "tool": "search_git_blame",
+                    "file": file,
+                    "lineRange": format!("{}-{}", start_line, effective_end),
+                    "uniqueAuthors": unique_authors.len(),
+                    "uniqueCommits": unique_commits.len(),
+                    "oldestLine": oldest.split(' ').next().unwrap_or(""),
+                    "newestLine": newest.split(' ').next().unwrap_or(""),
+                    "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
+                }
+            });
+
+            ToolCallResult::success(serde_json::to_string(&output).unwrap())
+        }
+        Err(e) => ToolCallResult::error(e),
+    }
+}
+
 // ─── Unit tests for date conversion and formatting ──────────────────
 
 #[cfg(test)]

@@ -64,6 +64,7 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 | `search_git_diff`            | Commit history with full diff/patch. Always uses CLI (cache has no patch data)                                                          |
 | `search_git_authors`         | Top authors for a file ranked by commit count. Uses in-memory cache when available (sub-millisecond), falls back to CLI                  |
 | `search_git_activity`        | Repo-wide activity (all changed files) for a date range. Uses in-memory cache when available (sub-millisecond), falls back to CLI        |
+| `search_git_blame`           | Line-level attribution (`git blame`) for a file or line range. Returns commit hash, author, date, and content per line                   |
 
 ## What the AI Agent Sees
 
@@ -336,7 +337,7 @@ Check if all files in the repository are properly indexed. Files >500 bytes with
 
 ## Git History Tools
 
-Four MCP tools for querying git history. Always available — no flags needed. When the in-memory git history cache is ready (built automatically in the background on server startup), `search_git_history`, `search_git_authors`, and `search_git_activity` use sub-millisecond cache lookups. When the cache is not ready (first ~60 sec on cold start), these tools transparently fall back to CLI `git log` commands (~2–6 sec). `search_git_diff` always uses CLI (cache has no patch data).
+Five MCP tools for querying git history. Always available — no flags needed. When the in-memory git history cache is ready (built automatically in the background on server startup), `search_git_history`, `search_git_authors`, and `search_git_activity` use sub-millisecond cache lookups. When the cache is not ready (first ~60 sec on cold start), these tools transparently fall back to CLI `git log` commands (~2–6 sec). `search_git_diff` and `search_git_blame` always use CLI.
 
 Cache responses include a `"(from cache)"` hint in the `summary` field so the AI agent knows the data source.
 
@@ -345,12 +346,15 @@ Cache responses include a `"(from cache)"` hint in the `summary` field so the AI
 | Parameter    | Type   | Required | Description |
 |---|---|---|---|
 | `repo`       | string | ✅ | Path to local git repository |
-| `file`       | string | ✅* | File path relative to repo root (*required for `search_git_history`, `search_git_diff`, `search_git_authors`) |
+| `file`       | string | ✅* | File path relative to repo root (*required for `search_git_history`, `search_git_diff`, `search_git_blame`) |
+| `path`       | string | — | File or directory path relative to repo root. `search_git_authors` accepts `path` (file, directory, or omit for entire repo). `file` is a backward-compatible alias for `path` |
 | `from`       | string | — | Start date (YYYY-MM-DD, inclusive) |
 | `to`         | string | — | End date (YYYY-MM-DD, inclusive) |
 | `date`       | string | — | Exact date (YYYY-MM-DD), overrides from/to |
 | `maxResults` | number | — | Maximum results to return (default: 50) |
 | `top`        | number | — | Maximum authors to return (default: 10, `search_git_authors` only) |
+| `author`     | string | — | Filter by author name or email (case-insensitive substring match). Available on `search_git_history`, `search_git_diff`, `search_git_activity` |
+| `message`    | string | — | Filter by commit message (case-insensitive substring match). Available on `search_git_history`, `search_git_diff`, `search_git_activity`, `search_git_authors` |
 
 ### Cache behavior
 
@@ -403,11 +407,22 @@ Get commit history with full diff/patch for a specific file. Same as `search_git
 
 ### search_git_authors
 
-Get top authors for a file ranked by number of commits. Shows who changed this file the most, with commit count and date range of their changes.
+Get top authors for a file, directory, or entire repository ranked by number of commits. Shows who changed the code the most, with commit count and date range of their changes.
+
+The `path` parameter (or its backward-compatible alias `file`) accepts:
+- **File path** — authors for a single file (e.g., `"path": "src/main.rs"`)
+- **Directory path** — authors across all files in a directory (e.g., `"path": "src/controllers"`)
+- **Omitted** — authors across the entire repository
 
 ```json
-// Request
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_authors","arguments":{"repo":".","file":"src/main.rs","top":3}}}
+// Request — single file
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_authors","arguments":{"repo":".","path":"src/main.rs","top":3}}}
+
+// Request — directory
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_authors","arguments":{"repo":".","path":"src/controllers","top":5}}}
+
+// Request — entire repo
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_authors","arguments":{"repo":".","top":10}}}
 
 // Response (abbreviated)
 {
@@ -436,6 +451,37 @@ Get activity across all files in a repository for a date range. Returns a list o
     {"path":"Cargo.toml","commitCount":3}
   ],
   "summary": {"totalFiles":3,"totalCommits":23,"tool":"search_git_activity"}
+}
+```
+
+### search_git_blame
+
+Get line-level attribution for a file or line range via `git blame`. Returns the commit hash, author, date, and source content for each line. Always uses CLI (`git blame --porcelain`).
+
+#### Parameters
+
+| Parameter   | Type    | Required | Description |
+|---|---|---|---|
+| `repo`      | string  | ✅ | Path to local git repository |
+| `file`      | string  | ✅ | File path relative to repo root |
+| `startLine` | integer | — | First line to blame (1-based, default: 1) |
+| `endLine`   | integer | — | Last line to blame (1-based, default: end of file) |
+
+```json
+// Request — blame lines 10-15 of UserService.cs
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_blame","arguments":{"repo":".","file":"src/UserService.cs","startLine":10,"endLine":15}}}
+
+// Response (abbreviated)
+{
+  "lines": [
+    {"line":10,"hash":"a1b2c3d4","author":"Alice","email":"alice@example.com","date":"2025-01-10 14:30:00 +0000","content":"    public async Task<User> GetUserAsync(int id)"},
+    {"line":11,"hash":"a1b2c3d4","author":"Alice","email":"alice@example.com","date":"2025-01-10 14:30:00 +0000","content":"    {"},
+    {"line":12,"hash":"d4e5f6a7","author":"Bob","email":"bob@example.com","date":"2025-01-12 09:15:00 +0000","content":"        var user = await _repository.FindAsync(id);"},
+    {"line":13,"hash":"d4e5f6a7","author":"Bob","email":"bob@example.com","date":"2025-01-12 09:15:00 +0000","content":"        if (user == null) throw new NotFoundException(id);"},
+    {"line":14,"hash":"a1b2c3d4","author":"Alice","email":"alice@example.com","date":"2025-01-10 14:30:00 +0000","content":"        return user;"},
+    {"line":15,"hash":"a1b2c3d4","author":"Alice","email":"alice@example.com","date":"2025-01-10 14:30:00 +0000","content":"    }"}
+  ],
+  "summary": {"totalLines":6,"file":"src/UserService.cs","startLine":10,"endLine":15,"tool":"search_git_blame"}
 }
 ```
 

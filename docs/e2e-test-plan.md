@@ -701,7 +701,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 **Expected:**
 
-- stdout: JSON-RPC response with 13 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_reindex_definitions`, `search_definitions`, `search_callers`, `search_help`, `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`
+- stdout: JSON-RPC response with 14 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_reindex_definitions`, `search_definitions`, `search_callers`, `search_help`, `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`
 - Each tool has `name`, `description`, `inputSchema`
 - `search_definitions` inputSchema includes `includeBody` (boolean), `maxBodyLines` (integer), and `maxTotalBodyLines` (integer) parameters
 - Git tools have `repo` (required) and date filter parameters
@@ -4802,13 +4802,13 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 **Expected:**
 
-- `tools` array contains 13 entries (9 original + 4 git)
-- Git tools present: `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`
+- `tools` array contains 14 entries (9 original + 5 git)
+- Git tools present: `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`
 - No `--git` flag needed
 
 **Validates:** Git tools are always available, no opt-in needed.
 
-**Status:** ✅ Covered by unit tests: `test_handle_tools_list` (13 tools), `test_tool_definitions_count` (13 tools)
+**Status:** ✅ Covered by unit tests: `test_handle_tools_list` (14 tools), `test_tool_definitions_count` (14 tools)
 
 ## Git History Cache — Unit Tests (PR 2a)
 
@@ -5262,6 +5262,106 @@ echo $msgs | search serve --dir . --ext rs
 - CLI behavior matches cache behavior (both use UTC)
 
 **Unit tests:** `test_date_2024_12_16_start`, `test_date_2025_12_16_start`, `test_commit_1734370112_is_2024_not_2025`, `test_format_timestamp_known_value`
+
+---
+
+### T-CACHE-20: Author/message filtering — query_file_history
+
+**Scenario:** `query_file_history()` supports optional `author_filter` and `message_filter` parameters for filtering commits by author name/email and commit message (case-insensitive substring match).
+
+**Expected:**
+
+- `author_filter: "Alice"` returns only commits by Alice
+- `author_filter: "bob@"` matches Bob's email
+- `author_filter: "alice"` (lowercase) matches `"Alice"` (case-insensitive)
+- `message_filter: "bug"` returns only commits with "bug" in the subject
+- `message_filter: "FIX BUG"` (uppercase) matches case-insensitively
+- Combined `author_filter + message_filter` requires both to match
+- Combined `author_filter + from/to` filters work together
+
+**Unit tests:** `test_query_file_history_author_filter`, `test_query_file_history_author_filter_by_email`, `test_query_file_history_author_filter_case_insensitive`, `test_query_file_history_author_filter_no_match`, `test_query_file_history_message_filter`, `test_query_file_history_message_filter_case_insensitive`, `test_query_file_history_message_filter_no_match`, `test_query_file_history_author_and_message_combined`, `test_query_file_history_author_and_date_combined`
+
+---
+
+### T-CACHE-21: Author/message filtering — query_activity
+
+**Scenario:** `query_activity()` supports optional `author_filter` and `message_filter` parameters for filtering file activity by author and commit message.
+
+**Expected:**
+
+- `author_filter: "Bob"` returns only files touched by Bob
+- `message_filter: "Initial"` returns only files from the "Initial commit"
+- Combined `author_filter + message_filter` narrows results to commits matching both
+
+**Unit tests:** `test_query_activity_author_filter`, `test_query_activity_message_filter`, `test_query_activity_author_and_message_combined`
+
+---
+
+### T-CACHE-22: Author/message filtering — query_authors
+
+**Scenario:** `query_authors()` supports optional `author_filter`, `message_filter`, `from`, and `to` parameters for filtering author aggregations.
+
+**Expected:**
+
+- `message_filter: "feature"` returns only authors who committed with "feature" in the subject
+- `from: 1700001500` returns authors whose commits are after that timestamp
+- `author_filter: "Alice"` returns only Alice with her full commit count
+
+**Unit tests:** `test_query_authors_with_message_filter`, `test_query_authors_with_date_filter`, `test_query_authors_with_author_filter`, `test_query_authors_whole_repo`
+
+---
+
+### T-GIT-BLAME-01: Git blame — basic line blame
+
+**Scenario:** `blame_lines()` runs `git blame --porcelain` for a line range and returns structured blame data.
+
+**Expected:**
+
+- Blaming `Cargo.toml` lines 1-3 returns 3 `BlameLine` entries
+- Each entry has non-empty `hash`, `author_name`, `date`, `content`
+- Single-line blame (no `end_line`) returns exactly 1 line
+- First line of `Cargo.toml` content contains `[package]`
+
+**Unit tests:** `test_blame_lines_returns_results`, `test_blame_lines_single_line`, `test_blame_lines_has_content`
+
+---
+
+### T-GIT-BLAME-02: Git blame — error handling
+
+**Scenario:** `blame_lines()` handles error cases gracefully.
+
+**Expected:**
+
+- Nonexistent file returns `Err`
+- Nonexistent repo path returns `Err`
+
+**Unit tests:** `test_blame_lines_nonexistent_file`, `test_blame_lines_bad_repo`
+
+---
+
+### T-GIT-BLAME-03: Git blame porcelain parser
+
+**Scenario:** `parse_blame_porcelain()` correctly parses git blame `--porcelain` output including the commit metadata caching behavior (first occurrence has full headers, subsequent occurrences reuse cached metadata).
+
+**Expected:**
+
+- Basic single-line: parses hash (short 8-char), author name/email, content
+- Repeated hash: second occurrence reuses author info from cache
+- Empty input: returns empty vec (no error)
+
+**Unit tests:** `test_parse_blame_porcelain_basic`, `test_parse_blame_porcelain_repeated_hash`, `test_parse_blame_porcelain_empty_input`
+
+---
+
+### T-GIT-BLAME-04: Blame date formatting
+
+**Scenario:** `format_blame_date()` converts Unix timestamp + timezone offset to human-readable date string.
+
+**Expected:**
+
+- `format_blame_date(1700000000, "+0000")` starts with `"2023-11-14"` and ends with `"+0000"`
+
+**Unit test:** `test_format_blame_date`
 
 ---
 
