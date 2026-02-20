@@ -1135,6 +1135,7 @@ fn test_dispatch_definitions_while_def_index_building() {
             file_index: HashMap::new(),
             path_to_id: HashMap::new(),
             method_calls: HashMap::new(),
+            code_stats: HashMap::new(),
             parse_errors: 0,
             lossy_file_count: 0,
             empty_file_ids: Vec::new(),
@@ -1164,6 +1165,7 @@ fn test_dispatch_callers_while_def_index_building() {
             file_index: HashMap::new(),
             path_to_id: HashMap::new(),
             method_calls: HashMap::new(),
+            code_stats: HashMap::new(),
             parse_errors: 0,
             lossy_file_count: 0,
             empty_file_ids: Vec::new(),
@@ -1606,6 +1608,7 @@ fn test_search_definitions_file_filter_slash_normalization() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -2170,6 +2173,7 @@ fn make_ranking_defs_ctx() -> HandlerContext {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 

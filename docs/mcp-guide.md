@@ -170,6 +170,14 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 | `maxTotalBodyLines` | integer | 500     | Max total body lines across all results (0 = unlimited)                                  |
 | `audit`             | boolean | false   | Return index coverage report instead of search results                                   |
 | `auditMinBytes`     | integer | 500     | Min file size to flag as suspicious in audit mode                                        |
+| `includeCodeStats`  | boolean | false   | Include complexity metrics (`codeStats` object) for methods/functions/constructors        |
+| `sortBy`            | string  | —       | Sort by metric descending. Values: `cyclomaticComplexity`, `cognitiveComplexity`, `maxNestingDepth`, `paramCount`, `returnCount`, `callCount`, `lambdaCount`, `lines`. Auto-enables `includeCodeStats` |
+| `minComplexity`     | integer | —       | Filter: min cyclomatic complexity. Auto-enables `includeCodeStats`                       |
+| `minCognitive`      | integer | —       | Filter: min cognitive complexity. Auto-enables `includeCodeStats`                        |
+| `minNesting`        | integer | —       | Filter: min nesting depth. Auto-enables `includeCodeStats`                               |
+| `minParams`         | integer | —       | Filter: min parameter count. Auto-enables `includeCodeStats`                             |
+| `minReturns`        | integer | —       | Filter: min return/throw count. Auto-enables `includeCodeStats`                          |
+| `minCalls`          | integer | —       | Filter: min call count (fan-out). Auto-enables `includeCodeStats`                        |
 
 ### `containsLine` — Find Containing Method
 
@@ -247,6 +255,48 @@ When a definition's body exceeds `maxBodyLines`, the `body` array is truncated a
   }
 }
 ```
+
+### `includeCodeStats` — Code Complexity Metrics
+
+Get complexity metrics for methods, functions, and constructors. Metrics are always computed during indexing — this parameter just controls output visibility.
+
+```json
+// Request: find 20 most complex methods
+{ "sortBy": "cognitiveComplexity", "maxResults": 20 }
+
+// Response
+{
+  "definitions": [
+    {
+      "name": "ProcessOrder",
+      "kind": "method",
+      "parent": "OrderService",
+      "file": "Services/OrderService.cs",
+      "lines": "45-89",
+      "codeStats": {
+        "lines": 45,
+        "cyclomaticComplexity": 12,
+        "cognitiveComplexity": 18,
+        "maxNestingDepth": 4,
+        "paramCount": 3,
+        "returnCount": 4,
+        "callCount": 8,
+        "lambdaCount": 1
+      }
+    }
+  ],
+  "summary": { "totalResults": 1247, "returned": 20, "sortedBy": "cognitiveComplexity" }
+}
+```
+
+**Combine filters for "God Method" detection:**
+
+```json
+// Find methods with high complexity AND many params AND high fan-out
+{ "minComplexity": 20, "minParams": 5, "minCalls": 15, "sortBy": "cyclomaticComplexity" }
+```
+
+**Note:** Classes, fields, and enum members do not have `codeStats`. Old indexes (before this feature) return results normally with `summary.codeStatsAvailable: false` — run `search_reindex_definitions` to compute metrics.
 
 ### `audit` — Index Coverage Report
 

@@ -41,7 +41,7 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
 
     // Parse the file
     let ext_lower = ext.to_lowercase();
-    let (file_defs, file_calls) = match ext_lower.as_str() {
+    let (file_defs, file_calls, file_stats) = match ext_lower.as_str() {
         "cs" => {
             let mut cs_parser = tree_sitter::Parser::new();
             cs_parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).ok();
@@ -57,7 +57,7 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
             ts_parser.set_language(&ts_lang.into()).ok();
             parse_typescript_definitions(&mut ts_parser, &content, file_id)
         }
-        _ => (Vec::new(), Vec::new()),
+        _ => (Vec::new(), Vec::new(), Vec::new()),
     };
 
     // Add new definitions to index
@@ -106,6 +106,12 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
             index.method_calls.insert(global_idx, calls);
         }
     }
+
+    // Add code stats for new definitions
+    for (local_idx, stats) in file_stats {
+        let global_idx = base_def_idx + local_idx as u32;
+        index.code_stats.insert(global_idx, stats);
+    }
 }
 
 /// Remove all definitions for a file from the index
@@ -117,9 +123,10 @@ pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
 
     let indices_set: std::collections::HashSet<u32> = def_indices.iter().cloned().collect();
 
-    // Remove call graph entries
+    // Remove call graph and code stats entries
     for &di in &def_indices {
         index.method_calls.remove(&di);
+        index.code_stats.remove(&di);
     }
 
     index.name_index.retain(|_, v| {
@@ -173,6 +180,9 @@ pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
     }
     if index.method_calls.capacity() > index.method_calls.len() * 2 {
         index.method_calls.shrink_to_fit();
+    }
+    if index.code_stats.capacity() > index.code_stats.len() * 2 {
+        index.code_stats.shrink_to_fit();
     }
 
     // Check for excessive tombstone growth

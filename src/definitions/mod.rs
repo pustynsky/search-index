@@ -105,7 +105,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                 let mut ts_parser: Option<tree_sitter::Parser> = None;
                 let mut tsx_parser: Option<tree_sitter::Parser> = None;
 
-                let mut chunk_defs: Vec<(u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>)> = Vec::new();
+                let mut chunk_defs: Vec<(u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>)> = Vec::new();
                 let mut errors = 0usize;
                 let mut lossy_files: Vec<String> = Vec::new();
                 let mut empty_files: Vec<(u32, u64)> = Vec::new(); // (file_id, byte_size) for files with 0 defs
@@ -126,7 +126,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                         .and_then(|e| e.to_str())
                         .unwrap_or("");
 
-                    let (file_defs, file_calls) = match ext.to_lowercase().as_str() {
+                    let (file_defs, file_calls, file_stats) = match ext.to_lowercase().as_str() {
                         "cs" => parser_csharp::parse_csharp_definitions(&mut cs_parser, &content, *file_id),
                         "ts" if need_ts => {
                             let parser = ts_parser.get_or_insert_with(|| {
@@ -146,11 +146,11 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                             });
                             parser_typescript::parse_typescript_definitions(parser, &content, *file_id)
                         }
-                        _ => (Vec::new(), Vec::new()),
+                        _ => (Vec::new(), Vec::new(), Vec::new()),
                     };
 
                     if !file_defs.is_empty() {
-                        chunk_defs.push((*file_id, file_defs, file_calls));
+                        chunk_defs.push((*file_id, file_defs, file_calls, file_stats));
                     } else {
                         empty_files.push((*file_id, content_len));
                     }
@@ -172,6 +172,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    let mut code_stats: HashMap<u32, CodeStats> = HashMap::new();
     let mut parse_errors = 0usize;
     let mut total_call_sites = 0usize;
 
@@ -189,7 +190,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         }
         lossy_file_count += lossy_files.len();
         empty_file_ids.extend(empty_files);
-        for (file_id, file_defs, file_calls) in chunk_defs {
+        for (file_id, file_defs, file_calls, file_stats) in chunk_defs {
             let base_def_idx = definitions.len() as u32;
 
             for def in file_defs {
@@ -236,6 +237,12 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                     method_calls.insert(global_idx, calls);
                 }
             }
+
+            // Map local code stats indices to global def indices
+            for (local_idx, stats) in file_stats {
+                let global_idx = base_def_idx + local_idx as u32;
+                code_stats.insert(global_idx, stats);
+            }
         }
     }
 
@@ -262,9 +269,10 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         num_threads
     );
     eprintln!(
-        "[def-index] Extracted {} definitions, {} call sites",
+        "[def-index] Extracted {} definitions, {} call sites, {} code stats entries",
         definitions.len(),
         total_call_sites,
+        code_stats.len(),
     );
 
     let now = SystemTime::now()
@@ -288,6 +296,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         parse_errors,
         lossy_file_count,
         empty_file_ids,
+        code_stats,
     }
 }
 

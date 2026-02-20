@@ -4429,3 +4429,104 @@ lines) in descending order — files with more matches appear first.
 **Unit test:** [`test_search_grep_phrase_sort_by_occurrences`](../src/mcp/handlers/handlers_tests.rs)
 
 **Status:** ✅ Covered by unit test
+
+
+---
+
+## Code Stats Tests
+
+### T-CODESTATS-01: `search_definitions` — `includeCodeStats=true` returns metrics
+
+**Tool:** `search_definitions`
+
+**Scenario:** Passing `includeCodeStats: true` returns code complexity metrics for methods/functions.
+
+**Expected:**
+
+- Method definitions include a `codeStats` object with: `lines`, `cyclomaticComplexity`, `cognitiveComplexity`, `maxNestingDepth`, `paramCount`, `returnCount`, `callCount`, `lambdaCount`
+- Class/field/enum definitions do NOT have a `codeStats` object
+- `summary` does NOT contain `codeStatsAvailable: false` (metrics are available in new indexes)
+
+**Unit tests:** `test_code_stats_empty_method`, `test_code_stats_single_if`, `test_code_stats_nested_if`, `test_code_stats_triple_nested_if`, `test_code_stats_logical_operator_sequence`, `test_code_stats_mixed_logical_operators`, `test_code_stats_for_with_if`, `test_code_stats_lambda_count`, `test_code_stats_return_and_throw_count`, `test_code_stats_call_count_from_parser`, `test_code_stats_param_count`, `test_code_stats_if_else`
+
+---
+
+### T-CODESTATS-02: `search_definitions` — `sortBy` sorts by metric descending
+
+**Tool:** `search_definitions`
+
+**Scenario:** Passing `sortBy: "cognitiveComplexity"` returns methods sorted by cognitive complexity (worst first).
+
+**Expected:**
+
+- Results are sorted in descending order by the specified metric
+- `summary.sortedBy` field is present
+- `includeCodeStats` is automatically enabled
+
+---
+
+### T-CODESTATS-03: `search_definitions` — `min*` filters restrict results
+
+**Tool:** `search_definitions`
+
+**Scenario:** Passing `minComplexity: 5` returns only methods with cyclomatic complexity ≥ 5.
+
+**Expected:**
+
+- All returned definitions have `codeStats.cyclomaticComplexity >= 5`
+- `summary.statsFiltersApplied` = `true`
+- `summary.beforeStatsFilter` > `summary.afterStatsFilter` (some filtered out)
+- Definitions without code stats (classes, fields) are excluded
+
+---
+
+### T-CODESTATS-04: `search_definitions` — Invalid `sortBy` value returns error
+
+**Tool:** `search_definitions`
+
+**Scenario:** Passing `sortBy: "invalidMetric"` returns an actionable error.
+
+**Expected:**
+
+- Response is an error (`isError: true`)
+- Error message lists valid `sortBy` values
+
+---
+
+### T-CODESTATS-05: `search_reindex_definitions` — Response includes `codeStatsEntries`
+
+**Tool:** `search_reindex_definitions`
+
+**Scenario:** After reindexing, the response includes the count of code stats entries.
+
+**Expected:**
+
+- Response JSON contains `codeStatsEntries` field with a number ≥ 0
+- For C#/TypeScript projects, `codeStatsEntries` > 0
+
+---
+
+### T-CODESTATS-06: `search_definitions` — Backward compatibility with old index (no stats)
+
+**Tool:** `search_definitions`
+
+**Scenario:** When loaded from an old cache without code_stats, `includeCodeStats: true` returns results without `codeStats` objects and `summary.codeStatsAvailable: false`.
+
+**Expected:**
+
+- Results returned normally (no error)
+- `summary.codeStatsAvailable` = `false`
+- No `codeStats` objects in definitions
+
+---
+
+### T-CODESTATS-07: `search_definitions` — `sortBy` with old index returns error
+
+**Tool:** `search_definitions`
+
+**Scenario:** When loaded from an old cache without code_stats, `sortBy: "cognitiveComplexity"` returns an error.
+
+**Expected:**
+
+- Response is an error (`isError: true`)
+- Error message recommends `search_reindex_definitions`

@@ -13,7 +13,7 @@ fn test_parse_ts_class() {
     let source = "export class UserService extends BaseService implements IUserService { }";
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let class_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Class).collect();
     assert_eq!(class_defs.len(), 1);
@@ -30,7 +30,7 @@ fn test_parse_ts_abstract_class() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let class_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Class).collect();
     assert_eq!(class_defs.len(), 1);
@@ -50,7 +50,7 @@ fn test_parse_ts_interface() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let iface_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Interface).collect();
     assert_eq!(iface_defs.len(), 1);
@@ -67,7 +67,7 @@ fn test_parse_ts_function() {
     let source = "export async function fetchUser(id: string): Promise<User> { return {} as User; }";
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let fn_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Function).collect();
     assert_eq!(fn_defs.len(), 1);
@@ -86,7 +86,7 @@ fn test_parse_ts_method() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let method_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Method).collect();
     assert_eq!(method_defs.len(), 1);
@@ -103,7 +103,7 @@ fn test_parse_ts_constructor() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let ctor_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Constructor).collect();
     assert_eq!(ctor_defs.len(), 1);
@@ -123,7 +123,7 @@ fn test_parse_ts_enum() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let enum_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Enum).collect();
     assert_eq!(enum_defs.len(), 1);
@@ -142,7 +142,7 @@ fn test_parse_ts_const_enum() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let enum_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Enum).collect();
     assert_eq!(enum_defs.len(), 1);
@@ -164,7 +164,7 @@ fn test_parse_ts_type_alias() {
     let source = "export type UserId = string | number;";
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let ta_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::TypeAlias).collect();
     assert_eq!(ta_defs.len(), 1);
@@ -177,7 +177,7 @@ fn test_parse_ts_variable() {
     let source = "export const MAX_RETRIES = 3;";
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let var_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Variable).collect();
     assert_eq!(var_defs.len(), 1);
@@ -192,7 +192,7 @@ fn test_parse_ts_decorators() {
 class AppComponent {}"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let class_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Class).collect();
     assert_eq!(class_defs.len(), 1);
@@ -209,7 +209,7 @@ fn test_parse_ts_field() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let field_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Field).collect();
     assert_eq!(field_defs.len(), 1);
@@ -225,7 +225,7 @@ fn test_parse_ts_interface_property() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let prop_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Property).collect();
     assert_eq!(prop_defs.len(), 1);
@@ -240,7 +240,7 @@ fn test_parse_tsx_file() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TSX.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let class_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Class).collect();
     assert_eq!(class_defs.len(), 1);
@@ -266,7 +266,7 @@ fn test_ts_incremental_update() {
         files: Vec::new(), definitions: Vec::new(), name_index: HashMap::new(),
         kind_index: HashMap::new(), attribute_index: HashMap::new(),
         base_type_index: HashMap::new(), file_index: HashMap::new(),
-        path_to_id: HashMap::new(), method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
     let clean = PathBuf::from(crate::clean_path(&test_file.to_string_lossy()));
@@ -316,7 +316,7 @@ fn test_ts_this_method_call() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let pi = defs.iter().position(|d| d.name == "process").unwrap();
     let pc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == pi).collect();
@@ -336,7 +336,7 @@ fn test_ts_this_field_method_call() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let hi = defs.iter().position(|d| d.name == "handle").unwrap();
     let hc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == hi).collect();
@@ -353,7 +353,7 @@ fn test_ts_standalone_function_call() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let pi = defs.iter().position(|d| d.name == "processOrder").unwrap();
     let pc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == pi).collect();
@@ -372,7 +372,7 @@ fn test_ts_new_expression() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let ci = defs.iter().position(|d| d.name == "create").unwrap();
     let cc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == ci).collect();
@@ -391,7 +391,7 @@ fn test_ts_static_method_call() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let ri = defs.iter().position(|d| d.name == "run").unwrap();
     let rc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == ri).collect();
@@ -411,7 +411,7 @@ fn test_ts_arrow_function_class_property() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let pi = defs.iter().position(|d| d.name == "processItem").unwrap();
     let pc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == pi).collect();
@@ -432,7 +432,7 @@ fn test_ts_constructor_di_field_types() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let ei = defs.iter().position(|d| d.name == "execute").unwrap();
     let ec: Vec<_> = call_sites.iter().filter(|(i, _)| *i == ei).collect();
@@ -462,7 +462,7 @@ fn test_ts_multiple_calls_in_method() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let pi = defs.iter().position(|d| d.name == "process").unwrap();
     let pc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == pi).collect();
@@ -493,7 +493,7 @@ fn test_ts_no_calls_empty_body() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let ni = defs.iter().position(|d| d.name == "doNothing").unwrap();
     let nc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == ni).collect();
@@ -510,7 +510,7 @@ fn test_ts_class_field_type() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let li = defs.iter().position(|d| d.name == "lookup").unwrap();
     let lc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == li).collect();
@@ -532,7 +532,7 @@ public class NotificationService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let ni = defs.iter().position(|d| d.name == "Notify").unwrap();
     let nc: Vec<_> = cs.iter().filter(|(i, _)| *i == ni).collect();
@@ -560,7 +560,7 @@ fn test_ts_inject_field_initializer() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let ri = defs.iter().position(|d| d.name == "run").unwrap();
     let rc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == ri).collect();
@@ -589,7 +589,7 @@ fn test_ts_inject_constructor_assignment() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let ni = defs.iter().position(|d| d.name == "navigate").unwrap();
     let nc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == ni).collect();
@@ -614,7 +614,7 @@ fn test_ts_inject_with_generic() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let di = defs.iter().position(|d| d.name == "doWork").unwrap();
     let dc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == di).collect();
@@ -641,7 +641,7 @@ class UserService implements IUserService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let class_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Class).collect();
     assert_eq!(class_defs.len(), 1);
@@ -669,7 +669,7 @@ class OrderProcessor {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let ri = defs.iter().position(|d| d.name == "run").unwrap();
     let rc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == ri).collect();
@@ -700,7 +700,7 @@ class DataService implements IReader, IWriter {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let class_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Class && d.name == "DataService").collect();
     assert_eq!(class_defs.len(), 1);
@@ -731,7 +731,7 @@ class AdminService extends BaseService implements IAdminService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let class_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Class && d.name == "AdminService").collect();
     assert_eq!(class_defs.len(), 1);
@@ -752,7 +752,7 @@ fn test_parse_ts_injection_token_variable() {
     let source = "export const AUTH_TOKEN = new InjectionToken<IAuthService>('AUTH_TOKEN');";
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, _call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let var_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Variable).collect();
     assert_eq!(var_defs.len(), 1, "Expected exactly one variable definition");
@@ -794,7 +794,7 @@ fn test_ts_local_var_explicit_type_annotation() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let gi = defs.iter().position(|d| d.name == "getUser").unwrap();
     let gc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == gi).collect();
@@ -819,7 +819,7 @@ fn test_ts_local_var_new_expression() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let pi = defs.iter().position(|d| d.name == "processOrder").unwrap();
     let pc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == pi).collect();
@@ -844,7 +844,7 @@ fn test_ts_local_var_new_expression_with_generics() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let li = defs.iter().position(|d| d.name == "loadData").unwrap();
     let lc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == li).collect();
@@ -870,7 +870,7 @@ fn test_ts_local_var_no_type_annotation() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let di = defs.iter().position(|d| d.name == "doWork").unwrap();
     let dc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == di).collect();
@@ -897,7 +897,7 @@ fn test_ts_local_var_field_types_take_precedence() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let di = defs.iter().position(|d| d.name == "doWork").unwrap();
     let dc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == di).collect();
@@ -926,7 +926,7 @@ fn test_ts_local_var_let_declaration_without_initializer() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let pi = defs.iter().position(|d| d.name == "process").unwrap();
     let pc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == pi).collect();
@@ -953,7 +953,7 @@ fn test_ts_arrow_function_in_argument_calls_captured() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let pi = defs.iter().position(|d| d.name == "process").unwrap();
     let pc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == pi).collect();
@@ -979,7 +979,7 @@ fn test_ts_multiline_arrow_function_calls_captured() {
 }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    let (defs, call_sites) = parse_typescript_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
 
     let ei = defs.iter().position(|d| d.name == "execute").unwrap();
     let ec: Vec<_> = call_sites.iter().filter(|(i, _)| *i == ei).collect();

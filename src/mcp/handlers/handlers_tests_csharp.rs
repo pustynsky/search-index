@@ -38,7 +38,7 @@ fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
     for (i, def) in definitions.iter().enumerate() { let idx = i as u32; name_index.entry(def.name.to_lowercase()).or_default().push(idx); kind_index.entry(def.kind).or_default().push(idx); file_index.entry(def.file_id).or_default().push(idx); }
     path_to_id.insert(file0_path, 0); path_to_id.insert(file1_path, 1);
-    let def_index = DefinitionIndex { root: tmp_dir.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![file0_str.clone(), file1_str.clone()], definitions, name_index, kind_index, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index, path_to_id, method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new() };
+    let def_index = DefinitionIndex { root: tmp_dir.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![file0_str.clone(), file1_str.clone()], definitions, name_index, kind_index, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index, path_to_id, method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new() };
     let content_index = ContentIndex { root: tmp_dir.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600, files: vec![file0_str, file1_str], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0, 0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: Some(Arc::new(RwLock::new(def_index))), server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
     (ctx, tmp_dir)
@@ -212,7 +212,7 @@ fn test_search_callers_field_prefix_m_underscore() {
         ],
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
-        file_index, path_to_id, method_calls, parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        file_index, path_to_id, method_calls, code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
     let ctx = HandlerContext {
@@ -314,7 +314,7 @@ fn test_search_callers_field_prefix_underscore() {
         files: vec!["C:\\src\\UserService.cs".to_string(), "C:\\src\\AccountController.cs".to_string()],
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
-        file_index, path_to_id, method_calls, parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        file_index, path_to_id, method_calls, code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
     let ctx = HandlerContext {
@@ -497,7 +497,7 @@ fn test_resolve_call_site_with_class_scope() {
         base_type_index,
         file_index,
         path_to_id: HashMap::new(),
-        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
     let call_a = CallSite {
@@ -578,6 +578,7 @@ fn test_search_callers_down_class_filter() {
         files: vec!["C:\\src\\IndexSearchService.cs".to_string(), "C:\\src\\IndexedSearchQueryExecuter.cs".to_string()],
         definitions, name_index, kind_index, attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls,
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -688,7 +689,7 @@ fn test_search_callers_ambiguity_warning_truncated() {
         attribute_index: HashMap::new(),
         base_type_index: HashMap::new(),
         file_index, path_to_id,
-        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
     let ctx = HandlerContext {
@@ -777,7 +778,7 @@ fn test_search_callers_ambiguity_warning_few_classes() {
         attribute_index: HashMap::new(),
         base_type_index: HashMap::new(),
         file_index, path_to_id,
-        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
     let ctx = HandlerContext {
@@ -875,7 +876,7 @@ fn test_search_callers_no_ambiguity_warning_with_class_param() {
         attribute_index: HashMap::new(),
         base_type_index: HashMap::new(),
         file_index, path_to_id,
-        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
     let ctx = HandlerContext {
@@ -1007,6 +1008,7 @@ fn test_search_callers_exclude_dir_and_file() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -1120,6 +1122,7 @@ fn test_search_callers_cycle_detection_down() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls,
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -1290,6 +1293,7 @@ fn test_search_definitions_exclude_dir() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -1416,6 +1420,7 @@ fn test_search_definitions_struct_kind() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -1508,6 +1513,7 @@ fn test_search_definitions_base_type_filter() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index,
         file_index, path_to_id, method_calls: HashMap::new(),
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -1620,6 +1626,7 @@ fn test_search_definitions_enum_member_kind() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -1730,7 +1737,7 @@ fn test_search_definitions_enum_member_kind() {
     let definitions = vec![DefinitionEntry { file_id: 0, name: "StaleClass".to_string(), kind: DefinitionKind::Class, line_start: 5, line_end: 20, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] }];
     let mut ni: HashMap<String, Vec<u32>> = HashMap::new(); let mut ki: HashMap<DefinitionKind, Vec<u32>> = HashMap::new(); let mut fi: HashMap<u32, Vec<u32>> = HashMap::new();
     for (i, def) in definitions.iter().enumerate() { ni.entry(def.name.to_lowercase()).or_default().push(i as u32); ki.entry(def.kind).or_default().push(i as u32); fi.entry(def.file_id).or_default().push(i as u32); }
-    let di = DefinitionIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![fs.clone()], definitions, name_index: ni, kind_index: ki, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index: fi, path_to_id: HashMap::new(), method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new() };
+    let di = DefinitionIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![fs.clone()], definitions, name_index: ni, kind_index: ki, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index: fi, path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new() };
     let ci = ContentIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600, files: vec![fs], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
     let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "StaleClass", "includeBody": true}));
@@ -1744,7 +1751,7 @@ fn test_search_definitions_enum_member_kind() {
     let mut ni: HashMap<String, Vec<u32>> = HashMap::new(); let mut ki: HashMap<DefinitionKind, Vec<u32>> = HashMap::new(); let mut fi: HashMap<u32, Vec<u32>> = HashMap::new();
     for (i, def) in definitions.iter().enumerate() { ni.entry(def.name.to_lowercase()).or_default().push(i as u32); ki.entry(def.kind).or_default().push(i as u32); fi.entry(def.file_id).or_default().push(i as u32); }
     let ne = "C:\\nonexistent\\path\\Ghost.cs".to_string();
-    let di = DefinitionIndex { root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![ne.clone()], definitions, name_index: ni, kind_index: ki, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index: fi, path_to_id: HashMap::new(), method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new() };
+    let di = DefinitionIndex { root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![ne.clone()], definitions, name_index: ni, kind_index: ki, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index: fi, path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new() };
     let ci = ContentIndex { root: ".".to_string(), created_at: 0, max_age_secs: 3600, files: vec![ne], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)) };
     let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "GhostClass", "includeBody": true}));
@@ -1781,7 +1788,7 @@ fn test_reindex_definitions_success() {
         name_index: HashMap::new(), kind_index: HashMap::new(),
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: HashMap::new(), path_to_id: HashMap::new(),
-        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0,
+        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0,
         empty_file_ids: Vec::new(),
     };
 
@@ -1869,7 +1876,7 @@ fn make_ctx_with_backslash_paths() -> HandlerContext {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id,
-        method_calls: HashMap::new(), parse_errors: 0, lossy_file_count: 0,
+        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0,
         empty_file_ids: Vec::new(),
     };
 
@@ -2101,6 +2108,7 @@ fn test_search_callers_cycle_detection() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls,
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -2260,7 +2268,7 @@ fn test_search_callers_ext_filter_comma_split() {
         ],
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
-        file_index, path_to_id, method_calls, parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        file_index, path_to_id, method_calls, code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
     let ctx = HandlerContext {
@@ -2409,6 +2417,7 @@ fn test_search_callers_overloads_not_collapsed_up() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls,
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -2522,6 +2531,7 @@ fn test_search_callers_overloads_not_collapsed_down() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls,
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 
@@ -2748,6 +2758,7 @@ fn test_search_callers_same_name_different_receiver_interface_resolution() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index,
         file_index, path_to_id, method_calls,
+        code_stats: HashMap::new(),
         parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
     };
 

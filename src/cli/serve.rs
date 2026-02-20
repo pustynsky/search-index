@@ -166,6 +166,7 @@ pub fn cmd_serve(args: ServeArgs) {
             file_index: HashMap::new(),
             path_to_id: HashMap::new(),
             method_calls: HashMap::new(),
+            code_stats: HashMap::new(),
             parse_errors: 0,
             lossy_file_count: 0,
             empty_file_ids: Vec::new(),
