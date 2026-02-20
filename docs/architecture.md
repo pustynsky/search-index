@@ -65,7 +65,7 @@ Three independent index types, each optimized for a different query pattern:
 
 | Index             | File    | Data Structure                  | Lookup                  | Purpose                  |
 | ----------------- | ------- | ------------------------------- | ----------------------- | ------------------------ |
-| `FileIndex`       | `.idx`  | `Vec<FileEntry>`                | O(n) scan               | File name search         |
+| `FileIndex`       | `.idx`  | `Vec<FileEntry>`                | O(n) in-memory scan (~35ms / 100K files) | File name search         |
 | `ContentIndex`    | `.cidx` | `HashMap<String, Vec<Posting>>` + `TrigramIndex` | O(1) per token, O(1) substring via trigrams | Full-text content search + substring search |
 | `DefinitionIndex` | `.didx` | Multi-index `HashMap` set       | O(1) per name/kind/attr | Structural code search   |
 
@@ -507,13 +507,15 @@ The engine has two layers with **different language coverage**:
 | Layer | Tools | Language Support | How it works |
 | ----- | ----- | ---------------- | ------------ |
 | **Content search** | `search grep`, `content-index`, `search_grep` (MCP) | **Any text file** — language-agnostic | Splits text on non-alphanumeric boundaries, lowercases tokens, builds an inverted index. No language grammar needed. Works equally well with C#, Rust, Python, JS/TS, XML, JSON, Markdown, config files, etc. |
-| **AST / structural search** | `search def-index`, `search_definitions`, `search_callers` (MCP) | **C#-specific** (SQL parser retained but disabled) | Uses tree-sitter to parse source into an AST, extracts classes, methods, interfaces, call sites. Requires a language-specific grammar. |
+| **AST / structural search** | `search def-index`, `search_definitions`, `search_callers` (MCP) | **C# and TypeScript/TSX** (SQL parser retained but disabled) | Uses tree-sitter to parse source into an AST, extracts classes, methods, interfaces, call sites. Requires a language-specific grammar. |
 
 ### AST Parser Status
 
-| Language   | Parser                  | Definition Types                                                                                           | Status |
-| ---------- | ----------------------- | ---------------------------------------------------------------------------------------------------------- | ------ |
-| C# (.cs)   | tree-sitter-c-sharp     | class, interface, struct, enum, record, method, constructor, property, field, delegate, event, enum member | ✅ Active |
-| SQL (.sql) | *(disabled)*            | stored procedure, table, view, function, user-defined type, column, index                                  | ⏸️ Disabled — `tree-sitter-sequel-tsql` 0.4 requires language version 15, incompatible with tree-sitter 0.24 (supports 13-14). Parsing code is retained for future use. |
+| Language          | Parser                       | Definition Types                                                                                           | Status |
+| ----------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------- | ------ |
+| C# (.cs)          | tree-sitter-c-sharp          | class, interface, struct, enum, record, method, constructor, property, field, delegate, event, enum member | ✅ Active |
+| TypeScript (.ts)  | tree-sitter-typescript       | class, interface, enum, method, constructor, property, field, function, type alias, variable (exported), enum member | ✅ Active |
+| TSX (.tsx)         | tree-sitter-typescript (TSX) | *(same as TypeScript)*                                                                                     | ✅ Active |
+| SQL (.sql)        | *(disabled)*                 | stored procedure, table, view, function, user-defined type, column, index                                  | ⏸️ Disabled — `tree-sitter-sequel-tsql` 0.4 requires language version 15, incompatible with tree-sitter 0.24 (supports 13-14). Parsing code is retained for future use. |
 
-> **Key takeaway:** You can use `content-index` / `search_grep` on **any** codebase regardless of language. Only `def-index` / `search_definitions` / `search_callers` require a supported tree-sitter grammar (currently C#).
+> **Key takeaway:** You can use `content-index` / `search_grep` on **any** codebase regardless of language. Only `def-index` / `search_definitions` / `search_callers` require a supported tree-sitter grammar (currently C# and TypeScript/TSX).
