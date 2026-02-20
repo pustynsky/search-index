@@ -13,7 +13,8 @@ fn def_index_path_for(dir: &str, exts: &str, index_base: &std::path::Path) -> Pa
         exts.as_bytes(),
         b"definitions", // distinguish from content index
     ]);
-    index_base.join(format!("{:016x}.didx", hash))
+    let prefix = search::extract_semantic_prefix(&canonical);
+    index_base.join(format!("{}_{:08x}.code-structure", prefix, hash as u32))
 }
 
 pub fn save_definition_index(index: &DefinitionIndex, index_base: &std::path::Path) -> Result<(), crate::SearchError> {
@@ -38,7 +39,7 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path) ->
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "didx") {
+        if path.extension().is_some_and(|e| e == "code-structure") {
             match crate::index::load_compressed::<DefinitionIndex>(&path, "definition-index") {
                 Ok(index) => {
                     let idx_root = std::fs::canonicalize(&index.root)

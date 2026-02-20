@@ -288,9 +288,9 @@ Three distinct indexes, each built independently:
 
 | Index Type | What it stores | CLI command | MCP tool |
 |---|---|---|---|
-| **FileIndex** (.idx) | File paths, sizes, timestamps | `search index` | — |
-| **ContentIndex** (.cidx) | Inverted token→file map for TF-IDF search | `search content-index` | `search_reindex` |
-| **DefinitionIndex** (.didx) | AST definitions + call graph | `search def-index` | `search_reindex_definitions` |
+| **FileIndex** (.file-list) | File paths, sizes, timestamps | `search index` | — |
+| **ContentIndex** (.word-search) | Inverted token→file map for TF-IDF search | `search content-index` | `search_reindex` |
+| **DefinitionIndex** (.code-structure) | AST definitions + call graph | `search def-index` | `search_reindex_definitions` |
 
 ### Build times across machines
 

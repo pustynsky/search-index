@@ -107,9 +107,9 @@ The engine uses three independent index types:
 
 | Index | File | Created by | Searched by | Stores |
 |---|---|---|---|---|
-| File name | `.idx` | `search index` | `search fast` | File paths, sizes, timestamps |
-| Content | `.cidx` | `search content-index` | `search grep` | Token → (file, line numbers) map |
-| Definitions | `.didx` | `search def-index` | `search_definitions` / `search_callers` | AST-extracted classes, methods, call sites |
+| File name | `.file-list` | `search index` | `search fast` | File paths, sizes, timestamps |
+| Content | `.word-search` | `search content-index` | `search grep` | Token → (file, line numbers) map |
+| Definitions | `.code-structure` | `search def-index` | `search_definitions` / `search_callers` | AST-extracted classes, methods, call sites |
 
 Indexes are stored in `%LOCALAPPDATA%\search-index\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX) for definitions. See [Architecture](docs/architecture.md) for details.
 
@@ -171,6 +171,15 @@ Test files are split by language module for maintainability:
 | Property tests | Tokenizer invariants, posting roundtrip, index consistency, TF-IDF ordering |
 | Benchmarks | Tokenizer throughput, index lookup latency, TF-IDF scoring, regex scan |
 
+## Author
+
+Sergey Pustynsky
+
 ## License
 
-MIT
+Licensed under either of:
+
+- [MIT License](LICENSE-MIT)
+- [Apache License, Version 2.0](LICENSE-APACHE)
+
+at your option.

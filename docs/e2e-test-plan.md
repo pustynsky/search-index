@@ -140,7 +140,7 @@ cargo run -- index -d $TEST_DIR
 
 - Exit code: 0
 - stderr: `Indexing ...`, `Indexed N entries in X.XXXs`, `Index saved to ... (X.X MB)`
-- A `.idx` file created in the index directory
+- A `.file-list` file created in the index directory
 
 **Validates:** File index build and persistence.
 
@@ -253,7 +253,7 @@ cargo run -- content-index -d $TEST_DIR -e $TEST_EXT
 - Exit code: 0
 - stderr: `Building content index...`, `Indexed N files, M unique tokens (T total) in X.XXXs`
 - stderr: `Content index saved to ... (X.X MB)`
-- A `.cidx` file created in the index directory
+- A `.word-search` file created in the index directory
 
 **Validates:** Content index build, tokenization, persistence.
 
@@ -492,7 +492,7 @@ cargo run -- cleanup --dir $tmp
 ```powershell
 # Find the content index file and delete it
 $idxDir = "$env:LOCALAPPDATA\search-index"
-$cidxFile = Get-ChildItem $idxDir -Filter *.cidx | Select-Object -First 1
+$cidxFile = Get-ChildItem $idxDir -Filter *.word-search | Select-Object -First 1
 $backupPath = "$cidxFile.bak"
 Move-Item $cidxFile.FullName $backupPath
 ```
@@ -526,7 +526,7 @@ Move-Item $backupPath $cidxFile.FullName
 ```powershell
 # Find the content index file and overwrite with garbage
 $idxDir = "$env:LOCALAPPDATA\search-index"
-$cidxFile = Get-ChildItem $idxDir -Filter *.cidx | Select-Object -First 1
+$cidxFile = Get-ChildItem $idxDir -Filter *.word-search | Select-Object -First 1
 $backupPath = "$cidxFile.bak"
 Copy-Item $cidxFile.FullName $backupPath
 Set-Content -Path $cidxFile.FullName -Value "THIS_IS_GARBAGE_DATA_NOT_A_VALID_INDEX" -Encoding Byte
@@ -589,7 +589,7 @@ cargo run -- def-index -d $TEST_DIR -e $TEST_EXT
 - Exit code: 0
 - stderr: `[def-index] Found N files to parse`
 - stderr: `[def-index] Parsed N files in X.Xs, extracted M definitions`
-- A `.didx` file created
+- A `.code-structure` file created
 
 **Validates:** Tree-sitter parsing, definition extraction, persistence.
 
@@ -1522,7 +1522,7 @@ cargo run -- def-index -d $TEST_DIR -e ts
 - Exit code: 0
 - stderr: `[def-index] Found N files to parse`
 - stderr: `[def-index] Parsed N files in X.Xs, extracted M definitions`
-- A `.didx` file created
+- A `.code-structure` file created
 - Definitions include TypeScript-specific kinds: `function`, `class`, `interface`, `enum`, `typeAlias`, `variable`
 
 **Validates:** Tree-sitter TypeScript parsing, definition extraction for `.ts` files.
@@ -1637,7 +1637,7 @@ cargo run -- def-index -d $TEST_DIR -e cs,ts
 - stderr: `[def-index] Parsed N files in X.Xs, extracted M definitions`
 - Both C# definitions (classes, methods, etc.) and TypeScript definitions (functions, type aliases, etc.) are present in the index
 
-**Validates:** Mixed-language definition indexing. C# files use the C# parser, TypeScript files use the TypeScript parser, and both coexist in the same `.didx` index.
+**Validates:** Mixed-language definition indexing. C# files use the C# parser, TypeScript files use the TypeScript parser, and both coexist in the same `.code-structure` index.
 
 ---
 
@@ -2389,7 +2389,7 @@ Should return fewer suspicious files (only those >10KB with 0 definitions).
 
 ### T-DEF-AUDIT: Definition index audit CLI command
 
-**Background:** The `search def-audit` CLI subcommand loads a previously built `.didx` file from disk and reports index coverage: how many files have definitions, how many are empty, and which suspicious files (large but 0 definitions) may have parsing issues. This does NOT rebuild the index.
+**Background:** The `search def-audit` CLI subcommand loads a previously built `.code-structure` file from disk and reports index coverage: how many files have definitions, how many are empty, and which suspicious files (large but 0 definitions) may have parsing issues. This does NOT rebuild the index.
 
 **Prerequisites:** A definition index must already be built via `search def-index`.
 
@@ -2539,7 +2539,7 @@ cargo run -- grep ".*stale.*" -d $TEST_DIR -e $TEST_EXT --regex
 
 ### T-LZ4: LZ4 index compression and backward compatibility
 
-**Background:** All index files (.idx, .cidx, .didx) are now saved with LZ4 frame compression, prefixed by magic bytes `LZ4S`. The loader auto-detects compressed vs legacy uncompressed formats for backward compatibility.
+**Background:** All index files (.file-list, .word-search, .code-structure) are now saved with LZ4 frame compression, prefixed by magic bytes `LZ4S`. The loader auto-detects compressed vs legacy uncompressed formats for backward compatibility.
 
 **Test — compressed index roundtrip:**
 
@@ -2549,7 +2549,7 @@ cargo run -- content-index -d $TEST_DIR -e $TEST_EXT
 
 # Verify the index file starts with LZ4 magic bytes
 $idxDir = "$env:LOCALAPPDATA\search-index"
-$cidxFile = Get-ChildItem $idxDir -Filter *.cidx | Select-Object -First 1
+$cidxFile = Get-ChildItem $idxDir -Filter *.word-search | Select-Object -First 1
 $bytes = [System.IO.File]::ReadAllBytes($cidxFile.FullName)
 $magic = [System.Text.Encoding]::ASCII.GetString($bytes[0..3])
 if ($magic -ne "LZ4S") { throw "Expected LZ4S magic, got: $magic" }
@@ -2766,7 +2766,7 @@ $stderr = Get-Content "$dir\stderr.txt" -Raw
 **Expected:**
 - Server stderr contains `saving indexes before shutdown`
 - Server stderr contains `Content index saved on shutdown`
-- The `.cidx` file in `%LOCALAPPDATA%\search-index` has a recent modification timestamp
+- The `.word-search` file in `%LOCALAPPDATA%\search-index` has a recent modification timestamp
 
 **Validates:** Save-on-shutdown in [`server.rs`](../src/mcp/server.rs:107) persists incremental watcher changes.
 

@@ -645,7 +645,7 @@
         // Verify index files exist
         let count_before: usize = fs::read_dir(&idx_base).unwrap()
             .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|ext|
-                ext == "idx" || ext == "cidx" || ext == "didx"))
+                ext == "file-list" || ext == "word-search" || ext == "code-structure"))
             .count();
         assert!(count_before >= 2, "Expected at least 2 index files, got {}", count_before);
 
@@ -656,7 +656,7 @@
         // Verify no index files remain
         let count_after: usize = fs::read_dir(&idx_base).unwrap()
             .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|ext|
-                ext == "idx" || ext == "cidx" || ext == "didx"))
+                ext == "file-list" || ext == "word-search" || ext == "code-structure"))
             .count();
         assert_eq!(count_after, 0, "No index files should remain");
     }
@@ -698,7 +698,7 @@
         // dir_b index should still exist
         let remaining: usize = fs::read_dir(&idx_base).unwrap()
             .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|ext|
-                ext == "idx" || ext == "cidx" || ext == "didx"))
+                ext == "file-list" || ext == "word-search" || ext == "code-structure"))
             .count();
         assert_eq!(remaining, 1, "dir_b index should still exist");
     }

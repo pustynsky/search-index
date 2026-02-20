@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 
 use crate::error::SearchError;
-use search::{clean_path, generate_trigrams, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex};
+use search::{clean_path, extract_semantic_prefix, generate_trigrams, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex};
 
 use crate::{ContentIndexArgs, IndexArgs};
 
@@ -118,7 +118,8 @@ pub fn index_dir() -> PathBuf {
 pub fn index_path_for(dir: &str, index_base: &std::path::Path) -> PathBuf {
     let canonical = fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
     let hash = stable_hash(&[canonical.to_string_lossy().as_bytes()]);
-    index_base.join(format!("{:016x}.idx", hash))
+    let prefix = extract_semantic_prefix(&canonical);
+    index_base.join(format!("{}_{:08x}.file-list", prefix, hash as u32))
 }
 
 pub fn save_index(index: &FileIndex, index_base: &std::path::Path) -> Result<(), SearchError> {
@@ -135,7 +136,8 @@ pub fn load_index(dir: &str, index_base: &std::path::Path) -> Result<FileIndex, 
 pub fn content_index_path_for(dir: &str, exts: &str, index_base: &std::path::Path) -> PathBuf {
     let canonical = fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
     let hash = stable_hash(&[canonical.to_string_lossy().as_bytes(), exts.as_bytes()]);
-    index_base.join(format!("{:016x}.cidx", hash))
+    let prefix = extract_semantic_prefix(&canonical);
+    index_base.join(format!("{}_{:08x}.word-search", prefix, hash as u32))
 }
 
 pub fn save_content_index(index: &ContentIndex, index_base: &std::path::Path) -> Result<(), SearchError> {
@@ -160,7 +162,7 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path) -> Op
 
     for entry in fs::read_dir(index_base).ok()?.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "cidx") {
+        if path.extension().is_some_and(|e| e == "word-search") {
             match load_compressed::<ContentIndex>(&path, "content-index") {
                 Ok(index) => {
                     if index.root == clean {
@@ -217,7 +219,7 @@ pub fn cleanup_orphaned_indexes(index_base: &std::path::Path) -> usize {
         for entry in entries.flatten() {
             let path = entry.path();
             let ext = path.extension().and_then(|e| e.to_str());
-            if !matches!(ext, Some("idx") | Some("cidx") | Some("didx")) {
+            if !matches!(ext, Some("file-list") | Some("word-search") | Some("code-structure")) {
                 continue;
             }
 
@@ -253,7 +255,7 @@ pub fn cleanup_indexes_for_dir(dir: &str, index_base: &std::path::Path) -> usize
         for entry in entries.flatten() {
             let path = entry.path();
             let ext = path.extension().and_then(|e| e.to_str());
-            if !matches!(ext, Some("idx") | Some("cidx") | Some("didx")) {
+            if !matches!(ext, Some("file-list") | Some("word-search") | Some("code-structure")) {
                 continue;
             }
 

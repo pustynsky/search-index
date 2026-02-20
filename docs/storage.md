@@ -12,37 +12,71 @@ All indexes are stored under a platform-specific data directory:
 
 ```
 search-index/
-├── a1b2c3d4e5f67890.idx      ← FileIndex for directory A
-├── f0e1d2c3b4a59678.cidx     ← ContentIndex for directory B + extensions "cs"
-├── 1234567890abcdef.cidx     ← ContentIndex for directory B + extensions "cs,sql"
-├── abcdef1234567890.didx     ← DefinitionIndex for directory B + extensions "cs,sql"
-└── ...
+├── Repos_PowerBIClients_a1b2c3d4.file-list           ← FileIndex
+├── Repos_PowerBIClients_f0e1d2c3.word-search          ← ContentIndex (cs,xml)
+├── Repos_PowerBIClients_12345678.code-structure        ← DefinitionIndex (cs,xml)
+├── rust_search_9876fedc.word-search                    ← ContentIndex (rs)
+└── rust_search_aabb0011.code-structure                 ← DefinitionIndex (rs)
 ```
 
 ### File Naming Scheme
 
-Each index file is named by a 64-bit hash of its identity:
+Each index file is named with a human-readable semantic prefix and a truncated hash:
 
-```rust
-// FileIndex: hash of canonical directory path
-let mut hasher = DefaultHasher::new();
-canonical_dir.hash(&mut hasher);
-let filename = format!("{:016x}.idx", hasher.finish());
-
-// ContentIndex: hash of canonical dir + extension string
-canonical_dir.hash(&mut hasher);
-extensions_string.hash(&mut hasher);
-let filename = format!("{:016x}.cidx", hasher.finish());
-
-// DefinitionIndex: same scheme as ContentIndex
-let filename = format!("{:016x}.didx", hasher.finish());
+```
+{semantic_prefix}_{hash8}.{file-list|word-search|code-structure}
 ```
 
-**Implication:** Indexing the same directory with different extension sets produces different files. `search content-index -d C:\Projects -e cs` and `search content-index -d C:\Projects -e cs,sql` create two separate `.cidx` files.
+Where:
+- `semantic_prefix` — derived from the last 1-2 path components (sanitized for Windows filenames)
+- `hash8` — first 8 hex characters of the 64-bit FNV-1a hash (truncated to 32 bits)
+- Extension — index type
+
+### Extensions
+
+| Extension           | Index Type      | Purpose                                    |
+|---------------------|-----------------|--------------------------------------------|
+| `.file-list`        | FileIndex       | File name lookup (`search_fast`)           |
+| `.word-search`      | ContentIndex    | Full-text token search (`search_grep`)     |
+| `.code-structure`   | DefinitionIndex | AST definitions & callers (`search_definitions`, `search_callers`) |
+
+### Semantic Prefix Rules
+
+The prefix is extracted from the canonicalized directory path by `extract_semantic_prefix()`:
+
+| # Normal path components | Rule                              | Example                              |
+|--------------------------|-----------------------------------|--------------------------------------|
+| 0 (drive root)           | Drive letter                      | `C:\` → `C`                         |
+| 1                        | `{drive_letter}_{name}`           | `C:\test` → `C_test`                |
+| 2+                       | `{second_to_last}_{last}`         | `C:\Repos\PBI` → `Repos_PBI`        |
+
+Each component is sanitized via `sanitize_for_filename()`:
+1. Characters not in `[a-zA-Z0-9_-]` → replaced with `_`
+2. Windows reserved names (CON, NUL, etc.) → prefixed with `_`
+3. Empty → `_`
+4. Truncated to 50 characters
+
+### Hash Identity
+
+```rust
+// FileIndex: FNV-1a hash of canonical directory path
+let hash = stable_hash(&[canonical_dir.as_bytes()]);
+let filename = format!("{}_{:08x}.file-list", prefix, hash as u32);
+
+// ContentIndex: FNV-1a hash of canonical dir + extension string
+let hash = stable_hash(&[canonical_dir.as_bytes(), exts.as_bytes()]);
+let filename = format!("{}_{:08x}.word-search", prefix, hash as u32);
+
+// DefinitionIndex: FNV-1a hash of canonical dir + extension string + "definitions"
+let hash = stable_hash(&[canonical_dir.as_bytes(), exts.as_bytes(), b"definitions"]);
+let filename = format!("{}_{:08x}.code-structure", prefix, hash as u32);
+```
+
+**Implication:** Indexing the same directory with different extension sets produces different files. `search content-index -d C:\Projects -e cs` and `search content-index -d C:\Projects -e cs,sql` create two separate `.word-search` files.
 
 ### Collision Handling
 
-`DefaultHasher` is not cryptographic. Hash collisions are possible but extremely unlikely for realistic directory paths. No collision detection is implemented — a collision would silently overwrite the previous index. The probability is ~$1/2^{64}$ per pair of directories.
+FNV-1a provides 64-bit hashes, truncated to 32 bits for the filename. Hash collisions are possible but extremely unlikely for realistic use — birthday bound is ~77K directories for 50% collision probability. No collision detection is implemented — a collision would silently overwrite the previous index.
 
 ## Serialization Format
 
@@ -203,13 +237,13 @@ fn load_content_index(dir: &str, exts: &str) -> Option<ContentIndex> {
 
 ### 2. Directory Scan (Fallback)
 
-If exact match fails (e.g., user indexed with `cs` but queries without specifying extensions), scan all `.cidx` files and check the `root` field:
+If exact match fails (e.g., user indexed with `cs` but queries without specifying extensions), scan all `.word-search` files and check the `root` field:
 
 ```rust
 fn find_content_index_for_dir(dir: &str) -> Option<ContentIndex> {
     for entry in fs::read_dir(index_dir()) {
-        if path.extension() == "cidx" {
-            let index: ContentIndex = bincode::deserialize(&fs::read(&path)?)?;
+        if path.extension() == "word-search" {
+            let index: ContentIndex = load_compressed(&path)?;
             if index.root == canonical_dir {
                 return Some(index);
             }
@@ -219,7 +253,7 @@ fn find_content_index_for_dir(dir: &str) -> Option<ContentIndex> {
 }
 ```
 
-This scan reads and deserializes each `.cidx` file header — slow if many indexes exist. In practice, users have 1-5 indexes.
+This scan reads and deserializes each `.word-search` file header — slow if many indexes exist. In practice, users have 1-5 indexes.
 
 ## Incremental Update Mechanics
 
