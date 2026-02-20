@@ -75,6 +75,48 @@ Run-Test "T62 grep-substring-and"     "$Binary grep `"contentindex,tokenize`" -d
 Run-Test "T63 grep-exact"             "$Binary grep contentindex -d $TestDir -e $TestExt --exact"
 Run-Test "T64 grep-regex-no-substr"   "$Binary grep `".*stale.*`" -d $TestDir -e $TestExt --regex"
 
+# T-EXT-CHECK: verify index files have new semantic extensions
+Write-Host -NoNewline "  T-EXT-CHECK index-file-extensions ... "
+$total++
+try {
+    $idxDir = Join-Path $env:LOCALAPPDATA "search-index"
+    $fileListFiles = Get-ChildItem -Path $idxDir -Filter "*.file-list" -ErrorAction SilentlyContinue
+    $wordSearchFiles = Get-ChildItem -Path $idxDir -Filter "*.word-search" -ErrorAction SilentlyContinue
+    $codeStructFiles = Get-ChildItem -Path $idxDir -Filter "*.code-structure" -ErrorAction SilentlyContinue
+    $oldIdx = Get-ChildItem -Path $idxDir -Filter "*.idx" -ErrorAction SilentlyContinue
+    $oldCidx = Get-ChildItem -Path $idxDir -Filter "*.cidx" -ErrorAction SilentlyContinue
+    $oldDidx = Get-ChildItem -Path $idxDir -Filter "*.didx" -ErrorAction SilentlyContinue
+
+    $extPassed = $true
+    if (-not $fileListFiles) {
+        Write-Host "FAILED (no .file-list files found)" -ForegroundColor Red
+        $extPassed = $false
+    }
+    if (-not $wordSearchFiles) {
+        Write-Host "FAILED (no .word-search files found)" -ForegroundColor Red
+        $extPassed = $false
+    }
+    if (-not $codeStructFiles) {
+        Write-Host "FAILED (no .code-structure files found)" -ForegroundColor Red
+        $extPassed = $false
+    }
+    if ($oldIdx -or $oldCidx -or $oldDidx) {
+        Write-Host "FAILED (old .idx/.cidx/.didx files found)" -ForegroundColor Red
+        $extPassed = $false
+    }
+    if ($extPassed) {
+        Write-Host "OK (.file-list=$($fileListFiles.Count), .word-search=$($wordSearchFiles.Count), .code-structure=$($codeStructFiles.Count))" -ForegroundColor Green
+        $passed++
+    }
+    else {
+        $failed++
+    }
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+}
+
 # T19: info
 Run-Test "T19 info"                "$Binary info"
 
@@ -211,7 +253,7 @@ try {
     }
     else {
         # Fallback: check if cidx was updated recently
-        $cidxFilesAfter = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "search-index") -Filter "*.cidx" |
+        $cidxFilesAfter = Get-ChildItem -Path (Join-Path $env:LOCALAPPDATA "search-index") -Filter "*.word-search" |
         Where-Object { $_.LastWriteTime -gt (Get-Date).AddMinutes(-1) }
         if ($cidxFilesAfter) {
             Write-Host "OK (verified via file timestamp)" -ForegroundColor Green

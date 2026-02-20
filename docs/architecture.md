@@ -25,10 +25,10 @@ graph TB
     end
 
     subgraph Indexes["Index Layer"]
-        FI[FileIndex<br/>.idx]
-        CI[ContentIndex<br/>.cidx]
-        TRI[TrigramIndex<br/>in .cidx]
-        DI[DefinitionIndex<br/>.didx]
+        FI[FileIndex<br/>.file-list]
+        CI[ContentIndex<br/>.word-search]
+        TRI[TrigramIndex<br/>in .word-search]
+        DI[DefinitionIndex<br/>.code-structure]
     end
 
     subgraph MCP["MCP Server Layer"]
@@ -65,14 +65,14 @@ Three independent index types, each optimized for a different query pattern:
 
 | Index             | File    | Data Structure                  | Lookup                  | Purpose                  |
 | ----------------- | ------- | ------------------------------- | ----------------------- | ------------------------ |
-| `FileIndex`       | `.idx`  | `Vec<FileEntry>`                | O(n) in-memory scan (~35ms / 100K files) | File name search         |
-| `ContentIndex`    | `.cidx` | `HashMap<String, Vec<Posting>>` + `TrigramIndex` | O(1) per token, O(1) substring via trigrams | Full-text content search + substring search |
-| `DefinitionIndex` | `.didx` | Multi-index `HashMap` set       | O(1) per name/kind/attr | Structural code search   |
+| `FileIndex`       | `.file-list`  | `Vec<FileEntry>`                | O(n) in-memory scan (~35ms / 100K files) | File name search         |
+| `ContentIndex`    | `.word-search` | `HashMap<String, Vec<Posting>>` + `TrigramIndex` | O(1) per token, O(1) substring via trigrams | Full-text content search + substring search |
+| `DefinitionIndex` | `.code-structure` | Multi-index `HashMap` set       | O(1) per name/kind/attr | Structural code search   |
 
 All indexes are:
 
 - **Serialized with bincode** — fast binary format, zero-copy deserialization
-- **LZ4 frame-compressed on disk** — all index files (`.idx`, `.cidx`, `.didx`) are wrapped in LZ4 frame compression via the `lz4_flex` crate (`FrameEncoder`/`FrameDecoder`). Files start with a 4-byte `LZ4S` magic header for format identification. Compression is streaming (no intermediate full buffer in memory). Typical compression ratio is ~4–5× (e.g., 697 MB → ~150 MB for content indexes). Legacy uncompressed files are still supported — auto-detected on load by checking the magic header for backward compatibility.
+- **LZ4 frame-compressed on disk** — all index files (`.file-list`, `.word-search`, `.code-structure`) are wrapped in LZ4 frame compression via the `lz4_flex` crate (`FrameEncoder`/`FrameDecoder`). Files start with a 4-byte `LZ4S` magic header for format identification. Compression is streaming (no intermediate full buffer in memory). Typical compression ratio is ~4–5× (e.g., 697 MB → ~150 MB for content indexes). Legacy uncompressed files are still supported — auto-detected on load by checking the magic header for backward compatibility.
 - **Stored deterministically** — file path is `hash(canonical_dir [+ extensions])` as hex
 - **Self-describing** — each index embeds its root directory, creation timestamp, and staleness threshold
 - **Independent** — can be built, loaded, or deleted without affecting other indexes
@@ -405,8 +405,8 @@ A single consolidated reference for all indexing scenarios. For detailed interna
 
 | Trigger | What Happens | Indexes Affected | Time |
 |---------|-------------|-----------------|------|
-| `search content-index -d DIR -e EXT` | Full parallel walk + tokenization | ContentIndex (`.cidx`) | ~7–16s |
-| `search def-index -d DIR -e EXT` | Full parallel walk + tree-sitter parse | DefinitionIndex (`.didx`) | ~16–32s |
+| `search content-index -d DIR -e EXT` | Full parallel walk + tokenization | ContentIndex (`.word-search`) | ~7–16s |
+| `search def-index -d DIR -e EXT` | Full parallel walk + tree-sitter parse | DefinitionIndex (`.code-structure`) | ~16–32s |
 | `search index -d DIR` | Full parallel walk | FileIndex (`.idx`) | ~2–4s |
 | MCP server first start (no index on disk) | Background thread builds indexes; tools return "index is building" until ready | ContentIndex + DefinitionIndex (if `--definitions`) | Same as above |
 | `search_reindex` (MCP tool) | Full rebuild + reload in-memory | ContentIndex | ~7–16s |
@@ -440,7 +440,7 @@ A single consolidated reference for all indexing scenarios. For detailed interna
 
 | Scenario | Why |
 |----------|-----|
-| Upgrading `search.exe` binary (runtime logic changes only) | Index format unchanged → existing `.cidx` / `.didx` files are fully compatible |
+| Upgrading `search.exe` binary (runtime logic changes only) | Index format unchanged → existing `.word-search` / `.code-structure` files are fully compatible |
 | Upgrading `search.exe` binary (parser changes — new definition types, new call site patterns) | Old index loads fine but may have stale/incomplete data → **manual `search_reindex_definitions`** recommended |
 | Upgrading `search.exe` binary (index format changes — e.g., new field added to struct) | Bincode deserialization fails → index is rebuilt automatically on next server start |
 | Restarting VS Code / MCP server | Index loads from disk (if saved); no rebuild |

@@ -10,7 +10,7 @@ Every architectural decision has alternatives. This document captures what was c
 
 - Zero-config — serialize any Rust struct with `#[derive(Serialize, Deserialize)]`
 - Fast — near-zero overhead deserialization, close to raw memory layout
-- Single-file — each index is one `.idx`/`.cidx`/`.didx` file
+- Single-file — each index is one `.file-list`/`.word-search`/`.code-structure` file
 - No runtime dependencies — no database process, no WAL, no compaction
 
 **Rejected alternatives:**

@@ -47,6 +47,127 @@ pub fn clean_path(p: &str) -> String {
     p.strip_prefix(r"\\?\").unwrap_or(p).replace('\\', "/")
 }
 
+// ─── Index file naming ───────────────────────────────────────────────
+
+/// Windows reserved device names that cannot be used as filenames.
+const WINDOWS_RESERVED: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL",
+    "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+    "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// Maximum length for the semantic prefix portion of index filenames.
+const MAX_PREFIX_LEN: usize = 50;
+
+/// Sanitize a string for safe use in a filename on Windows.
+///
+/// Rules:
+/// 1. Characters not in `[a-zA-Z0-9_-]` are replaced with `_`
+/// 2. Windows reserved names (CON, NUL, etc.) get a `_` prefix
+/// 3. Empty result becomes `_`
+/// 4. Truncated to [`MAX_PREFIX_LEN`] characters
+#[must_use]
+pub fn sanitize_for_filename(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+
+    let sanitized = if sanitized.is_empty() {
+        "_".to_string()
+    } else {
+        sanitized
+    };
+
+    // Check Windows reserved names (case-insensitive)
+    let upper = sanitized.to_uppercase();
+    let sanitized = if WINDOWS_RESERVED.iter().any(|r| upper == *r) {
+        format!("_{}", sanitized)
+    } else {
+        sanitized
+    };
+
+    // Truncate to max length
+    if sanitized.len() > MAX_PREFIX_LEN {
+        sanitized[..MAX_PREFIX_LEN].to_string()
+    } else {
+        sanitized
+    }
+}
+
+/// Extract a human-readable semantic prefix from a canonical path for use in index filenames.
+///
+/// Rules based on the number of "Normal" path components (excluding drive prefix and root):
+/// - 0 components (drive root like `C:\`) → drive letter (e.g., `C`)
+/// - 1 component (e.g., `C:\test`) → `{drive_letter}_{name}` (e.g., `C_test`)
+/// - 2+ components (e.g., `C:\Repos\PBI`) → `{second_to_last}_{last}` (e.g., `Repos_PBI`)
+///
+/// Each component is sanitized via [`sanitize_for_filename`] before joining.
+#[must_use]
+pub fn extract_semantic_prefix(canonical: &std::path::Path) -> String {
+    use std::path::Component;
+
+    // Extract drive letter (Windows: first char of Prefix component)
+    let drive_letter = canonical
+        .components()
+        .find_map(|c| {
+            if let Component::Prefix(p) = c {
+                let s = p.as_os_str().to_string_lossy();
+                s.chars().next().filter(|ch| ch.is_ascii_alphabetic())
+            } else {
+                None
+            }
+        });
+
+    // Collect Normal components (the meaningful directory names)
+    let normals: Vec<String> = canonical
+        .components()
+        .filter_map(|c| {
+            if let Component::Normal(s) = c {
+                Some(s.to_string_lossy().to_string())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    match normals.len() {
+        0 => {
+            // Drive root: C:\ → "C"
+            match drive_letter {
+                Some(letter) => letter.to_uppercase().to_string(),
+                None => "_".to_string(),
+            }
+        }
+        1 => {
+            // Single component: C:\test → "C_test"
+            let name = sanitize_for_filename(&normals[0]);
+            match drive_letter {
+                Some(letter) => format!("{}_{}", letter.to_uppercase(), name),
+                None => name,
+            }
+        }
+        _ => {
+            // Two+ components: take last two
+            let parent = sanitize_for_filename(&normals[normals.len() - 2]);
+            let name = sanitize_for_filename(&normals[normals.len() - 1]);
+            let combined = format!("{}_{}", parent, name);
+            // Truncate the combined result
+            if combined.len() > MAX_PREFIX_LEN {
+                combined[..MAX_PREFIX_LEN].to_string()
+            } else {
+                combined
+            }
+        }
+    }
+}
+
 /// Read a file as a String, using lossy UTF-8 conversion for non-UTF8 files.
 /// Returns `(content, was_lossy)` where `was_lossy` is true if replacement characters
 /// were inserted. This is critical for codebases with files containing Windows-1252
@@ -324,6 +445,173 @@ mod lib_tests {
         assert_eq!(decoded.file_id, 42);
         assert_eq!(decoded.lines, vec![1, 5, 10]);
     }
+    // ─── sanitize_for_filename tests ─────────────────────────────
+
+    #[test]
+    fn test_sanitize_basic_alphanumeric() {
+        assert_eq!(sanitize_for_filename("PowerBIClients"), "PowerBIClients");
+    }
+
+    #[test]
+    fn test_sanitize_with_hyphens_and_underscores() {
+        assert_eq!(sanitize_for_filename("my-project_v2"), "my-project_v2");
+    }
+
+    #[test]
+    fn test_sanitize_spaces_and_parens() {
+        assert_eq!(sanitize_for_filename("My Projects (2024)"), "My_Projects__2024_");
+    }
+
+    #[test]
+    fn test_sanitize_dots_and_dollar() {
+        assert_eq!(sanitize_for_filename("Build$.Output"), "Build__Output");
+    }
+
+    #[test]
+    fn test_sanitize_unicode_replaced() {
+        assert_eq!(sanitize_for_filename("Código"), "C_digo");
+    }
+
+    #[test]
+    fn test_sanitize_empty_string() {
+        assert_eq!(sanitize_for_filename(""), "_");
+    }
+
+    #[test]
+    fn test_sanitize_reserved_con() {
+        assert_eq!(sanitize_for_filename("CON"), "_CON");
+    }
+
+    #[test]
+    fn test_sanitize_reserved_nul_case_insensitive() {
+        assert_eq!(sanitize_for_filename("nul"), "_nul");
+    }
+
+    #[test]
+    fn test_sanitize_reserved_com1() {
+        assert_eq!(sanitize_for_filename("COM1"), "_COM1");
+    }
+
+    #[test]
+    fn test_sanitize_reserved_lpt9() {
+        assert_eq!(sanitize_for_filename("LPT9"), "_LPT9");
+    }
+
+    #[test]
+    fn test_sanitize_not_reserved_prefix() {
+        // "CONSOLE" starts with CON but is NOT a reserved name
+        assert_eq!(sanitize_for_filename("CONSOLE"), "CONSOLE");
+    }
+
+    #[test]
+    fn test_sanitize_truncation() {
+        let long = "a".repeat(100);
+        let result = sanitize_for_filename(&long);
+        assert_eq!(result.len(), MAX_PREFIX_LEN);
+    }
+
+    #[test]
+    fn test_sanitize_all_special_chars() {
+        assert_eq!(sanitize_for_filename("!@#$%"), "_____");
+    }
+
+    // ─── extract_semantic_prefix tests ───────────────────────────
+
+    #[test]
+    fn test_prefix_drive_root() {
+        // On Windows, C:\ canonicalizes to \\?\C:\ which has Prefix + RootDir, 0 Normal components
+        let path = std::path::PathBuf::from(r"C:\");
+        let result = extract_semantic_prefix(&path);
+        assert_eq!(result, "C");
+    }
+
+    #[test]
+    fn test_prefix_single_component() {
+        let path = std::path::PathBuf::from(r"C:\test");
+        let result = extract_semantic_prefix(&path);
+        assert_eq!(result, "C_test");
+    }
+
+    #[test]
+    fn test_prefix_single_component_drive_d() {
+        let path = std::path::PathBuf::from(r"D:\test");
+        let result = extract_semantic_prefix(&path);
+        assert_eq!(result, "D_test");
+    }
+
+    #[test]
+    fn test_prefix_two_components() {
+        let path = std::path::PathBuf::from(r"C:\Repos\PowerBIClients");
+        let result = extract_semantic_prefix(&path);
+        assert_eq!(result, "Repos_PowerBIClients");
+    }
+
+    #[test]
+    fn test_prefix_three_components_takes_last_two() {
+        let path = std::path::PathBuf::from(r"C:\Repos\rust\search");
+        let result = extract_semantic_prefix(&path);
+        assert_eq!(result, "rust_search");
+    }
+
+    #[test]
+    fn test_prefix_deep_path() {
+        let path = std::path::PathBuf::from(r"C:\a\b\c\deep\project");
+        let result = extract_semantic_prefix(&path);
+        assert_eq!(result, "deep_project");
+    }
+
+    #[test]
+    fn test_prefix_same_leaf_different_parent() {
+        let p1 = std::path::PathBuf::from(r"C:\test\test");
+        let p2 = std::path::PathBuf::from(r"C:\users\test");
+        assert_eq!(extract_semantic_prefix(&p1), "test_test");
+        assert_eq!(extract_semantic_prefix(&p2), "users_test");
+    }
+
+    #[test]
+    fn test_prefix_reserved_name_component() {
+        let path = std::path::PathBuf::from(r"C:\CON");
+        let result = extract_semantic_prefix(&path);
+        assert_eq!(result, "C__CON");
+    }
+
+    #[test]
+    fn test_prefix_special_chars_in_component() {
+        let path = std::path::PathBuf::from(r"C:\My Projects (2024)\api");
+        let result = extract_semantic_prefix(&path);
+        assert_eq!(result, "My_Projects__2024__api");
+    }
+
+    #[test]
+    fn test_prefix_no_drive_letter_unix_style() {
+        // Unix-style path with no prefix component
+        let path = std::path::PathBuf::from("/usr/local/share");
+        let result = extract_semantic_prefix(&path);
+        // On Windows, this has Normal components "usr", "local", "share"
+        // On Unix, it would have Normal components "usr", "local", "share"
+        assert_eq!(result, "local_share");
+    }
+
+    #[test]
+    fn test_prefix_deterministic() {
+        let path = std::path::PathBuf::from(r"C:\Repos\PowerBIClients");
+        let a = extract_semantic_prefix(&path);
+        let b = extract_semantic_prefix(&path);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_prefix_truncation_long_components() {
+        let long_parent = "a".repeat(30);
+        let long_name = "b".repeat(30);
+        let path = std::path::PathBuf::from(format!(r"C:\{}\{}", long_parent, long_name));
+        let result = extract_semantic_prefix(&path);
+        // Should be truncated to MAX_PREFIX_LEN
+        assert!(result.len() <= MAX_PREFIX_LEN,
+            "Result '{}' (len {}) exceeds MAX_PREFIX_LEN {}",
+            result, result.len(), MAX_PREFIX_LEN);
+    }
+
 #[cfg(test)]
 mod trigram_tests {
     use super::*;

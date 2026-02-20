@@ -269,7 +269,7 @@ Index directory: C:\Users\you\AppData\Local\search-index
 
 ## `search cleanup` — Remove Orphaned or Directory-Specific Indexes
 
-Without `--dir`: scans the index directory and removes `.idx`, `.cidx`, `.didx` files whose root directories no longer exist on disk.
+Without `--dir`: scans the index directory and removes `.file-list`, `.word-search`, `.code-structure` files whose root directories no longer exist on disk.
 
 With `--dir`: removes all index files whose root matches the specified directory (case-insensitive). Indexes for other directories are preserved.
 
@@ -292,8 +292,8 @@ Example output (orphaned):
 
 ```
 Scanning for orphaned indexes in C:\Users\you\AppData\Local\search-index...
-  Removed orphaned index: abc123.idx (root: C:\Deleted\OldProject)
-  Removed orphaned index: def456.cidx (root: C:\Temp\test_dir_12345)
+  Removed orphaned index: Deleted_OldProject_abc12345.file-list (root: C:\Deleted\OldProject)
+  Removed orphaned index: Temp_test_dir_12345_def45678.word-search (root: C:\Temp\test_dir_12345)
 Removed 2 orphaned index file(s).
 ```
 
@@ -301,9 +301,9 @@ Example output (`--dir`):
 
 ```
 Removing indexes for directory '.' from C:\Users\you\AppData\Local\search-index...
-  Removed index for dir '.': abc123.idx (idx)
-  Removed index for dir '.': def456.cidx (cidx)
-  Removed index for dir '.': ghi789.didx (didx)
+  Removed index for dir '.': Repos_MyApp_abc12345.file-list (file-list)
+  Removed index for dir '.': Repos_MyApp_def45678.word-search (word-search)
+  Removed index for dir '.': Repos_MyApp_ghi78901.code-structure (code-structure)
 Removed 3 index file(s) for '.'.
 ```
 
@@ -367,7 +367,7 @@ Each definition includes: name, kind, file path, line range, full signature, mod
 
 ## `search def-audit` — Audit Definition Index Coverage
 
-Loads a previously built `.didx` file from disk (instant, no rebuild) and reports which files have 0 definitions. Files >500 bytes with 0 definitions are flagged as "suspicious" — possible parse failures.
+Loads a previously built `.code-structure` file from disk (instant, no rebuild) and reports which files have 0 definitions. Files >500 bytes with 0 definitions are flagged as "suspicious" — possible parse failures.
 
 ```bash
 # Show all suspicious files (>500B, 0 definitions)
