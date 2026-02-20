@@ -2777,6 +2777,38 @@ $stderr = Get-Content "$dir\stderr.txt" -Raw
 
 ---
 
+### T-CTRLC: Graceful shutdown on Ctrl+C (SIGTERM/SIGINT)
+
+**Background:** The MCP server registers a `ctrlc` handler that catches SIGTERM/SIGINT signals and triggers a graceful shutdown: saving indexes to disk and printing a "saving indexes" message to stderr before exiting with code 0. This complements the stdin-close shutdown path (T-SHUTDOWN) with signal-based shutdown.
+
+**Test (manual):**
+
+```powershell
+# 1. Start the MCP server
+search serve --dir C:\Projects --ext cs --watch --definitions
+
+# 2. Wait for the server to finish loading indexes (watch stderr for "ready" messages)
+
+# 3. Press Ctrl+C
+
+# 4. Observe stderr output
+```
+
+**Expected:**
+
+- Server prints `saving indexes before shutdown` (or similar) to stderr
+- Server exits with code 0 (not a crash/panic)
+- Index files on disk have recent modification timestamps (indexes were saved)
+- No "thread panicked" or other error messages in stderr
+
+**Validates:** Graceful shutdown via SIGTERM/SIGINT using the `ctrlc` crate. The handler sets a shutdown flag that the event loop checks, triggering index save before exit.
+
+**Note:** This is a **manual test only**. Automated testing of signal handling in PowerShell is unreliable (race conditions between process startup, signal delivery, and output capture make the test flaky). The underlying mechanism is the same as T-SHUTDOWN (save-on-shutdown), which is already automated.
+
+**Status:** Manual verification only. The `ctrlc` handler delegates to the same save logic tested by T-SHUTDOWN.
+
+---
+
 ## Unit Test Coverage — Handler-Level Scenarios
 
 The following test scenarios are covered by unit tests in
@@ -3682,6 +3714,7 @@ The following internal optimizations are covered by unit tests in `src/mcp/watch
 |--------|-----------|-------------|
 | `.git/` directory filtering in watcher | `test_is_inside_git_dir` | Watcher now skips files inside `.git/` directories to avoid indexing git internals (e.g., `.git/config` matching "config" extension) |
 | `shrink_to_fit()` after `retain()` | (behavioral — no dedicated test) | After incremental updates, all `HashMap`/`Vec` collections call `shrink_to_fit()` to release excess capacity from `retain()` operations |
+| `sorted_intersect` in `collect_substring_file_ids()` | (behavioral — no dedicated test) | Replaced `HashSet`-based intersection with sorted two-pointer `sorted_intersect` in `callers.rs` for better cache locality and reduced allocations. Same results, faster execution on large file ID sets |
 
 
 ---

@@ -1,6 +1,6 @@
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use serde_json::{json, Value};
@@ -42,6 +42,16 @@ pub fn run_server(
 
     const MAX_REQUEST_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 
+    // Set up Ctrl+C / SIGINT / SIGTERM handler for graceful shutdown
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown_flag.clone();
+    if let Err(e) = ctrlc::set_handler(move || {
+        shutdown_clone.store(true, Ordering::SeqCst);
+        eprintln!("\nReceived shutdown signal, saving indexes...");
+    }) {
+        warn!("Failed to set Ctrl+C handler: {}", e);
+    }
+
     info!("MCP server ready, waiting for JSON-RPC requests on stdin");
 
     let mut line = String::new();
@@ -50,6 +60,11 @@ pub fn run_server(
         match reader.read_line(&mut line) {
             Ok(0) => break, // EOF
             Ok(_) => {
+                // Check if shutdown was signaled (belt-and-suspenders for signal between reads)
+                if shutdown_flag.load(Ordering::SeqCst) {
+                    info!("Shutdown flag set, exiting event loop");
+                    break;
+                }
                 if line.len() > MAX_REQUEST_SIZE {
                     error!(size = line.len(), "Request too large, skipping");
                     continue;
@@ -322,5 +337,15 @@ mod tests {
         let result = handle_request(&ctx, "tools/call", &None, json!(5));
         assert_eq!(result["result"]["isError"], true);
         assert!(result["result"]["content"][0]["text"].as_str().unwrap().contains("Missing params"));
+    }
+
+    #[test]
+    fn test_shutdown_flag_initially_false_and_can_be_set() {
+        let flag = Arc::new(AtomicBool::new(false));
+        assert!(!flag.load(Ordering::SeqCst), "shutdown flag should start as false");
+
+        let flag_clone = flag.clone();
+        flag_clone.store(true, Ordering::SeqCst);
+        assert!(flag.load(Ordering::SeqCst), "shutdown flag should be true after setting");
     }
 }

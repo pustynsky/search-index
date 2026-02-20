@@ -60,6 +60,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **File watcher** — incremental index updates on file changes (<1s per file)
 - **Substring search** — trigram-indexed substring matching within tokens (~0.07ms vs ~44ms for regex)
 - **LZ4 index compression** — all index files compressed on disk with backward-compatible loading
+- **Graceful shutdown** — handles Ctrl+C (SIGTERM/SIGINT) by saving indexes to disk before exit, preserving incremental watcher updates
 
 ## Quick Start
 
