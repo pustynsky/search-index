@@ -6,6 +6,14 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-02-20
+
+### Internal
+
+- **Lowercase index filenames** — `sanitize_for_filename()` now lowercases all characters, producing consistent lowercase index filenames (e.g., `repos_powerbiclients_a1b2c3d4.word-search` instead of `Repos_PowerBIClients_a1b2c3d4.word-search`). Follows industry best practices (Cargo, npm, Docker all use lowercase). Prevents duplicate index files when the same path is referenced with different casing on case-insensitive filesystems. Old index files with uppercase names will be re-created automatically.
+
+---
+
 ## 2026-02-18
 
 ### Features

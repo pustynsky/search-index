@@ -63,16 +63,17 @@ const MAX_PREFIX_LEN: usize = 50;
 ///
 /// Rules:
 /// 1. Characters not in `[a-zA-Z0-9_-]` are replaced with `_`
-/// 2. Windows reserved names (CON, NUL, etc.) get a `_` prefix
-/// 3. Empty result becomes `_`
-/// 4. Truncated to [`MAX_PREFIX_LEN`] characters
+/// 2. All characters are lowercased for cross-platform consistency
+/// 3. Windows reserved names (CON, NUL, etc.) get a `_` prefix
+/// 4. Empty result becomes `_`
+/// 5. Truncated to [`MAX_PREFIX_LEN`] characters
 #[must_use]
 pub fn sanitize_for_filename(name: &str) -> String {
     let sanitized: String = name
         .chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
-                c
+                c.to_ascii_lowercase()
             } else {
                 '_'
             }
@@ -104,9 +105,9 @@ pub fn sanitize_for_filename(name: &str) -> String {
 /// Extract a human-readable semantic prefix from a canonical path for use in index filenames.
 ///
 /// Rules based on the number of "Normal" path components (excluding drive prefix and root):
-/// - 0 components (drive root like `C:\`) → drive letter (e.g., `C`)
-/// - 1 component (e.g., `C:\test`) → `{drive_letter}_{name}` (e.g., `C_test`)
-/// - 2+ components (e.g., `C:\Repos\PBI`) → `{second_to_last}_{last}` (e.g., `Repos_PBI`)
+/// - 0 components (drive root like `C:\`) → drive letter (e.g., `c`)
+/// - 1 component (e.g., `C:\test`) → `{drive_letter}_{name}` (e.g., `c_test`)
+/// - 2+ components (e.g., `C:\Repos\PBI`) → `{second_to_last}_{last}` (e.g., `repos_pbi`)
 ///
 /// Each component is sanitized via [`sanitize_for_filename`] before joining.
 #[must_use]
@@ -141,7 +142,7 @@ pub fn extract_semantic_prefix(canonical: &std::path::Path) -> String {
         0 => {
             // Drive root: C:\ → "C"
             match drive_letter {
-                Some(letter) => letter.to_uppercase().to_string(),
+                Some(letter) => letter.to_lowercase().to_string(),
                 None => "_".to_string(),
             }
         }
@@ -149,7 +150,7 @@ pub fn extract_semantic_prefix(canonical: &std::path::Path) -> String {
             // Single component: C:\test → "C_test"
             let name = sanitize_for_filename(&normals[0]);
             match drive_letter {
-                Some(letter) => format!("{}_{}", letter.to_uppercase(), name),
+                Some(letter) => format!("{}_{}", letter.to_lowercase(), name),
                 None => name,
             }
         }
@@ -449,7 +450,7 @@ mod lib_tests {
 
     #[test]
     fn test_sanitize_basic_alphanumeric() {
-        assert_eq!(sanitize_for_filename("PowerBIClients"), "PowerBIClients");
+        assert_eq!(sanitize_for_filename("PowerBIClients"), "powerbiclients");
     }
 
     #[test]
@@ -459,17 +460,17 @@ mod lib_tests {
 
     #[test]
     fn test_sanitize_spaces_and_parens() {
-        assert_eq!(sanitize_for_filename("My Projects (2024)"), "My_Projects__2024_");
+        assert_eq!(sanitize_for_filename("My Projects (2024)"), "my_projects__2024_");
     }
 
     #[test]
     fn test_sanitize_dots_and_dollar() {
-        assert_eq!(sanitize_for_filename("Build$.Output"), "Build__Output");
+        assert_eq!(sanitize_for_filename("Build$.Output"), "build__output");
     }
 
     #[test]
     fn test_sanitize_unicode_replaced() {
-        assert_eq!(sanitize_for_filename("Código"), "C_digo");
+        assert_eq!(sanitize_for_filename("Código"), "c_digo");
     }
 
     #[test]
@@ -479,7 +480,7 @@ mod lib_tests {
 
     #[test]
     fn test_sanitize_reserved_con() {
-        assert_eq!(sanitize_for_filename("CON"), "_CON");
+        assert_eq!(sanitize_for_filename("CON"), "_con");
     }
 
     #[test]
@@ -489,18 +490,18 @@ mod lib_tests {
 
     #[test]
     fn test_sanitize_reserved_com1() {
-        assert_eq!(sanitize_for_filename("COM1"), "_COM1");
+        assert_eq!(sanitize_for_filename("COM1"), "_com1");
     }
 
     #[test]
     fn test_sanitize_reserved_lpt9() {
-        assert_eq!(sanitize_for_filename("LPT9"), "_LPT9");
+        assert_eq!(sanitize_for_filename("LPT9"), "_lpt9");
     }
 
     #[test]
     fn test_sanitize_not_reserved_prefix() {
         // "CONSOLE" starts with CON but is NOT a reserved name
-        assert_eq!(sanitize_for_filename("CONSOLE"), "CONSOLE");
+        assert_eq!(sanitize_for_filename("CONSOLE"), "console");
     }
 
     #[test]
@@ -522,28 +523,28 @@ mod lib_tests {
         // On Windows, C:\ canonicalizes to \\?\C:\ which has Prefix + RootDir, 0 Normal components
         let path = std::path::PathBuf::from(r"C:\");
         let result = extract_semantic_prefix(&path);
-        assert_eq!(result, "C");
+        assert_eq!(result, "c");
     }
 
     #[test]
     fn test_prefix_single_component() {
         let path = std::path::PathBuf::from(r"C:\test");
         let result = extract_semantic_prefix(&path);
-        assert_eq!(result, "C_test");
+        assert_eq!(result, "c_test");
     }
 
     #[test]
     fn test_prefix_single_component_drive_d() {
         let path = std::path::PathBuf::from(r"D:\test");
         let result = extract_semantic_prefix(&path);
-        assert_eq!(result, "D_test");
+        assert_eq!(result, "d_test");
     }
 
     #[test]
     fn test_prefix_two_components() {
         let path = std::path::PathBuf::from(r"C:\Repos\PowerBIClients");
         let result = extract_semantic_prefix(&path);
-        assert_eq!(result, "Repos_PowerBIClients");
+        assert_eq!(result, "repos_powerbiclients");
     }
 
     #[test]
@@ -572,14 +573,14 @@ mod lib_tests {
     fn test_prefix_reserved_name_component() {
         let path = std::path::PathBuf::from(r"C:\CON");
         let result = extract_semantic_prefix(&path);
-        assert_eq!(result, "C__CON");
+        assert_eq!(result, "c__con");
     }
 
     #[test]
     fn test_prefix_special_chars_in_component() {
         let path = std::path::PathBuf::from(r"C:\My Projects (2024)\api");
         let result = extract_semantic_prefix(&path);
-        assert_eq!(result, "My_Projects__2024__api");
+        assert_eq!(result, "my_projects__2024__api");
     }
 
     #[test]
