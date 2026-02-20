@@ -65,7 +65,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Substring search** — trigram-indexed substring matching within tokens (~0.07ms vs ~44ms for regex)
 - **LZ4 index compression** — all index files compressed on disk with backward-compatible loading
 - **Graceful shutdown** — handles Ctrl+C (SIGTERM/SIGINT) by saving indexes to disk before exit, preserving incremental watcher updates
-- **Git history cache** — background-built compact in-memory cache (~7.6 MB for 50K commits) for sub-millisecond `search_git_history`, `search_git_diff`, `search_git_authors`, and `search_git_activity` queries. Saved to disk (LZ4 compressed) for instant restart (~100 ms load vs ~59 sec rebuild). Auto-detects HEAD changes for cache invalidation
+- **Git history cache** — background-built compact in-memory cache (~7.6 MB for 50K commits) for sub-millisecond `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, and `search_git_blame` queries. Saved to disk (LZ4 compressed) for instant restart (~100 ms load vs ~59 sec rebuild). Auto-detects HEAD changes for cache invalidation. Supports `author` and `message` filters on history/diff/activity/authors tools. `search_git_authors` accepts file paths, directory paths, or no path (entire repo). `search_git_blame` provides line-level attribution via `git blame`
 
 ## Quick Start
 
@@ -115,7 +115,7 @@ The engine uses three independent index types plus a git history cache:
 | File name | `.file-list` | `search index` | `search fast` | File paths, sizes, timestamps |
 | Content | `.word-search` | `search content-index` | `search grep` | Token → (file, line numbers) map |
 | Definitions | `.code-structure` | `search def-index` | `search_definitions` / `search_callers` | AST-extracted classes, methods, call sites |
-| Git history | `.git-history` | Background (auto) | `search_git_history` / `search_git_diff` / `search_git_authors` / `search_git_activity` | Commit metadata, file-to-commit mapping |
+| Git history | `.git-history` | Background (auto) | `search_git_history` / `search_git_diff` / `search_git_authors` / `search_git_activity` / `search_git_blame` | Commit metadata, file-to-commit mapping |
 
 Indexes are stored in `%LOCALAPPDATA%\search-index\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX) for definitions. The git history cache builds automatically in the background when a `.git` directory is present. See [Architecture](docs/architecture.md) for details.
 
@@ -152,7 +152,7 @@ The `search_callers` tool builds call trees by tracing method invocations throug
 ## Testing
 
 ```bash
-# Run all tests (444 unit tests + 47 E2E tests)
+# Run all tests (474 unit tests + 47 E2E tests)
 cargo test
 
 # Run benchmarks

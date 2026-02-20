@@ -107,7 +107,7 @@ fn test_parse_date_filter_invalid_date() {
 #[test]
 fn test_file_history_returns_commits() {
     let filter = DateFilter { from_date: None, to_date: None };
-    let result = file_history(".", "Cargo.toml", &filter, false, 10);
+    let result = file_history(".", "Cargo.toml", &filter, false, 10, None, None);
     assert!(result.is_ok(), "Should succeed on own repo: {:?}", result.err());
     let (commits, total) = result.unwrap();
     assert!(!commits.is_empty(), "Cargo.toml should have commit history");
@@ -117,7 +117,7 @@ fn test_file_history_returns_commits() {
 #[test]
 fn test_file_history_nonexistent_file() {
     let filter = DateFilter { from_date: None, to_date: None };
-    let result = file_history(".", "nonexistent_file_xyz_abc_123.rs", &filter, false, 50);
+    let result = file_history(".", "nonexistent_file_xyz_abc_123.rs", &filter, false, 50, None, None);
     assert!(result.is_ok(), "Should succeed even for nonexistent file");
     let (commits, total) = result.unwrap();
     assert!(commits.is_empty(), "Nonexistent file should have no commits");
@@ -127,14 +127,14 @@ fn test_file_history_nonexistent_file() {
 #[test]
 fn test_file_history_bad_repo() {
     let filter = DateFilter { from_date: None, to_date: None };
-    let result = file_history("C:\\nonexistent\\repo\\path\\xyz", "file.rs", &filter, false, 50);
+    let result = file_history("C:\\nonexistent\\repo\\path\\xyz", "file.rs", &filter, false, 50, None, None);
     assert!(result.is_err(), "Should fail for nonexistent repo");
 }
 
 #[test]
 fn test_file_history_max_results_limits_output() {
     let filter = DateFilter { from_date: None, to_date: None };
-    let result = file_history(".", "Cargo.toml", &filter, false, 2);
+    let result = file_history(".", "Cargo.toml", &filter, false, 2, None, None);
     assert!(result.is_ok());
     let (commits, total) = result.unwrap();
     assert!(commits.len() <= 2, "Should return at most 2 commits");
@@ -144,7 +144,7 @@ fn test_file_history_max_results_limits_output() {
 #[test]
 fn test_file_history_with_diff() {
     let filter = DateFilter { from_date: None, to_date: None };
-    let result = file_history(".", "Cargo.toml", &filter, true, 3);
+    let result = file_history(".", "Cargo.toml", &filter, true, 3, None, None);
     assert!(result.is_ok());
     let (commits, _) = result.unwrap();
     assert!(!commits.is_empty());
@@ -156,11 +156,11 @@ fn test_file_history_with_diff() {
 #[test]
 fn test_file_history_date_filter_narrows_results() {
     let no_filter = DateFilter { from_date: None, to_date: None };
-    let (_, all_total) = file_history(".", "Cargo.toml", &no_filter, false, 0).unwrap();
+    let (_, all_total) = file_history(".", "Cargo.toml", &no_filter, false, 0, None, None).unwrap();
 
     // Filter to a very old date range that likely has no commits
     let narrow_filter = parse_date_filter(Some("1970-01-01"), Some("1970-01-02"), None).unwrap();
-    let (narrow_commits, narrow_total) = file_history(".", "Cargo.toml", &narrow_filter, false, 0).unwrap();
+    let (narrow_commits, narrow_total) = file_history(".", "Cargo.toml", &narrow_filter, false, 0, None, None).unwrap();
 
     assert!(narrow_total <= all_total, "Narrow filter should return <= total commits");
     assert!(narrow_commits.is_empty(), "1970 date range should have no commits");
@@ -171,7 +171,7 @@ fn test_file_history_date_filter_narrows_results() {
 #[test]
 fn test_top_authors_returns_ranked() {
     let filter = DateFilter { from_date: None, to_date: None };
-    let result = top_authors(".", "Cargo.toml", &filter, 10);
+    let result = top_authors(".", "Cargo.toml", &filter, 10, None);
     assert!(result.is_ok(), "Should succeed: {:?}", result.err());
     let (authors, total_commits, total_authors) = result.unwrap();
     assert!(!authors.is_empty(), "Should have at least one author");
@@ -190,7 +190,7 @@ fn test_top_authors_returns_ranked() {
 #[test]
 fn test_top_authors_nonexistent_file() {
     let filter = DateFilter { from_date: None, to_date: None };
-    let result = top_authors(".", "nonexistent_xyz_abc_123.rs", &filter, 10);
+    let result = top_authors(".", "nonexistent_xyz_abc_123.rs", &filter, 10, None);
     assert!(result.is_ok());
     let (authors, total_commits, _) = result.unwrap();
     assert!(authors.is_empty());
@@ -200,7 +200,7 @@ fn test_top_authors_nonexistent_file() {
 #[test]
 fn test_top_authors_limits_results() {
     let filter = DateFilter { from_date: None, to_date: None };
-    let result = top_authors(".", "Cargo.toml", &filter, 1);
+    let result = top_authors(".", "Cargo.toml", &filter, 1, None);
     assert!(result.is_ok());
     let (authors, _, _) = result.unwrap();
     assert!(authors.len() <= 1, "Should return at most 1 author");
@@ -212,7 +212,7 @@ fn test_top_authors_limits_results() {
 fn test_repo_activity_returns_files() {
     // Use a broad date range
     let filter = parse_date_filter(Some("2020-01-01"), Some("2030-12-31"), None).unwrap();
-    let result = repo_activity(".", &filter);
+    let result = repo_activity(".", &filter, None, None);
     assert!(result.is_ok(), "Should succeed: {:?}", result.err());
     let (files, commits_processed) = result.unwrap();
     assert!(!files.is_empty(), "Should have at least one file with changes");
@@ -222,7 +222,7 @@ fn test_repo_activity_returns_files() {
 #[test]
 fn test_repo_activity_empty_date_range() {
     let filter = parse_date_filter(Some("1970-01-01"), Some("1970-01-02"), None).unwrap();
-    let result = repo_activity(".", &filter);
+    let result = repo_activity(".", &filter, None, None);
     assert!(result.is_ok());
     let (files, _) = result.unwrap();
     assert!(files.is_empty(), "Very old date range should have no activity");
@@ -231,7 +231,7 @@ fn test_repo_activity_empty_date_range() {
 #[test]
 fn test_repo_activity_bad_repo() {
     let filter = DateFilter { from_date: None, to_date: None };
-    let result = repo_activity("C:\\nonexistent\\repo\\xyz", &filter);
+    let result = repo_activity("C:\\nonexistent\\repo\\xyz", &filter, None, None);
     assert!(result.is_err(), "Should fail for nonexistent repo");
 }
 
@@ -240,7 +240,7 @@ fn test_repo_activity_bad_repo() {
 #[test]
 fn test_commit_info_has_all_fields() {
     let filter = DateFilter { from_date: None, to_date: None };
-    let (commits, _) = file_history(".", "Cargo.toml", &filter, false, 1).unwrap();
+    let (commits, _) = file_history(".", "Cargo.toml", &filter, false, 1, None, None).unwrap();
     assert!(!commits.is_empty());
 
     let commit = &commits[0];
@@ -251,4 +251,132 @@ fn test_commit_info_has_all_fields() {
     assert!(!commit.author_email.is_empty(), "Author email should not be empty");
     assert!(!commit.message.is_empty(), "Message should not be empty");
     assert!(commit.patch.is_none(), "Patch should be None when include_diff=false");
+}
+
+// ─── Git blame tests ────────────────────────────────────────────────
+
+#[test]
+fn test_blame_lines_returns_results() {
+    // Blame a known file in the search repo itself
+    let result = blame_lines(".", "Cargo.toml", 1, Some(3));
+    assert!(result.is_ok(), "Should succeed: {:?}", result.err());
+    let lines = result.unwrap();
+    assert_eq!(lines.len(), 3, "Should return 3 blame lines");
+    
+    for line in &lines {
+        assert!(!line.hash.is_empty(), "Hash should not be empty");
+        assert!(!line.author_name.is_empty(), "Author should not be empty");
+        assert!(!line.date.is_empty(), "Date should not be empty");
+    }
+}
+
+#[test]
+fn test_blame_lines_single_line() {
+    let result = blame_lines(".", "Cargo.toml", 1, None);
+    assert!(result.is_ok());
+    let lines = result.unwrap();
+    assert_eq!(lines.len(), 1, "Should return exactly 1 line");
+    assert_eq!(lines[0].line, 1);
+}
+
+#[test]
+fn test_blame_lines_nonexistent_file() {
+    let result = blame_lines(".", "nonexistent_xyz_abc_123.rs", 1, Some(5));
+    assert!(result.is_err(), "Should fail for nonexistent file");
+}
+
+#[test]
+fn test_blame_lines_bad_repo() {
+    let result = blame_lines("C:\\nonexistent\\repo\\xyz", "file.rs", 1, Some(5));
+    assert!(result.is_err(), "Should fail for nonexistent repo");
+}
+
+#[test]
+fn test_blame_lines_has_content() {
+    let result = blame_lines(".", "Cargo.toml", 1, Some(1));
+    assert!(result.is_ok());
+    let lines = result.unwrap();
+    assert!(!lines.is_empty());
+    // First line of Cargo.toml should contain "[package]"
+    assert!(
+        lines[0].content.contains("[package]"),
+        "First line of Cargo.toml should be [package], got: '{}'",
+        lines[0].content
+    );
+}
+
+// ─── Blame porcelain parser tests ───────────────────────────────────
+
+#[test]
+fn test_parse_blame_porcelain_basic() {
+    let porcelain = "\
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1 1 1\n\
+author Alice\n\
+author-mail <alice@example.com>\n\
+author-time 1700000000\n\
+author-tz +0000\n\
+committer Alice\n\
+committer-mail <alice@example.com>\n\
+committer-time 1700000000\n\
+committer-tz +0000\n\
+summary Initial commit\n\
+filename src/main.rs\n\
+\tlet x = 42;\n";
+
+    let result = parse_blame_porcelain(porcelain);
+    assert!(result.is_ok());
+    let lines = result.unwrap();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0].line, 1);
+    assert_eq!(lines[0].hash, "aaaaaaaa"); // short hash
+    assert_eq!(lines[0].author_name, "Alice");
+    assert_eq!(lines[0].author_email, "alice@example.com");
+    assert_eq!(lines[0].content, "let x = 42;");
+}
+
+#[test]
+fn test_parse_blame_porcelain_repeated_hash() {
+    // When the same commit appears on multiple lines, git only emits full headers
+    // on the first occurrence. Subsequent lines have just the hash line and content.
+    let porcelain = "\
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 1 1 2\n\
+author Alice\n\
+author-mail <alice@example.com>\n\
+author-time 1700000000\n\
+author-tz +0000\n\
+committer Alice\n\
+committer-mail <alice@example.com>\n\
+committer-time 1700000000\n\
+committer-tz +0000\n\
+summary Initial commit\n\
+filename src/main.rs\n\
+\tline one\n\
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa 2 2\n\
+\tline two\n";
+
+    let result = parse_blame_porcelain(porcelain);
+    assert!(result.is_ok());
+    let lines = result.unwrap();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0].line, 1);
+    assert_eq!(lines[0].content, "line one");
+    assert_eq!(lines[1].line, 2);
+    assert_eq!(lines[1].content, "line two");
+    // Both should have Alice's info (reused from cache of first occurrence)
+    assert_eq!(lines[1].author_name, "Alice");
+    assert_eq!(lines[1].author_email, "alice@example.com");
+}
+
+#[test]
+fn test_parse_blame_porcelain_empty_input() {
+    let result = parse_blame_porcelain("");
+    assert!(result.is_ok());
+    assert!(result.unwrap().is_empty());
+}
+
+#[test]
+fn test_format_blame_date() {
+    let date = format_blame_date(1700000000, "+0000");
+    assert!(date.starts_with("2023-11-14"), "Expected 2023-11-14, got {}", date);
+    assert!(date.ends_with("+0000"));
 }

@@ -8,7 +8,19 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-20
 
+### Features
+
+- **Git filter by author** — Added `author` parameter to `search_git_history`, `search_git_diff`, and `search_git_activity`. Case-insensitive substring match against author name or email. Works with both cache and CLI fallback paths. Example: `"author": "alice"` returns only commits by Alice.
+
+- **Git filter by commit message** — Added `message` parameter to `search_git_history`, `search_git_diff`, `search_git_activity`, and `search_git_authors`. Case-insensitive substring match against commit subject. Combinable with `author` and date filters. Example: `"message": "fix bug"` returns only commits with "fix bug" in the message.
+
+- **Directory ownership in `search_git_authors`** — `search_git_authors` now accepts a `path` parameter (file or directory path, or omit for entire repo). `file` remains as a backward-compatible alias. Directory paths return aggregated authors across all files under that directory with proper commit deduplication. Omitting `path` entirely returns authors for the entire repository.
+
+- **`search_git_blame` tool** — New MCP tool for line-level attribution via `git blame --porcelain`. Parameters: `repo` (required), `file` (required), `startLine` (optional, 1-based), `endLine` (optional). Returns commit hash (8-char short), author name, email, date (with timezone), and line content for each blamed line. Always uses CLI. Total tool count: 14.
+
 ### Internal
+
+- **Git feature unit tests** — Added 30 new unit tests across 4 feature areas: (1) Author/message filtering for `query_file_history`, `query_authors`, `query_activity` — 18 tests covering case-insensitive author/email matching, message substring filter, combined filters, and date+author combinations; (2) Directory ownership — 1 test for whole-repo `query_authors`; (3) Git blame — 5 tests for `blame_lines()` (success, single line, nonexistent file, bad repo, content verification); (4) Blame porcelain parser — 4 tests for `parse_blame_porcelain()` (basic, repeated hash reuse, empty input) and `format_blame_date()`. Also made `parse_blame_porcelain` and `format_blame_date` `pub(crate)` for test access, fixed pre-existing tool count assertion (13→14), and updated all existing test call sites to match new 6-arg `query_file_history`, 5-arg `query_authors`, 5-arg `query_activity`, 7-arg `file_history`, 5-arg `top_authors`, 4-arg `repo_activity` signatures.
 
 - **Git cache test coverage** — Closed 5 test coverage gaps in the git history cache module (`src/git/cache_tests.rs`): (1) integration test for `build()` with a real temp git repo (`#[ignore]`), (2) bad timestamp parsing — verifies commits with non-numeric timestamps are skipped, (3) author pool overflow boundary — verifies error at 65536 unique authors and success at 65535, (4) `cache_path_for()` different directories produce different paths, (5) E2E test in `e2e-test.ps1` for `search_git_history` cache routing. Total: 5 new unit tests + 1 E2E test.
 
@@ -126,11 +138,11 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 | Metric | Value |
 |--------|-------|
 | Total PRs | 25 |
-| Features | 15 |
+| Features | 19 |
 | Bug Fixes | 5 |
 | Performance | 3 |
 | Internal | 5 |
-| Unit tests (latest) | 330+ |
+| Unit tests (latest) | 474+ |
 | E2E tests (latest) | 47+ |
 | Binary size reduction | 20.4 MB → 9.8 MB (−52%) |
 | Index size reduction | 566 MB → 327 MB (−42%, LZ4) |

@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 #[test]
 fn test_tool_definitions_count() {
     let tools = tool_definitions();
-    assert_eq!(tools.len(), 13);
+    assert_eq!(tools.len(), 14);
 }
 
 #[test]
