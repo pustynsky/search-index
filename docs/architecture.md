@@ -279,7 +279,7 @@ sequenceDiagram
     Agent->>Server: initialize
     Server->>Agent: capabilities + tools
     Agent->>Server: tools/list
-    Server->>Agent: 7 tool definitions
+    Server->>Agent: 13 tool definitions
 
     Agent->>Server: tools/call search_grep
     Server->>Index: HashMap lookup + TF-IDF (~0.6ms measured)
@@ -545,6 +545,7 @@ src/
         ├── fast.rs           # handle_search_fast
         ├── definitions.rs    # handle_search_definitions + body injection
         ├── callers.rs        # handle_search_callers + caller/callee tree builders
+        ├── git.rs              # Git history MCP handlers (search_git_history/diff/authors/activity)
         ├── utils.rs          # validate_search_dir, sorted_intersect, metrics helpers
         ├── handlers_tests.rs           # General handler tests (77 tests)
         ├── handlers_tests_csharp.rs    # C# handler tests (31 tests)

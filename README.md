@@ -26,6 +26,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 | 🔄 **Refactor safely** — find every caller, every implementation, every DI registration | multiple manual searches | **one `search_callers` call** |
 | 📊 **Estimate task scope** — "how many files use this feature?" | ~5 min | **30 seconds** |
 | 🧪 **Write tests** — find existing test patterns, discover all dependencies to mock | ~10 min browsing | **<1 second** |
+| 🕵️ **Investigate file history** — who changed this file? What was modified last week? Show me the diff from a specific commit. | ~5 min of git log | **<1 second** |
 
 > 📖 **More:** [Use Cases & Vision](docs/use-cases.md) — detailed scenarios including AI-powered architecture exploration, automated impact analysis, and a real-world case study where we reverse-engineered a 3,800-line system in 5 minutes.
 
@@ -64,7 +65,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Substring search** — trigram-indexed substring matching within tokens (~0.07ms vs ~44ms for regex)
 - **LZ4 index compression** — all index files compressed on disk with backward-compatible loading
 - **Graceful shutdown** — handles Ctrl+C (SIGTERM/SIGINT) by saving indexes to disk before exit, preserving incremental watcher updates
-- **Git history cache** — background-built compact in-memory cache (~7.6 MB for 50K commits) for sub-millisecond `search_git_history`, `search_git_authors`, and `search_git_activity` queries. Saved to disk (LZ4 compressed) for instant restart (~100 ms load vs ~59 sec rebuild). Auto-detects HEAD changes for cache invalidation
+- **Git history cache** — background-built compact in-memory cache (~7.6 MB for 50K commits) for sub-millisecond `search_git_history`, `search_git_diff`, `search_git_authors`, and `search_git_activity` queries. Saved to disk (LZ4 compressed) for instant restart (~100 ms load vs ~59 sec rebuild). Auto-detects HEAD changes for cache invalidation
 
 ## Quick Start
 
@@ -114,7 +115,7 @@ The engine uses three independent index types plus a git history cache:
 | File name | `.file-list` | `search index` | `search fast` | File paths, sizes, timestamps |
 | Content | `.word-search` | `search content-index` | `search grep` | Token → (file, line numbers) map |
 | Definitions | `.code-structure` | `search def-index` | `search_definitions` / `search_callers` | AST-extracted classes, methods, call sites |
-| Git history | `.git-history` | Background (auto) | `search_git_history` / `search_git_authors` / `search_git_activity` | Commit metadata, file-to-commit mapping |
+| Git history | `.git-history` | Background (auto) | `search_git_history` / `search_git_diff` / `search_git_authors` / `search_git_activity` | Commit metadata, file-to-commit mapping |
 
 Indexes are stored in `%LOCALAPPDATA%\search-index\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX) for definitions. The git history cache builds automatically in the background when a `.git` directory is present. See [Architecture](docs/architecture.md) for details.
 

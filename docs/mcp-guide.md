@@ -362,6 +362,83 @@ Cache responses include a `"(from cache)"` hint in the `summary` field so the AI
 | `search_git_diff` | Always uses CLI — diff data is too large and variable to cache. |
 | No `.git` directory in `--dir` | Git tools return errors. No cache is built. |
 
+### search_git_history
+
+Get commit history for a specific file. Returns commit hash, date, author, email, and message. Uses in-memory cache when available (sub-millisecond), falls back to `git log` CLI (~2–6 sec).
+
+```json
+// Request
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"src/main.rs","maxResults":3}}}
+
+// Response (abbreviated)
+{
+  "commits": [
+    {"hash":"abc123...","date":"2025-01-15 10:30:00 +0000","author":"Alice","email":"alice@example.com","message":"Fix null check in main"}
+  ],
+  "summary": {"totalCommits":1,"returned":1,"tool":"search_git_history"}
+}
+```
+
+### search_git_diff
+
+Get commit history with full diff/patch for a specific file. Same as `search_git_history` but includes added/removed lines for each commit. Patches are truncated to ~200 lines per commit to manage output size.
+
+> **Note:** Always uses CLI (`git log -p`) — never uses the in-memory cache, because diff data is too large and variable to cache.
+
+```json
+// Request
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_diff","arguments":{"repo":".","file":"src/main.rs","maxResults":2}}}
+
+// Response (abbreviated)
+{
+  "commits": [
+    {
+      "hash":"abc123...","date":"2025-01-15 10:30:00 +0000","author":"Alice","email":"alice@example.com","message":"Fix null check in main",
+      "patch":"--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,3 +10,4 @@\n+    if value.is_none() { return; }\n"
+    }
+  ],
+  "summary": {"totalCommits":1,"returned":1,"tool":"search_git_diff"}
+}
+```
+
+### search_git_authors
+
+Get top authors for a file ranked by number of commits. Shows who changed this file the most, with commit count and date range of their changes.
+
+```json
+// Request
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_authors","arguments":{"repo":".","file":"src/main.rs","top":3}}}
+
+// Response (abbreviated)
+{
+  "authors": [
+    {"rank":1,"name":"Alice","email":"alice@example.com","commits":42,"firstChange":"2024-03-01","lastChange":"2025-01-15"},
+    {"rank":2,"name":"Bob","email":"bob@example.com","commits":17,"firstChange":"2024-06-10","lastChange":"2024-12-20"},
+    {"rank":3,"name":"Carol","email":"carol@example.com","commits":5,"firstChange":"2024-09-05","lastChange":"2024-11-30"}
+  ],
+  "summary": {"totalAuthors":3,"returned":3,"tool":"search_git_authors"}
+}
+```
+
+### search_git_activity
+
+Get activity across all files in a repository for a date range. Returns a list of changed files with their commit counts. Useful for answering "what changed this week?" Date filters are recommended to keep results manageable.
+
+```json
+// Request
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_activity","arguments":{"repo":".","from":"2025-01-01","to":"2025-01-31"}}}
+
+// Response (abbreviated)
+{
+  "activity": [
+    {"path":"src/main.rs","commitCount":12},
+    {"path":"src/lib.rs","commitCount":8},
+    {"path":"Cargo.toml","commitCount":3}
+  ],
+  "summary": {"totalFiles":3,"totalCommits":23,"tool":"search_git_activity"}
+}
+```
+
 ---
 
 ## Manual Testing (without AI)
