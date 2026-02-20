@@ -1207,6 +1207,45 @@ namespace TestApp
 # (find_containing_method returns di directly) are internal optimizations with no CLI-observable
 # differences. They are covered by unit tests in handlers_tests_csharp.rs.
 
+# --- T-GIT-CACHE: Git cache routing — search_git_history returns commits ---
+Write-Host -NoNewline "  T-GIT-CACHE git-cache-routing ... "
+$total++
+try {
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":2}}}'
+    ) -join "`n"
+
+    $ErrorActionPreference = "Continue"
+    $output = ($msgs | & $searchBin serve --dir $TestDir --ext $TestExt 2>$null) | Out-String
+    $ErrorActionPreference = "Stop"
+
+    # Extract the JSON-RPC response (id=5)
+    $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+    if ($jsonLine) {
+        # Check that 'commits' appears in response (from cache or CLI fallback — both valid)
+        if ($jsonLine -match 'commits') {
+            Write-Host "OK" -ForegroundColor Green
+            $passed++
+        }
+        else {
+            Write-Host "FAILED (no 'commits' in response)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $failed++
+        }
+    }
+    else {
+        Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
+        Write-Host "    output: $output" -ForegroundColor Yellow
+        $failed++
+    }
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+}
+
 # T25-T52: serve (MCP)
 Write-Host "  T25-T52: MCP serve tests - run manually (see e2e-test-plan.md)"
 

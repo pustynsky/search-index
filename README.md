@@ -42,6 +42,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 | [Trade-offs](docs/tradeoffs.md) | Design decisions with alternatives considered |
 | [Benchmarks](docs/benchmarks.md) | Performance data, scaling estimates, industry comparison |
 | [E2E Test Plan](docs/e2e-test-plan.md) | 40+ end-to-end test cases (24 CLI + 16 MCP) with automation script |
+| [Git History Cache Design](user-stories/git-history-cache-design.md) | Cache architecture, data structures, lifecycle, invalidation strategy |
 | [Changelog](CHANGELOG.md) | All notable changes organized by category (features, fixes, performance) |
 
 ## Features
@@ -63,6 +64,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Substring search** — trigram-indexed substring matching within tokens (~0.07ms vs ~44ms for regex)
 - **LZ4 index compression** — all index files compressed on disk with backward-compatible loading
 - **Graceful shutdown** — handles Ctrl+C (SIGTERM/SIGINT) by saving indexes to disk before exit, preserving incremental watcher updates
+- **Git history cache** — background-built compact in-memory cache (~7.6 MB for 50K commits) for sub-millisecond `search_git_history`, `search_git_authors`, and `search_git_activity` queries. Saved to disk (LZ4 compressed) for instant restart (~100 ms load vs ~59 sec rebuild). Auto-detects HEAD changes for cache invalidation
 
 ## Quick Start
 
@@ -105,15 +107,16 @@ See [MCP Server Guide](docs/mcp-guide.md) for VS Code setup, tools API, and exam
 
 ## Architecture Overview
 
-The engine uses three independent index types:
+The engine uses three independent index types plus a git history cache:
 
 | Index | File | Created by | Searched by | Stores |
 |---|---|---|---|---|
 | File name | `.file-list` | `search index` | `search fast` | File paths, sizes, timestamps |
 | Content | `.word-search` | `search content-index` | `search grep` | Token → (file, line numbers) map |
 | Definitions | `.code-structure` | `search def-index` | `search_definitions` / `search_callers` | AST-extracted classes, methods, call sites |
+| Git history | `.git-history` | Background (auto) | `search_git_history` / `search_git_authors` / `search_git_activity` | Commit metadata, file-to-commit mapping |
 
-Indexes are stored in `%LOCALAPPDATA%\search-index\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX) for definitions. See [Architecture](docs/architecture.md) for details.
+Indexes are stored in `%LOCALAPPDATA%\search-index\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX) for definitions. The git history cache builds automatically in the background when a `.git` directory is present. See [Architecture](docs/architecture.md) for details.
 
 ### Caller Tree Verification
 
@@ -136,7 +139,7 @@ The `search_callers` tool builds call trees by tracing method invocations throug
 | [ignore](https://crates.io/crates/ignore) | Parallel directory walking (from ripgrep) |
 | [clap](https://crates.io/crates/clap) | CLI argument parsing |
 | [regex](https://crates.io/crates/regex) | Regular expression support |
-| [serde](https://crates.io/crates/serde) + [bincode](https://crates.io/crates/bincode) | Fast binary serialization for indexes |
+| [serde](https://crates.io/crates/serde) + [bincode](https://crates.io/crates/bincode) | Fast binary serialization for indexes and git cache |
 | [serde_json](https://crates.io/crates/serde_json) | JSON serialization for MCP protocol |
 | [notify](https://crates.io/crates/notify) | Cross-platform filesystem notifications |
 | [dirs](https://crates.io/crates/dirs) | Platform-specific data directory paths |
@@ -161,6 +164,7 @@ Test files are split by language module for maintainability:
 |---|---|
 | `src/mcp/handlers/` | `handlers_tests.rs` (77 general), `handlers_tests_csharp.rs` (31 C#), `handlers_tests_typescript.rs` (TS placeholder) |
 | `src/definitions/` | `definitions_tests.rs` (12 general), `definitions_tests_csharp.rs` (19 C#), `definitions_tests_typescript.rs` (32 TS) |
+| `src/git/` | `cache_tests.rs` (49 cache), `git_tests.rs` (git CLI) |
 | `src/` | `main_tests.rs` (35 general) |
 
 | Category | Tests |
@@ -170,6 +174,7 @@ Test files are split by language module for maintainability:
 | MCP Protocol | JSON-RPC parsing, initialize, tools/list, tools/call, notifications, errors |
 | Substring/Trigram | Trigram generation, index build, substring search, 13 e2e integration tests |
 | Definitions | C# parsing, TypeScript/TSX parsing, SQL parsing, incremental update |
+| Git cache | Streaming parser, path normalization, query API, serialization roundtrip, disk persistence, HEAD validation |
 | Property tests | Tokenizer invariants, posting roundtrip, index consistency, TF-IDF ordering |
 | Benchmarks | Tokenizer throughput, index lookup latency, TF-IDF scoring, regex scan |
 

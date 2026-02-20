@@ -12,9 +12,9 @@ All indexes are stored under a platform-specific data directory:
 
 ```
 search-index/
-├── Repos_PowerBIClients_a1b2c3d4.file-list           ← FileIndex
-├── Repos_PowerBIClients_f0e1d2c3.word-search          ← ContentIndex (cs,xml)
-├── Repos_PowerBIClients_12345678.code-structure        ← DefinitionIndex (cs,xml)
+├── Repos_MyProject_a1b2c3d4.file-list           ← FileIndex
+├── Repos_MyProject_f0e1d2c3.word-search          ← ContentIndex (cs,xml)
+├── Repos_MyProject_12345678.code-structure        ← DefinitionIndex (cs,xml)
 ├── rust_search_9876fedc.word-search                    ← ContentIndex (rs)
 └── rust_search_aabb0011.code-structure                 ← DefinitionIndex (rs)
 ```
@@ -39,6 +39,7 @@ Where:
 | `.file-list`        | FileIndex       | File name lookup (`search_fast`)           |
 | `.word-search`      | ContentIndex    | Full-text token search (`search_grep`)     |
 | `.code-structure`   | DefinitionIndex | AST definitions & callers (`search_definitions`, `search_callers`) |
+| `.git-history`      | GitHistoryCache | Git commit history cache (`search_git_history`, `search_git_authors`, `search_git_activity`) |
 
 ### Semantic Prefix Rules
 
@@ -48,7 +49,7 @@ The prefix is extracted from the canonicalized directory path by `extract_semant
 |--------------------------|-----------------------------------|--------------------------------------|
 | 0 (drive root)           | Drive letter                      | `C:\` → `C`                         |
 | 1                        | `{drive_letter}_{name}`           | `C:\test` → `C_test`                |
-| 2+                       | `{second_to_last}_{last}`         | `C:\Repos\PBI` → `Repos_PBI`        |
+| 2+                       | `{second_to_last}_{last}`         | `C:\Repos\App` → `Repos_App`        |
 
 Each component is sanitized via `sanitize_for_filename()`:
 1. Characters not in `[a-zA-Z0-9_-]` → replaced with `_`
@@ -70,6 +71,10 @@ let filename = format!("{}_{:08x}.word-search", prefix, hash as u32);
 // DefinitionIndex: FNV-1a hash of canonical dir + extension string + "definitions"
 let hash = stable_hash(&[canonical_dir.as_bytes(), exts.as_bytes(), b"definitions"]);
 let filename = format!("{}_{:08x}.code-structure", prefix, hash as u32);
+
+// GitHistoryCache: FNV-1a hash of canonical dir + "git-history"
+let hash = stable_hash(&[canonical_dir.as_bytes(), b"git-history"]);
+let filename = format!("{}_{:08x}.git-history", prefix, hash as u32);
 ```
 
 **Implication:** Indexing the same directory with different extension sets produces different files. `search content-index -d C:\Projects -e cs` and `search content-index -d C:\Projects -e cs,sql` create two separate `.word-search` files.
@@ -289,6 +294,52 @@ This scan reads and deserializes each `.word-search` file header — slow if man
 
 The `method_calls` entries for removed definitions are also cleaned up during `remove_file_definitions`.
 
+### GitHistoryCache
+
+```rust
+struct GitHistoryCache {
+    format_version: u32,              // Format version for cache invalidation
+    head_hash: String,                // SHA-1 of HEAD when cache was built
+    branch: String,                   // Default branch name (main/master/develop/trunk)
+    built_at: u64,                    // Unix timestamp (seconds)
+    commits: Vec<CommitMeta>,         // All commits (compact representation)
+    authors: Vec<AuthorEntry>,        // Deduplicated author pool
+    subjects: String,                 // Concatenated commit subjects (pool)
+    file_commits: HashMap<String, Vec<u32>>,  // file path → commit indices
+}
+
+struct CommitMeta {
+    hash: [u8; 20],           // SHA-1 hash as raw bytes (not hex string)
+    timestamp: i64,           // Unix timestamp (seconds since epoch)
+    author_idx: u16,          // Index into GitHistoryCache::authors
+    subject_offset: u32,      // Offset into subjects pool
+    subject_len: u32,         // Length of subject in subjects pool
+}
+// Size: 40 bytes per commit (vs ~200 bytes with String fields)
+
+struct AuthorEntry {
+    name: String,             // Author display name
+    email: String,            // Author email
+}
+```
+
+**Key properties:**
+
+- **Not extension-dependent** — the git cache is scoped to the repository directory only (no extension in hash), unlike ContentIndex/DefinitionIndex which include extensions in their hash
+- **HEAD validation** — on load, the cache checks if `head_hash` matches current HEAD via `git rev-parse`. Mismatches trigger a rebuild
+- **Atomic write** — saved via temp file (`path.tmp`) + rename to prevent corruption on crash/disk-full
+- **Background build** — built in a separate thread on server startup, ~59 sec for 50K commits. Does not block the event loop
+
+**Memory vs Disk:**
+
+| Component | In-memory (50K commits) | On disk (LZ4 compressed) |
+|---|---|---|
+| commits (50K × 40 bytes) | ~2.0 MB | — |
+| authors (~500 × ~60 bytes) | ~30 KB | — |
+| subjects (50K × ~50 chars) | ~2.5 MB | — |
+| file_commits (~65K files) | ~3.0 MB | — |
+| **Total** | **~7.6 MB** | **~3–5 MB** |
+
 ## Disk I/O Patterns
 
 | Operation          | I/O Pattern                                                       | Duration                |
@@ -298,5 +349,8 @@ The `method_calls` entries for removed definitions are also cleaned up during `r
 | Search query       | Pure in-memory (no disk I/O)                                      | 0.5-44ms (measured)     |
 | Incremental update | One small random read (file content) + in-memory update           | ~5ms (from logs)        |
 | Index save         | One large sequential write (only on full reindex)                 | ~2s (estimated)         |
+| Git cache build    | Streaming read of `git log` output (~163 MB for 50K commits)      | ~59s (measured)         |
+| Git cache load     | One sequential read + decompress + deserialize (~3-5 MB)          | ~100ms (measured)       |
+| Git cache save     | Serialize + compress + atomic write                               | ~100ms (estimated)      |
 
 The MCP server never touches disk during normal query processing. All searches are in-memory.

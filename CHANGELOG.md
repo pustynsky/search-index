@@ -8,13 +8,56 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-20
 
+### Internal
+
+- **Git cache test coverage** — Closed 5 test coverage gaps in the git history cache module (`src/git/cache_tests.rs`): (1) integration test for `build()` with a real temp git repo (`#[ignore]`), (2) bad timestamp parsing — verifies commits with non-numeric timestamps are skipped, (3) author pool overflow boundary — verifies error at 65536 unique authors and success at 65535, (4) `cache_path_for()` different directories produce different paths, (5) E2E test in `e2e-test.ps1` for `search_git_history` cache routing. Total: 5 new unit tests + 1 E2E test.
+
+### Bug Fixes
+
+- **Git CLI date filtering timezone fix** — The `add_date_args()` function in `src/git/mod.rs` now appends `T00:00:00Z` to `--after`/`--before` date parameters, forcing UTC interpretation. Previously, bare `YYYY-MM-DD` dates were interpreted in the local timezone by git, causing a ±N hour mismatch with the cache path (which always uses UTC timestamps). This could cause `search_git_history` CLI fallback to miss commits at day boundaries on non-UTC systems. Affects `search_git_history`, `search_git_diff`, `search_git_authors`, and `search_git_activity` CLI paths. 23 new diagnostic unit tests added for date conversion, timestamp formatting, and cache query boundary conditions.
+
+- **Git cache progress logging** — The git cache background thread now emits `[git-cache]` progress messages during startup and build, preventing the appearance of a "stuck" server when building the cache for large repos (3+ minutes). Messages include: initialization, branch detection, disk cache validation, build progress every 10K commits, and completion summary.
+
+- **`search_git_authors` missing `firstChange` on cached path** — The cached code path for `search_git_authors` now correctly returns the `firstChange` timestamp instead of an empty string. Added `first_commit_timestamp` field to `AuthorSummary` in the cache module.
+
 ### Features
+
+- **Git history cache background build + disk persistence (PR 2c)** — The git history cache is now built automatically in a background thread on server startup, saved to disk (`.git-history` file, bincode + LZ4 compressed), and loaded from disk on subsequent restarts (~100 ms vs ~59 sec full rebuild). HEAD validation detects stale caches: if HEAD matches → use disk cache; if HEAD changed (fast-forward) → rebuild; if HEAD changed (force push/rebase) → rebuild; if repo re-cloned → rebuild. Commit-graph hint emitted at startup if `.git/objects/info/commit-graph` is missing. Key changes:
+  - Background thread in `serve.rs` following existing content/definition index pattern (copy-paste, no refactor)
+  - `save_to_disk()` / `load_from_disk()` methods using atomic write (temp file + rename) and shared `save_compressed()`/`load_compressed()`
+  - `cache_path_for()` constructs `.git-history` file path matching existing `.word-search`/`.code-structure` naming convention
+  - `is_ancestor()` / `object_exists()` helpers for HEAD validation
+  - `run_server()` now accepts `git_cache` and `git_cache_ready` Arc handles from `serve.rs`
+  - 12 new unit tests for disk persistence, atomic write, corrupt file handling, format version validation
+
+- **Git history cache handler integration (PR 2b)** — Integrated the git history cache into the MCP handler layer with cache-or-fallback routing. When the cache is ready (populated by background thread in PR 2c), `search_git_history`, `search_git_authors`, and `search_git_activity` use sub-millisecond cache lookups instead of 2-6 sec CLI calls. When cache is not ready, handlers transparently fall back to existing CLI code (zero regression). `search_git_diff` always uses CLI (cache has no patch data). Cache responses include `"(from cache)"` hint in the summary field. Key changes:
+  - `HandlerContext` gains `git_cache: Arc<RwLock<Option<GitHistoryCache>>>` and `git_cache_ready: Arc<AtomicBool>` fields
+  - Date conversion helpers: YYYY-MM-DD → Unix timestamp (Howard Hinnant algorithm) for cache query compatibility
+  - Path normalization applied to `file` parameter before cache lookup
+  - Response format matches CLI output exactly (same JSON structure, field names, date format)
+
+- **Git history cache core module (PR 2a)** — Added `src/git/cache.rs` with compact in-memory cache for git history. Designed for sub-millisecond queries (vs 2-6 sec per file via CLI). Key components:
+  - `GitHistoryCache` struct: compact representation (~7.6 MB for 50K commits × 65K files)
+  - `CommitMeta`: 40-byte per-commit metadata with `[u8;20]` hash, i64 timestamp, u16 author index, u32 subject pool offset/length
+  - Streaming parser: parses `git log --name-only` output line-by-line (no 163 MB in RAM)
+  - Query API: `query_file_history()`, `query_authors()`, `query_activity()` with date filtering and path prefix matching
+  - Path normalization: `\` → `/`, strip `./`, collapse `//`, `"."` → `""`
+  - Serialization: `#[derive(Serialize, Deserialize)]` for reuse with existing `save_compressed()`/`load_compressed()` (bincode v1 + lz4_flex)
+  - 49 unit tests covering parser, queries, normalization, edge cases, and serialization roundtrip
+
+- **Git history tools** — 4 new MCP tools for querying git history via git CLI with in-memory cache for sub-millisecond repeat queries. Always available — no flags needed:
+  - `search_git_history` — commit history for a file (hash, date, author, message)
+  - `search_git_diff` — commit history with full diff/patch (truncated to ~200 lines per commit)
+  - `search_git_authors` — top authors for a file ranked by commit count
+  - `search_git_activity` — repo-wide activity (all changed files) for a date range
+  
+  All tools support `from`/`to`/`date` filters and `maxResults` (default: 50). Performance: ~2 sec for single file, ~8 sec for full year in a 13K-commit repo. Response truncation via existing `truncate_large_response` mechanism.
 
 - **Code complexity metrics (`includeCodeStats`)** — `search_definitions` now computes and returns 7 code complexity metrics for methods/functions during AST indexing: cyclomatic complexity, cognitive complexity (SonarSource), max nesting depth, parameter count, return/throw count, call count (fan-out), and lambda count. Always computed when `--definitions` is used (~2-5% CPU overhead, ~7 MB RAM). Query with `includeCodeStats=true` to see metrics, or use `sortBy` (e.g., `sortBy='cognitiveComplexity'`) and `min*` filters (e.g., `minComplexity=10`, `minParams=5`) to find complex methods. Supports C# and TypeScript/TSX.
 
 ### Internal
 
-- **Lowercase index filenames** — `sanitize_for_filename()` now lowercases all characters, producing consistent lowercase index filenames (e.g., `repos_powerbiclients_a1b2c3d4.word-search` instead of `Repos_PowerBIClients_a1b2c3d4.word-search`). Follows industry best practices (Cargo, npm, Docker all use lowercase). Prevents duplicate index files when the same path is referenced with different casing on case-insensitive filesystems. Old index files with uppercase names will be re-created automatically.
+- **Lowercase index filenames** — `sanitize_for_filename()` now lowercases all characters, producing consistent lowercase index filenames (e.g., `repos_myproject_a1b2c3d4.word-search` instead of `Repos_MyProject_a1b2c3d4.word-search`). Follows industry best practices (Cargo, npm, Docker all use lowercase). Prevents duplicate index files when the same path is referenced with different casing on case-insensitive filesystems. Old index files with uppercase names will be re-created automatically.
 
 ---
 
@@ -74,19 +117,21 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 - **Documentation fixes** — various doc corrections and updates. ([PR #21](https://github.com/pustynsky/search-index/pull/21))
 
+- **Git history cache documentation and cleanup (PR 2d)** — Updated all documentation (README, architecture, MCP guide, storage model, E2E test plan, changelog) to reflect the git history cache feature. Added git cache to architecture overview table, module structure, and storage format descriptions. Verified no TODO/FIXME comments in cache module. No Rust code changes.
+
 ---
 
 ## Summary
 
 | Metric | Value |
 |--------|-------|
-| Total PRs | 21 |
-| Features | 11 |
+| Total PRs | 25 |
+| Features | 15 |
 | Bug Fixes | 5 |
 | Performance | 3 |
-| Internal | 4 |
-| Unit tests (latest) | 280+ |
-| E2E tests (latest) | 24+ |
+| Internal | 5 |
+| Unit tests (latest) | 330+ |
+| E2E tests (latest) | 47+ |
 | Binary size reduction | 20.4 MB → 9.8 MB (−52%) |
 | Index size reduction | 566 MB → 327 MB (−42%, LZ4) |
 | Memory reduction | 3.7 GB → 2.1 GB (−43%) |

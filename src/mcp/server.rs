@@ -10,6 +10,7 @@ use crate::mcp::handlers::{self, HandlerContext};
 use crate::mcp::protocol::*;
 use crate::{save_content_index, ContentIndex};
 use crate::definitions::{self, DefinitionIndex};
+use crate::git::cache::GitHistoryCache;
 
 /// Run the MCP server event loop over stdio
 pub fn run_server(
@@ -22,6 +23,8 @@ pub fn run_server(
     max_response_bytes: usize,
     content_ready: Arc<AtomicBool>,
     def_ready: Arc<AtomicBool>,
+    git_cache: Arc<RwLock<Option<GitHistoryCache>>>,
+    git_cache_ready: Arc<AtomicBool>,
 ) {
     let ctx = HandlerContext {
         index,
@@ -33,6 +36,8 @@ pub fn run_server(
         max_response_bytes,
         content_ready,
         def_ready,
+        git_cache,
+        git_cache_ready,
     };
 
     let stdin = io::stdin();
@@ -265,6 +270,8 @@ mod tests {
             max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
             content_ready: Arc::new(AtomicBool::new(true)),
             def_ready: Arc::new(AtomicBool::new(true)),
+            git_cache: Arc::new(RwLock::new(None)),
+            git_cache_ready: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -285,7 +292,7 @@ mod tests {
         assert_eq!(result["jsonrpc"], "2.0");
         assert_eq!(result["id"], 2);
         let tools = result["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 13);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"search_grep"));
         assert!(names.contains(&"search_find"));

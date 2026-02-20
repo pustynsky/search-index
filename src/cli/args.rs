@@ -196,6 +196,10 @@ AVAILABLE TOOLS (exposed via MCP):
   search_fast        -- Search file name index (instant)
   search_info        -- Show all indexes
   search_reindex     -- Force rebuild + reload index
+  search_git_history -- Commit history for a file (cached or git CLI)
+  search_git_diff    -- Commit history with full diff/patch for a file
+  search_git_authors -- Top authors for a file ranked by commit count
+  search_git_activity-- Repo-wide activity (all changed files) for a date range
 
 HOW IT WORKS:
   1. On startup: loads (or builds) content index into RAM (~0.7-1.6s one-time)

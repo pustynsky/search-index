@@ -4,6 +4,7 @@ mod callers;
 mod definitions;
 mod fast;
 mod find;
+mod git;
 mod grep;
 pub(crate) mod utils;
 
@@ -21,6 +22,7 @@ use crate::{
     save_content_index, ContentIndex, ContentIndexArgs,
 };
 use crate::definitions::DefinitionIndex;
+use crate::git::cache::GitHistoryCache;
 
 // Re-export for use by tests (crate-internal only)
 #[cfg(test)]
@@ -30,7 +32,7 @@ pub(crate) use self::callers::resolve_call_site;
 
 /// Return all tool definitions for tools/list
 pub fn tool_definitions() -> Vec<ToolDefinition> {
-    vec![
+    let mut tools = vec![
         ToolDefinition {
             name: "search_grep".to_string(),
             description: "Search file contents using an inverted index with TF-IDF ranking. LANGUAGE-AGNOSTIC: works with any text file (C#, Rust, Python, JS/TS, XML, JSON, config, etc.). Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). Substring search is ON by default. Large results are auto-truncated to ~16KB (~4K tokens). Use countOnly=true or narrow with dir/ext/excludeDir for focused results.".to_string(),
@@ -350,7 +352,12 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "required": []
             }),
         },
-    ]
+    ];
+
+    // Git history tools (always available)
+    tools.extend(git::git_tool_definitions());
+
+    tools
 }
 
 /// Context for tool handlers -- shared state
@@ -372,6 +379,11 @@ pub struct HandlerContext {
     /// Whether the definition index has been fully built/loaded.
     /// Tools return a "building" message when false.
     pub def_ready: Arc<AtomicBool>,
+    /// Git history cache — populated by background thread (PR 2c).
+    /// `None` until cache is built; queries fall back to CLI.
+    pub git_cache: Arc<RwLock<Option<GitHistoryCache>>>,
+    /// Fast readiness check for git cache (avoids RwLock contention).
+    pub git_cache_ready: Arc<AtomicBool>,
 }
 
 /// Message returned when the content index is still building in background.
@@ -429,6 +441,10 @@ pub fn dispatch_tool(
         "search_definitions" => definitions::handle_search_definitions(ctx, arguments),
         "search_callers" => callers::handle_search_callers(ctx, arguments),
         "search_help" => handle_search_help(),
+        // Git history tools
+        "search_git_history" | "search_git_diff" | "search_git_authors" | "search_git_activity" => {
+            git::dispatch_git_tool(ctx, tool_name, arguments)
+        }
         _ => return ToolCallResult::error(format!("Unknown tool: {}", tool_name)),
     };
 

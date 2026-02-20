@@ -709,8 +709,8 @@ fn build_caller_tree(
 
     // Interface resolution: expand to find callers via interface implementations.
     // IMPORTANT: Only expand interfaces that are related to the target class.
-    // Without this filter, if two unrelated interfaces (e.g. IWorkspaceUpgrader and
-    // IPowerBIDatabaseSession) both define the same method name, we would incorrectly
+    // Without this filter, if two unrelated interfaces (e.g. IDataMigrator and
+    // IDatabaseSession) both define the same method name, we would incorrectly
     // find callers of the wrong interface's implementations.
     if resolve_interfaces && current_depth == 0
         && let Some(name_indices) = def_idx.name_index.get(&method_lower) {

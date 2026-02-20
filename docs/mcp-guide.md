@@ -60,6 +60,10 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 | `search_reindex`             | Force rebuild + reload content index                                                                                                    |
 | `search_reindex_definitions` | Force rebuild + reload definition index. Requires `--definitions`                                                                       |
 | `search_help`                | Best practices guide, strategy recipes, performance tiers                                                                               |
+| `search_git_history`         | Commit history for a file. Uses in-memory cache when available (sub-millisecond), falls back to CLI (~2–6 sec)                          |
+| `search_git_diff`            | Commit history with full diff/patch. Always uses CLI (cache has no patch data)                                                          |
+| `search_git_authors`         | Top authors for a file ranked by commit count. Uses in-memory cache when available (sub-millisecond), falls back to CLI                  |
+| `search_git_activity`        | Repo-wide activity (all changed files) for a date range. Uses in-memory cache when available (sub-millisecond), falls back to CLI        |
 
 ## What the AI Agent Sees
 
@@ -328,6 +332,38 @@ Check if all files in the repository are properly indexed. Files >500 bytes with
 
 ---
 
+---
+
+## Git History Tools
+
+Four MCP tools for querying git history. Always available — no flags needed. When the in-memory git history cache is ready (built automatically in the background on server startup), `search_git_history`, `search_git_authors`, and `search_git_activity` use sub-millisecond cache lookups. When the cache is not ready (first ~60 sec on cold start), these tools transparently fall back to CLI `git log` commands (~2–6 sec). `search_git_diff` always uses CLI (cache has no patch data).
+
+Cache responses include a `"(from cache)"` hint in the `summary` field so the AI agent knows the data source.
+
+### Parameters (shared across git tools)
+
+| Parameter    | Type   | Required | Description |
+|---|---|---|---|
+| `repo`       | string | ✅ | Path to local git repository |
+| `file`       | string | ✅* | File path relative to repo root (*required for `search_git_history`, `search_git_diff`, `search_git_authors`) |
+| `from`       | string | — | Start date (YYYY-MM-DD, inclusive) |
+| `to`         | string | — | End date (YYYY-MM-DD, inclusive) |
+| `date`       | string | — | Exact date (YYYY-MM-DD), overrides from/to |
+| `maxResults` | number | — | Maximum results to return (default: 50) |
+| `top`        | number | — | Maximum authors to return (default: 10, `search_git_authors` only) |
+
+### Cache behavior
+
+| Scenario | Behavior |
+|---|---|
+| Server just started, no `.git-history` on disk | Cache builds in background (~59 sec). Tools use CLI fallback during build. |
+| Server restart, `.git-history` exists on disk | Cache loads from disk (~100 ms). Tools use cache almost immediately. |
+| HEAD changed since cache was built | Cache rebuilds in background. Old cache (if loaded from disk) serves queries during rebuild. |
+| `search_git_diff` | Always uses CLI — diff data is too large and variable to cache. |
+| No `.git` directory in `--dir` | Git tools return errors. No cache is built. |
+
+---
+
 ## Manual Testing (without AI)
 
 ```bash
@@ -340,4 +376,5 @@ search serve --dir . --ext rs --definitions
 {"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"ExecuteQueryAsync","depth":3}}}
 {"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_definitions","arguments":{"file":"QueryService.cs","containsLine":812}}}
 {"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"GetProductEntriesAsync","includeBody":true,"maxBodyLines":10}}}
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":5}}}
 ```
