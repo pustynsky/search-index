@@ -137,7 +137,7 @@ pub(crate) fn make_ctx_with_defs() -> HandlerContext {
         base_type_index: HashMap::new(),
         file_index,
         path_to_id,
-        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
     };
 
     HandlerContext {

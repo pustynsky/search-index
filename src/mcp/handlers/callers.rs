@@ -420,6 +420,21 @@ fn verify_call_site_target(
         })
         .unwrap_or_default();
 
+    // Check if the target class is an extension class for this method.
+    // Extension methods can be called on any type (e.g., token.IsValidClrValue()
+    // where IsValidClrValue is defined in static class TokenExtensions).
+    // If the target class defines this method as an extension method, accept
+    // any call site with a matching method name regardless of receiver type.
+    // Note: extension_methods keys are original-case but method_name here is lowercased,
+    // so we do a case-insensitive scan over the map keys.
+    for (ext_method, ext_classes) in &def_idx.extension_methods {
+        if ext_method.eq_ignore_ascii_case(method_name) {
+            if ext_classes.iter().any(|c| c.eq_ignore_ascii_case(target_class)) {
+                return true;
+            }
+        }
+    }
+
     // Check if ANY matching call-site passes verification
     for cs in &matching_calls {
         match &cs.receiver_type {
@@ -1237,6 +1252,7 @@ mod tests {
             parse_errors: 0,
             lossy_file_count: 0,
             empty_file_ids: Vec::new(),
+            extension_methods: HashMap::new(),
         }
     }
 
@@ -1621,6 +1637,7 @@ mod tests {
             parse_errors: 0,
             lossy_file_count: 0,
             empty_file_ids: Vec::new(),
+            extension_methods: HashMap::new(),
         };
 
         // --- Content Index ---
@@ -2139,6 +2156,71 @@ mod tests {
         assert_eq!(impls.len(), 2);
         assert!(impls.contains(&"datamodelwebservice".to_string()));
         assert!(impls.contains(&"anotherservice".to_string()));
+    }
+
+    // ─── Test 25: Extension method — verify_call_site_target accepts mismatched receiver ──
+
+    #[test]
+    fn test_verify_call_site_target_extension_method() {
+        // TokenExtensions (static class) defines IsValidClrValue as an extension method.
+        // Consumer.Process calls token.IsValidClrValue() with receiver_type = "TokenType".
+        // verify_call_site_target(target="TokenExtensions") should return true because
+        // the extension_methods map tells us IsValidClrValue is an extension from TokenExtensions.
+        let definitions = vec![
+            class_def(0, "TokenExtensions", vec![]),                   // idx 0
+            method_def(0, "IsValidClrValue", "TokenExtensions", 5, 10), // idx 1
+            class_def(1, "Consumer", vec![]),                          // idx 2
+            method_def(1, "Process", "Consumer", 10, 25),              // idx 3
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(3u32, vec![
+            CallSite {
+                method_name: "IsValidClrValue".to_string(),
+                receiver_type: Some("TokenType".to_string()),
+                line: 15,
+                receiver_is_generic: false,
+            },
+        ]);
+
+        let mut def_idx = make_def_index(definitions, method_calls);
+        // Add extension method mapping
+        def_idx.extension_methods.insert(
+            "IsValidClrValue".to_string(),
+            vec!["TokenExtensions".to_string()],
+        );
+
+        // Should match: target is TokenExtensions, which is an extension class for IsValidClrValue
+        assert!(verify_call_site_target(&def_idx, 3, 15, "isvalidclrvalue", Some("TokenExtensions")),
+            "Extension method IsValidClrValue should match when target class is the extension class");
+    }
+
+    #[test]
+    fn test_verify_call_site_target_extension_method_no_match_without_map() {
+        // Same setup but WITHOUT extension_methods map → should NOT match
+        let definitions = vec![
+            class_def(0, "TokenExtensions", vec![]),
+            method_def(0, "IsValidClrValue", "TokenExtensions", 5, 10),
+            class_def(1, "Consumer", vec![]),
+            method_def(1, "Process", "Consumer", 10, 25),
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(3u32, vec![
+            CallSite {
+                method_name: "IsValidClrValue".to_string(),
+                receiver_type: Some("TokenType".to_string()),
+                line: 15,
+                receiver_is_generic: false,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+        // No extension_methods mapping
+
+        // Should NOT match: receiver is TokenType, target is TokenExtensions, no relationship
+        assert!(!verify_call_site_target(&def_idx, 3, 15, "isvalidclrvalue", Some("TokenExtensions")),
+            "Without extension_methods map, receiver=TokenType should NOT match target=TokenExtensions");
     }
 
     // ─── Test 24: Generic method call site — verify_call_site_target matches stripped name ──

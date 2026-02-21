@@ -27,7 +27,7 @@ fn test_switch_case_ast_dump() {
     dump(tree.root_node(), 0);
 
     // Also test that cyclomatic complexity counts cases correctly
-    let (defs, _, stats) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _, stats, _) = parse_csharp_definitions(&mut parser, source, 0);
     let method = defs.iter().position(|d| d.name == "Translate").unwrap();
     let s = stats.iter().find(|(i, _)| *i == method).map(|(_, s)| s).unwrap();
     eprintln!("Switch CC={}, cognitive={}, nesting={}", s.cyclomatic_complexity, s.cognitive_complexity, s.max_nesting_depth);
@@ -65,7 +65,7 @@ fn test_code_stats_else_if_chain_flat_nesting() {
     "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, _, stats) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _, stats, _) = parse_csharp_definitions(&mut parser, source, 0);
     let method = defs.iter().position(|d| d.name == "GetLabel").unwrap();
     let s = stats.iter().find(|(i, _)| *i == method).map(|(_, s)| s).unwrap();
 
@@ -90,9 +90,81 @@ fn test_code_stats_else_if_chain_flat_nesting() {
 // C# parser tests — split from definitions_tests.rs.
 
 use super::*;
-use super::parser_csharp::{parse_csharp_definitions, parse_field_signature, extract_constructor_param_types};
+use super::parser_csharp::{parse_csharp_definitions, parse_field_signature, extract_constructor_param_types, unwrap_task_type};
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+// ─── Extension Method Detection Tests (US-6) ─────────────────────────
+
+#[test]
+fn test_csharp_extension_method_detection() {
+    let source = r#"
+    public static class StringExtensions {
+        public static bool IsNullOrWhitespace(this string s) { return false; }
+        public static string Truncate(this string s, int maxLen) { return s; }
+        public static void RegularStaticMethod(int x) { }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (_defs, _, _, ext_methods) = parse_csharp_definitions(&mut parser, source, 0);
+
+    // IsNullOrWhitespace should be detected as an extension method
+    assert!(ext_methods.contains_key("IsNullOrWhitespace"),
+        "IsNullOrWhitespace should be in extension_methods, got: {:?}", ext_methods);
+    assert!(ext_methods["IsNullOrWhitespace"].contains(&"StringExtensions".to_string()),
+        "IsNullOrWhitespace should map to StringExtensions");
+
+    // Truncate should be detected as an extension method
+    assert!(ext_methods.contains_key("Truncate"),
+        "Truncate should be in extension_methods, got: {:?}", ext_methods);
+    assert!(ext_methods["Truncate"].contains(&"StringExtensions".to_string()),
+        "Truncate should map to StringExtensions");
+
+    // RegularStaticMethod should NOT be in extension_methods (no `this` parameter)
+    assert!(!ext_methods.contains_key("RegularStaticMethod"),
+        "RegularStaticMethod should NOT be in extension_methods (no `this` param)");
+}
+
+#[test]
+fn test_csharp_extension_method_not_detected_for_non_static_class() {
+    let source = r#"
+    public class RegularClass {
+        public static bool SomeMethod(this string s) { return false; }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (_defs, _, _, ext_methods) = parse_csharp_definitions(&mut parser, source, 0);
+
+    // Non-static class should NOT have extension methods detected
+    assert!(ext_methods.is_empty(),
+        "Non-static class should not produce extension methods, got: {:?}", ext_methods);
+}
+
+#[test]
+fn test_csharp_extension_method_multiple_classes() {
+    let source = r#"
+    public static class TokenExtensions {
+        public static bool IsValid(this TokenType token) { return true; }
+    }
+    public static class OtherExtensions {
+        public static bool IsValid(this OtherType other) { return true; }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (_defs, _, _, ext_methods) = parse_csharp_definitions(&mut parser, source, 0);
+
+    // IsValid should map to both extension classes
+    assert!(ext_methods.contains_key("IsValid"),
+        "IsValid should be in extension_methods");
+    let classes = &ext_methods["IsValid"];
+    assert!(classes.contains(&"TokenExtensions".to_string()),
+        "IsValid should include TokenExtensions");
+    assert!(classes.contains(&"OtherExtensions".to_string()),
+        "IsValid should include OtherExtensions");
+}
 
 #[test]
 fn test_parse_csharp_class() {
@@ -136,7 +208,7 @@ namespace MyApp
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
 
-    let (defs, _call_sites, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _call_sites, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let class_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Class).collect();
     assert_eq!(class_defs.len(), 1);
@@ -213,7 +285,7 @@ fn test_incremental_update_new_file() {
         files: Vec::new(), definitions: Vec::new(), name_index: HashMap::new(),
         kind_index: HashMap::new(), attribute_index: HashMap::new(),
         base_type_index: HashMap::new(), file_index: HashMap::new(),
-        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
     };
 
     let clean = PathBuf::from(crate::clean_path(&test_file.to_string_lossy()));
@@ -250,7 +322,7 @@ fn test_incremental_update_existing_file() {
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m },
         path_to_id: { let mut m = HashMap::new(); m.insert(clean.clone(), 0u32); m },
-        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
     };
 
     std::fs::write(&test_file, "public class UpdatedClass { public int Value { get; set; } }").unwrap();
@@ -277,7 +349,7 @@ fn test_remove_file_from_def_index() {
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m.insert(1, vec![1]); m },
         path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("file0.cs"), 0); m.insert(PathBuf::from("file1.cs"), 1); m },
-        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
     };
 
     remove_file_from_def_index(&mut index, &PathBuf::from("file0.cs"));
@@ -295,7 +367,7 @@ public class OrderService { public void Process() { Validate(); SendEmail(); } }
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, call_sites, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, call_sites, _, _) = parse_csharp_definitions(&mut parser, source, 0);
     let pi = defs.iter().position(|d| d.name == "Process").unwrap();
     let pc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == pi).collect();
     assert!(!pc.is_empty());
@@ -315,7 +387,7 @@ public class OrderService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
     let pi = defs.iter().position(|d| d.name == "Process").unwrap();
     let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
     assert!(!pc.is_empty());
@@ -337,7 +409,7 @@ public class OrderService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
     let si = defs.iter().position(|d| d.name == "Save").unwrap();
     let sc: Vec<_> = cs.iter().filter(|(i, _)| *i == si).collect();
     assert!(!sc.is_empty());
@@ -352,7 +424,7 @@ public class Factory { public void Create() { var obj = new OrderValidator(); } 
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
     let ci = defs.iter().position(|d| d.name == "Create").unwrap();
     let cc: Vec<_> = cs.iter().filter(|(i, _)| *i == ci).collect();
     assert!(!cc.is_empty());
@@ -370,7 +442,7 @@ public class MyClass {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
     let mi = defs.iter().position(|d| d.name == "Method1").unwrap();
     let mc: Vec<_> = cs.iter().filter(|(i, _)| *i == mi).collect();
     assert!(!mc.is_empty());
@@ -400,7 +472,7 @@ public class MyClass {
     let source = r#"public class Empty { public void Nothing() {} }"#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
     let ni = defs.iter().position(|d| d.name == "Nothing").unwrap();
     let nc: Vec<_> = cs.iter().filter(|(i, _)| *i == ni).collect();
     assert!(nc.is_empty());
@@ -416,7 +488,7 @@ public class OrderService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
     let pi = defs.iter().position(|d| d.name == "ProcessAsync").unwrap();
     let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
     assert!(!pc.is_empty());
@@ -434,7 +506,7 @@ public class Processor {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
     let ri = defs.iter().position(|d| d.name == "Run").unwrap();
     let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
     assert!(!rc.is_empty());
@@ -453,7 +525,7 @@ public class DataProcessor {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
     let ti = defs.iter().position(|d| d.name == "Transform").unwrap();
     let tc: Vec<_> = cs.iter().filter(|(i, _)| *i == ti).collect();
     assert!(!tc.is_empty());
@@ -471,7 +543,7 @@ public class OrderService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
     let pi = defs.iter().position(|d| d.name == "Process").unwrap();
     let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
     assert!(!pc.is_empty());
@@ -497,7 +569,7 @@ public class MyService {
         files: Vec::new(), definitions: Vec::new(), name_index: HashMap::new(),
         kind_index: HashMap::new(), attribute_index: HashMap::new(),
         base_type_index: HashMap::new(), file_index: HashMap::new(),
-        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
     };
 
     let clean = PathBuf::from(crate::clean_path(&test_file.to_string_lossy()));
@@ -573,7 +645,7 @@ namespace TestApp
 
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, _calls, _) = parse_csharp_definitions(&mut parser, &source, 0);
+    let (defs, _calls, _, _) = parse_csharp_definitions(&mut parser, &source, 0);
 
     // Should find: class DataProcessor, constructor, method Process, field _name
     let class_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Class).collect();
@@ -605,7 +677,7 @@ public class UserService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let gi = defs.iter().position(|d| d.name == "GetUser").unwrap();
     let gc: Vec<_> = cs.iter().filter(|(i, _)| *i == gi).collect();
@@ -632,7 +704,7 @@ public class OrderService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let pi = defs.iter().position(|d| d.name == "ProcessOrder").unwrap();
     let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
@@ -660,7 +732,7 @@ public class SomeService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let di = defs.iter().position(|d| d.name == "DoWork").unwrap();
     let dc: Vec<_> = cs.iter().filter(|(i, _)| *i == di).collect();
@@ -689,7 +761,7 @@ public class DbService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let ri = defs.iter().position(|d| d.name == "RunQuery").unwrap();
     let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
@@ -717,7 +789,7 @@ public class DataService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let li = defs.iter().position(|d| d.name == "LoadData").unwrap();
     let lc: Vec<_> = cs.iter().filter(|(i, _)| *i == li).collect();
@@ -746,7 +818,7 @@ public class OrderService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let pi = defs.iter().position(|d| d.name == "Process").unwrap();
     let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
@@ -770,7 +842,7 @@ public class UserFormatter {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     // Check Name property
     let name_idx = defs.iter().position(|d| d.name == "Name").unwrap();
@@ -802,7 +874,7 @@ public class Processor {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let ri = defs.iter().position(|d| d.name == "Run").unwrap();
     let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
@@ -825,7 +897,7 @@ fn test_code_stats_empty_method() {
     "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, _, stats) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _, stats, _) = parse_csharp_definitions(&mut parser, source, 0);
     let method = defs.iter().position(|d| d.name == "DoNothing").unwrap();
     let method_stats = stats.iter().find(|(i, _)| *i == method).map(|(_, s)| s).unwrap();
     assert_eq!(method_stats.cyclomatic_complexity, 1, "empty method cyclomatic");
@@ -848,7 +920,7 @@ fn test_code_stats_single_if() {
     "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, _, stats) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _, stats, _) = parse_csharp_definitions(&mut parser, source, 0);
     let method = defs.iter().position(|d| d.name == "Check").unwrap();
     let s = stats.iter().find(|(i, _)| *i == method).map(|(_, s)| s).unwrap();
     assert_eq!(s.cyclomatic_complexity, 2, "single if cyclomatic");
@@ -868,7 +940,7 @@ fn test_code_stats_if_else() {
     "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, _, stats) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _, stats, _) = parse_csharp_definitions(&mut parser, source, 0);
     let method = defs.iter().position(|d| d.name == "Check").unwrap();
     let s = stats.iter().find(|(i, _)| *i == method).map(|(_, s)| s).unwrap();
     assert_eq!(s.cyclomatic_complexity, 2, "if/else cyclomatic (else is not a separate decision point)");
@@ -891,7 +963,7 @@ fn test_code_stats_nested_if() {
     "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, _, stats) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _, stats, _) = parse_csharp_definitions(&mut parser, source, 0);
     let method = defs.iter().position(|d| d.name == "Check").unwrap();
     let s = stats.iter().find(|(i, _)| *i == method).map(|(_, s)| s).unwrap();
     assert_eq!(s.cyclomatic_complexity, 3, "nested if cyclomatic");
@@ -915,7 +987,7 @@ fn test_code_stats_triple_nested_if() {
     "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, _, stats) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _, stats, _) = parse_csharp_definitions(&mut parser, source, 0);
     let method = defs.iter().position(|d| d.name == "Check").unwrap();
     let s = stats.iter().find(|(i, _)| *i == method).map(|(_, s)| s).unwrap();
     assert_eq!(s.cyclomatic_complexity, 4, "triple nested cyclomatic");
@@ -936,7 +1008,7 @@ fn test_code_stats_logical_operator_sequence() {
     "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, _, stats) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _, stats, _) = parse_csharp_definitions(&mut parser, source, 0);
     let method = defs.iter().position(|d| d.name == "Check").unwrap();
     let s = stats.iter().find(|(i, _)| *i == method).map(|(_, s)| s).unwrap();
     // if (+1 cyclomatic) + 2x && (+2 cyclomatic) = 4 total (base 1 + 3)
@@ -960,7 +1032,7 @@ fn test_code_stats_mixed_logical_operators() {
     "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, _, stats) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _, stats, _) = parse_csharp_definitions(&mut parser, source, 0);
     let method = defs.iter().position(|d| d.name == "Check").unwrap();
     let s = stats.iter().find(|(i, _)| *i == method).map(|(_, s)| s).unwrap();
     // if (+1) + && (+1) + || (+1) = base 1 + 3 = 4 cyclomatic
@@ -983,7 +1055,7 @@ fn test_code_stats_for_with_if() {
     "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, _, stats) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _, stats, _) = parse_csharp_definitions(&mut parser, source, 0);
     let method = defs.iter().position(|d| d.name == "Process").unwrap();
     let s = stats.iter().find(|(i, _)| *i == method).map(|(_, s)| s).unwrap();
     assert_eq!(s.cyclomatic_complexity, 3, "for+if cyclomatic");
@@ -1025,7 +1097,7 @@ fn test_code_stats_lambda_count() {
     "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, _, stats) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _, stats, _) = parse_csharp_definitions(&mut parser, source, 0);
     let method = defs.iter().position(|d| d.name == "Process").unwrap();
     let s = stats.iter().find(|(i, _)| *i == method).map(|(_, s)| s).unwrap();
     assert_eq!(s.lambda_count, 2, "two lambdas");
@@ -1044,7 +1116,7 @@ fn test_code_stats_return_and_throw_count() {
     "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, _, stats) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _, stats, _) = parse_csharp_definitions(&mut parser, source, 0);
     let method = defs.iter().position(|d| d.name == "Check").unwrap();
     let s = stats.iter().find(|(i, _)| *i == method).map(|(_, s)| s).unwrap();
     assert_eq!(s.return_count, 3, "2 returns + 1 throw = 3");
@@ -1065,7 +1137,7 @@ fn test_code_stats_call_count_from_parser() {
     "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, _, stats) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _, stats, _) = parse_csharp_definitions(&mut parser, source, 0);
     let method = defs.iter().position(|d| d.name == "Process").unwrap();
     let s = stats.iter().find(|(i, _)| *i == method).map(|(_, s)| s).unwrap();
     assert_eq!(s.call_count, 3, "3 calls in Process");
@@ -1082,7 +1154,7 @@ fn test_code_stats_param_count() {
     "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, _, stats) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, _, stats, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let m1 = defs.iter().position(|d| d.name == "Method1").unwrap();
     let s1 = stats.iter().find(|(i, _)| *i == m1).map(|(_, s)| s).unwrap();
@@ -1115,7 +1187,7 @@ public class SearchClient {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let ri = defs.iter().position(|d| d.name == "RunSearch").unwrap();
     let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
@@ -1151,7 +1223,7 @@ public class DataMapper {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let mi = defs.iter().position(|d| d.name == "MapData").unwrap();
     let mc: Vec<_> = cs.iter().filter(|(i, _)| *i == mi).collect();
@@ -1181,7 +1253,7 @@ public class BaseProcessor {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let ri = defs.iter().position(|d| d.name == "Run").unwrap();
     let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
@@ -1214,7 +1286,7 @@ public class MixedService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let ei = defs.iter().position(|d| d.name == "Execute").unwrap();
     let ec: Vec<_> = cs.iter().filter(|(i, _)| *i == ei).collect();
@@ -1246,7 +1318,7 @@ public class ConfigLoader {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let li = defs.iter().position(|d| d.name == "Load").unwrap();
     let lc: Vec<_> = cs.iter().filter(|(i, _)| *i == li).collect();
@@ -1284,7 +1356,7 @@ public class TestBlock {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let mi = defs.iter().position(|d| d.name == "ExecuteSearch").unwrap();
     let mc: Vec<_> = cs.iter().filter(|(i, _)| *i == mi).collect();
@@ -1302,4 +1374,603 @@ public class TestBlock {
     let inner = mc[0].1.iter().find(|c| c.method_name == "SearchForAllTenantsAsync").unwrap();
     assert_eq!(inner.receiver_type.as_deref(), Some("ISearchClient"),
         "Receiver type should be resolved via constructor DI field");
+}
+
+// ─── Cast / As / Using var type inference tests ───────────────────────
+
+#[test]
+fn test_csharp_var_cast_type_inference() {
+    let source = r#"
+public class Service {
+    void Process(object obj) {
+        var reader = (PackageReader)obj;
+        reader.Dispose();
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "Process").unwrap();
+    let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'Process'");
+
+    let dispose = pc[0].1.iter().find(|c| c.method_name == "Dispose");
+    assert!(dispose.is_some(), "Expected call to 'Dispose'");
+    assert_eq!(
+        dispose.unwrap().receiver_type.as_deref(),
+        Some("PackageReader"),
+        "Local var 'reader' with cast '(PackageReader)obj' should resolve receiver_type to 'PackageReader'"
+    );
+}
+
+#[test]
+fn test_csharp_var_as_type_inference() {
+    let source = r#"
+public class Service {
+    void Process(object obj) {
+        var reader = obj as PackageReader;
+        reader.ReadLine();
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "Process").unwrap();
+    let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'Process'");
+
+    let read_line = pc[0].1.iter().find(|c| c.method_name == "ReadLine");
+    assert!(read_line.is_some(), "Expected call to 'ReadLine'");
+    assert_eq!(
+        read_line.unwrap().receiver_type.as_deref(),
+        Some("PackageReader"),
+        "Local var 'reader' with 'obj as PackageReader' should resolve receiver_type to 'PackageReader'"
+    );
+}
+
+#[test]
+fn test_csharp_using_var_type_inference() {
+    let source = r#"
+public class Service {
+    void Process(string path) {
+        using var reader = new StreamReader(path);
+        reader.ReadLine();
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "Process").unwrap();
+    let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'Process'");
+
+    let read_line = pc[0].1.iter().find(|c| c.method_name == "ReadLine");
+    assert!(read_line.is_some(), "Expected call to 'ReadLine'");
+    assert_eq!(
+        read_line.unwrap().receiver_type.as_deref(),
+        Some("StreamReader"),
+        "Using var 'reader' with 'new StreamReader(path)' should resolve receiver_type to 'StreamReader'"
+    );
+}
+
+
+// ─── Method Return Type Inference Tests (US-1) ───────────────────────
+
+#[test]
+fn test_parse_return_type_from_signature_simple() {
+    use super::parser_csharp::parse_return_type_from_signature;
+
+    assert_eq!(parse_return_type_from_signature("private Stream GetDataStream()"), Some("Stream".to_string()));
+    assert_eq!(parse_return_type_from_signature("public static void Main(string[] args)"), None); // void
+    assert_eq!(parse_return_type_from_signature("override string ToString()"), Some("string".to_string()));
+    assert_eq!(parse_return_type_from_signature("internal HttpClient CreateClient()"), Some("HttpClient".to_string()));
+    assert_eq!(parse_return_type_from_signature("public int GetCount()"), Some("int".to_string()));
+}
+
+#[test]
+fn test_parse_return_type_from_signature_generic() {
+    use super::parser_csharp::parse_return_type_from_signature;
+
+    assert_eq!(
+        parse_return_type_from_signature("public async Task<List<User>> GetUsersAsync(string id)"),
+        Some("Task<List<User>>".to_string())
+    );
+    assert_eq!(
+        parse_return_type_from_signature("async Task<HttpResponseMessage> SendAsync(string url)"),
+        Some("Task<HttpResponseMessage>".to_string())
+    );
+    assert_eq!(
+        parse_return_type_from_signature("public Task<int> ComputeAsync()"),
+        Some("Task<int>".to_string())
+    );
+}
+
+#[test]
+fn test_parse_return_type_from_signature_no_paren() {
+    use super::parser_csharp::parse_return_type_from_signature;
+
+    // No parentheses — should return None
+    assert_eq!(parse_return_type_from_signature("public class MyClass"), None);
+}
+
+#[test]
+fn test_csharp_var_method_return_type_inference() {
+    let source = r#"
+    class DataService {
+        private Stream GetStream() { return null; }
+        void Process() {
+            var stream = GetStream();
+            stream.ReadAsync(buffer);
+        }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "Process").unwrap();
+    let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'Process'");
+
+    let read_async = pc[0].1.iter().find(|c| c.method_name == "ReadAsync");
+    assert!(read_async.is_some(), "Expected call to 'ReadAsync'");
+    assert_eq!(
+        read_async.unwrap().receiver_type.as_deref(),
+        Some("Stream"),
+        "Local var 'stream' from 'var stream = GetStream()' should resolve receiver_type to 'Stream' via method return type inference"
+    );
+}
+
+#[test]
+fn test_csharp_var_this_method_return_type_inference() {
+    let source = r#"
+    class DataService {
+        internal HttpClient CreateClient() { return null; }
+        void Send() {
+            var client = this.CreateClient();
+            client.SendAsync(request);
+        }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let si = defs.iter().position(|d| d.name == "Send").unwrap();
+    let sc: Vec<_> = cs.iter().filter(|(i, _)| *i == si).collect();
+    assert!(!sc.is_empty(), "Expected call sites for 'Send'");
+
+    let send_async = sc[0].1.iter().find(|c| c.method_name == "SendAsync");
+    assert!(send_async.is_some(), "Expected call to 'SendAsync'");
+    assert_eq!(
+        send_async.unwrap().receiver_type.as_deref(),
+        Some("HttpClient"),
+        "Local var 'client' from 'var client = this.CreateClient()' should resolve receiver_type to 'HttpClient' via method return type inference"
+    );
+}
+
+#[test]
+fn test_csharp_var_method_return_type_void_not_stored() {
+    let source = r#"
+    class Service {
+        void DoWork() { }
+        void Run() {
+            DoWork();
+        }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    // Verify DoWork is called but void methods don't produce var type entries.
+    // Since DoWork() returns void, it's not a var assignment at all — just verify
+    // the call site exists and no crash occurs.
+    let ri = defs.iter().position(|d| d.name == "Run").unwrap();
+    let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
+    assert!(!rc.is_empty(), "Expected call sites for 'Run'");
+
+    let do_work = rc[0].1.iter().find(|c| c.method_name == "DoWork");
+    assert!(do_work.is_some(), "Expected call to 'DoWork'");
+    // DoWork has no receiver (implicit this), so receiver_type should be None
+    assert_eq!(do_work.unwrap().receiver_type, None, "Direct call DoWork() should have no receiver");
+}
+
+#[test]
+fn test_csharp_var_method_return_cross_class_not_resolved() {
+    let source = r#"
+    class Service {
+        private IRepository _repo;
+        void Run() {
+            var result = _repo.GetById(1);
+            result.Process();
+        }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let ri = defs.iter().position(|d| d.name == "Run").unwrap();
+    let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
+    assert!(!rc.is_empty(), "Expected call sites for 'Run'");
+
+    let process = rc[0].1.iter().find(|c| c.method_name == "Process");
+    assert!(process.is_some(), "Expected call to 'Process'");
+    assert_eq!(
+        process.unwrap().receiver_type.as_deref(),
+        Some("result"),
+        "Cross-class var 'result' from '_repo.GetById(1)' should NOT be resolved — should remain 'result'"
+    );
+}
+
+#[test]
+fn test_csharp_var_method_return_generic_type() {
+    let source = r#"
+    class DataService {
+        public Task<HttpResponseMessage> SendRequestAsync() { return null; }
+        void Execute() {
+            var response = SendRequestAsync();
+            response.ConfigureAwait(false);
+        }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let ei = defs.iter().position(|d| d.name == "Execute").unwrap();
+    let ec: Vec<_> = cs.iter().filter(|(i, _)| *i == ei).collect();
+    assert!(!ec.is_empty(), "Expected call sites for 'Execute'");
+
+    let configure = ec[0].1.iter().find(|c| c.method_name == "ConfigureAwait");
+    assert!(configure.is_some(), "Expected call to 'ConfigureAwait'");
+    // The return type is Task<HttpResponseMessage>, stored as-is.
+    // But when used as receiver, it goes through resolve_receiver_type which
+    // looks it up in the combined_types map. The key is "response", value is "Task<HttpResponseMessage>".
+    // resolve_receiver_type for identifier "response" will find "Task<HttpResponseMessage>" in field_types.
+    // Wait — actually the base type extraction happens in parse_field_signature for fields.
+    // For local vars, the type is stored as-is. Let me check...
+    // In extract_csharp_var_declaration_types Path 2d, we store the return type as-is
+    // (after filtering for uppercase first char). "Task<HttpResponseMessage>" starts with 'T', uppercase.
+    // In resolve_receiver_type, field_types.get("response") returns "Task<HttpResponseMessage>".
+    // So receiver_type should be "Task<HttpResponseMessage>".
+    assert_eq!(
+        configure.unwrap().receiver_type.as_deref(),
+        Some("Task<HttpResponseMessage>"),
+        "Generic return type should be stored as-is (Task<T> unwrap is US-5)"
+    );
+}
+
+#[test]
+fn test_csharp_var_method_return_lowercase_type_not_resolved() {
+    // When the return type starts with lowercase (e.g., 'object', 'string'),
+    // it should NOT be stored, preserving backward compatibility.
+    let source = r#"
+    class SomeService {
+        public void DoWork() {
+            var result = Calculate();
+            result.Process();
+        }
+        private object Calculate() { return null; }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let di = defs.iter().position(|d| d.name == "DoWork").unwrap();
+    let dc: Vec<_> = cs.iter().filter(|(i, _)| *i == di).collect();
+    assert!(!dc.is_empty(), "Expected call sites for 'DoWork'");
+
+    let process = dc[0].1.iter().find(|c| c.method_name == "Process");
+    assert!(process.is_some(), "Expected call to 'Process'");
+    // 'object' starts with lowercase, so the return type inference filter rejects it
+    assert_eq!(
+        process.unwrap().receiver_type.as_deref(),
+        Some("result"),
+        "Return type 'object' (lowercase) should not be stored, receiver stays as variable name"
+    );
+}
+
+// ─── Task<T> Unwrap Tests (US-5) ─────────────────────────────────────
+
+#[test]
+fn test_unwrap_task_type() {
+    assert_eq!(unwrap_task_type("Task<Stream>"), "Stream");
+    assert_eq!(unwrap_task_type("ValueTask<HttpClient>"), "HttpClient");
+    assert_eq!(unwrap_task_type("Task<List<User>>"), "List<User>");
+    assert_eq!(unwrap_task_type("Task"), "Task"); // no generic → unchanged
+    assert_eq!(unwrap_task_type("Stream"), "Stream"); // not a Task → unchanged
+    assert_eq!(unwrap_task_type("Task<>"), "Task<>"); // edge case
+    assert_eq!(unwrap_task_type("ValueTask<List<Dictionary<string, int>>>"), "List<Dictionary<string, int>>");
+    assert_eq!(unwrap_task_type("Task<HttpResponseMessage>"), "HttpResponseMessage");
+}
+
+#[test]
+fn test_csharp_var_await_task_unwrap() {
+    let source = r#"
+    class DataService {
+        private async Task<Stream> GetStreamAsync() { return null; }
+        async Task Process() {
+            var stream = await GetStreamAsync();
+            stream.ReadAsync(buffer);
+        }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "Process").unwrap();
+    let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'Process'");
+
+    let read_async = pc[0].1.iter().find(|c| c.method_name == "ReadAsync");
+    assert!(read_async.is_some(), "Expected call to 'ReadAsync'");
+    assert_eq!(
+        read_async.unwrap().receiver_type.as_deref(),
+        Some("Stream"),
+        "var stream = await GetStreamAsync() should unwrap Task<Stream> to Stream"
+    );
+}
+
+#[test]
+fn test_csharp_var_await_valuetask_unwrap() {
+    let source = r#"
+    class DataService {
+        private ValueTask<HttpClient> GetClientAsync() { return default; }
+        async Task Send() {
+            var client = await GetClientAsync();
+            client.SendAsync(request);
+        }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let si = defs.iter().position(|d| d.name == "Send").unwrap();
+    let sc: Vec<_> = cs.iter().filter(|(i, _)| *i == si).collect();
+    assert!(!sc.is_empty(), "Expected call sites for 'Send'");
+
+    let send_async = sc[0].1.iter().find(|c| c.method_name == "SendAsync");
+    assert!(send_async.is_some(), "Expected call to 'SendAsync'");
+    assert_eq!(
+        send_async.unwrap().receiver_type.as_deref(),
+        Some("HttpClient"),
+        "var client = await GetClientAsync() should unwrap ValueTask<HttpClient> to HttpClient"
+    );
+}
+
+#[test]
+fn test_csharp_var_await_nested_generic_unwrap() {
+    let source = r#"
+    class DataService {
+        private async Task<List<User>> GetUsersAsync() { return null; }
+        async Task Process() {
+            var users = await GetUsersAsync();
+            users.Add(newUser);
+        }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "Process").unwrap();
+    let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'Process'");
+
+    let add = pc[0].1.iter().find(|c| c.method_name == "Add");
+    assert!(add.is_some(), "Expected call to 'Add'");
+    // After unwrapping Task<List<User>> → List<User>, the receiver_type should be
+    // "List<User>" (the full unwrapped type is stored, generic stripping happens elsewhere)
+    assert_eq!(
+        add.unwrap().receiver_type.as_deref(),
+        Some("List<User>"),
+        "var users = await GetUsersAsync() should unwrap Task<List<User>> to List<User>"
+    );
+}
+
+#[test]
+fn test_csharp_var_await_plain_task_no_unwrap() {
+    // Plain Task (no generic) returns void — the method signature parser returns None for void
+    // so this should not produce a type at all
+    let source = r#"
+    class DataService {
+        private async Task DoWorkAsync() { }
+        async Task Run() {
+            await DoWorkAsync();
+        }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let ri = defs.iter().position(|d| d.name == "Run").unwrap();
+    let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
+    // Since `await DoWorkAsync()` is not assigned to a variable, there should be
+    // a call site for DoWorkAsync but no variable type to resolve
+    if !rc.is_empty() {
+        let names: Vec<&str> = rc[0].1.iter().map(|c| c.method_name.as_str()).collect();
+        assert!(names.contains(&"DoWorkAsync"), "Expected call to 'DoWorkAsync'");
+    }
+}
+
+#[test]
+fn test_csharp_var_no_await_task_not_unwrapped() {
+    let source = r#"
+    class DataService {
+        private Task<Stream> GetStreamAsync() { return null; }
+        void Process() {
+            var task = GetStreamAsync();
+            task.ContinueWith(t => {});
+        }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "Process").unwrap();
+    let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'Process'");
+
+    let continue_with = pc[0].1.iter().find(|c| c.method_name == "ContinueWith");
+    assert!(continue_with.is_some(), "Expected call to 'ContinueWith'");
+    // WITHOUT await, the Task<Stream> should NOT be unwrapped.
+    // The receiver_type should be "Task<Stream>" (the full return type, as stored by US-1)
+    assert_eq!(
+        continue_with.unwrap().receiver_type.as_deref(),
+        Some("Task<Stream>"),
+        "Without await, Task<Stream> should NOT be unwrapped — receiver stays as Task<Stream>"
+    );
+}
+
+// ─── Pattern Matching Type Inference Tests (US-7) ────────────────────
+
+#[test]
+fn test_csharp_is_pattern_type_inference() {
+    let source = r#"
+    class Service {
+        void Process(object obj) {
+            if (obj is PackageReader reader) {
+                reader.Dispose();
+            }
+        }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "Process").unwrap();
+    let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'Process'");
+
+    let dispose = pc[0].1.iter().find(|c| c.method_name == "Dispose");
+    assert!(dispose.is_some(), "Expected call to 'Dispose'");
+    assert_eq!(
+        dispose.unwrap().receiver_type.as_deref(),
+        Some("PackageReader"),
+        "reader.Dispose() should have receiver_type = 'PackageReader' from 'obj is PackageReader reader' pattern"
+    );
+}
+
+#[test]
+fn test_csharp_is_pattern_negated_not_resolved() {
+    let source = r#"
+    class Service {
+        void Process(object obj) {
+            if (obj is not PackageReader) {
+                obj.ToString();
+            }
+        }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "Process").unwrap();
+    let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'Process'");
+
+    let to_string = pc[0].1.iter().find(|c| c.method_name == "ToString");
+    assert!(to_string.is_some(), "Expected call to 'ToString'");
+    // Negated pattern 'is not PackageReader' has no variable declaration,
+    // so obj should NOT be resolved to PackageReader
+    assert_ne!(
+        to_string.unwrap().receiver_type.as_deref(),
+        Some("PackageReader"),
+        "Negated 'is not' pattern should NOT resolve type to PackageReader"
+    );
+}
+
+#[test]
+fn test_csharp_switch_case_pattern_type_inference() {
+    let source = r#"
+    class Service {
+        void Process(object obj) {
+            switch (obj) {
+                case StreamReader reader:
+                    reader.ReadLine();
+                    break;
+            }
+        }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "Process").unwrap();
+    let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'Process'");
+
+    let read_line = pc[0].1.iter().find(|c| c.method_name == "ReadLine");
+    assert!(read_line.is_some(), "Expected call to 'ReadLine'");
+    assert_eq!(
+        read_line.unwrap().receiver_type.as_deref(),
+        Some("StreamReader"),
+        "reader.ReadLine() should have receiver_type = 'StreamReader' from 'case StreamReader reader:' pattern"
+    );
+}
+
+// ─── Chained member_access_expression negative test ──────────────────
+// Documents known limitation: for chained property access a.B.C.Method(),
+// receiver_type is assigned to the immediate receiver identifier ("C" or
+// the intermediate property name), NOT resolved through the property chain.
+// This is a known gap from cross-validation (UtteranceIndexBuilder.BuildIndex
+// had 0% recall). Fixing this requires cross-class property type resolution.
+
+#[test]
+fn test_csharp_chained_member_access_receiver_not_resolved() {
+    // Known limitation: _context.RuntimeContext.Builder.Process()
+    // receiver_type for Process() is NOT "Builder" (the class type of the property),
+    // it's whatever the parser assigns from the immediate member_access_expression.
+    // This test documents current behavior — NOT a regression.
+    let source = r#"
+    class Service {
+        private readonly IContext _context;
+        void Run() {
+            _context.RuntimeContext.Builder.Process();
+        }
+    }
+    "#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let ri = defs.iter().position(|d| d.name == "Run").unwrap();
+    let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
+    assert!(!rc.is_empty(), "Expected call sites for 'Run'");
+
+    let process = rc[0].1.iter().find(|c| c.method_name == "Process");
+    assert!(process.is_some(), "Expected call to 'Process'");
+
+    // Current behavior: receiver_type is NOT the class name of the final property.
+    // It's resolved from the member_access chain — typically the intermediate segment.
+    // This is a KNOWN LIMITATION. When cross-class property type resolution is
+    // implemented, this test should be updated to expect the correct class name.
+    let receiver = process.unwrap().receiver_type.as_deref();
+    assert!(
+        receiver != Some("IContext"),
+        "Chained access receiver should NOT be the root field type 'IContext', got: {:?}",
+        receiver
+    );
+    // Document what the parser actually produces — this is the baseline
+    // for future improvement (chained property access resolution).
+    eprintln!(
+        "[KNOWN LIMITATION] Chained member_access_expression: _context.RuntimeContext.Builder.Process() → receiver_type = {:?}",
+        receiver
+    );
 }

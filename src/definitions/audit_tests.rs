@@ -24,7 +24,8 @@ use super::parser_typescript::parse_typescript_definitions;
 fn parse_cs(source: &str) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>) {
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    parse_csharp_definitions(&mut parser, source, 0)
+    let (defs, calls, stats, _ext) = parse_csharp_definitions(&mut parser, source, 0);
+    (defs, calls, stats)
 }
 
 /// Helper: parse TS source and return (defs, call_sites, code_stats)

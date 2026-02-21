@@ -45,7 +45,10 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
         "cs" => {
             let mut cs_parser = tree_sitter::Parser::new();
             cs_parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).ok();
-            parse_csharp_definitions(&mut cs_parser, &content, file_id)
+            {
+                let (defs, calls, stats, _ext) = parse_csharp_definitions(&mut cs_parser, &content, file_id);
+                (defs, calls, stats)
+            }
         }
         "ts" | "tsx" => {
             let mut ts_parser = tree_sitter::Parser::new();

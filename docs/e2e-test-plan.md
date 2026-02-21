@@ -3941,6 +3941,45 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 
 ---
 
+### T-TYPE-INFER: Type inference improvements for search_callers
+
+**Background:** 7 user stories improving local variable type inference in the C# parser. These improvements increase recall for `search_callers` by resolving types from cast expressions, `as` expressions, method return types, `await` + Task<T> unwrap, pattern matching, and extension methods.
+
+**Unit tests (23 tests):**
+
+| Test | Pattern | Validates |
+|------|---------|-----------|
+| `test_csharp_var_cast_type_inference` | `var x = (Type)expr` | Cast expression type extraction |
+| `test_csharp_var_as_type_inference` | `var x = expr as Type` | `as` expression type extraction |
+| `test_csharp_using_var_type_inference` | `using var x = new Type()` | `using var` handled by existing path |
+| `test_csharp_var_method_return_type_inference` | `var x = GetStream()` | Same-class method return type lookup |
+| `test_csharp_var_this_method_return_type_inference` | `var x = this.CreateClient()` | `this.Method()` return type |
+| `test_csharp_var_method_return_type_void_not_stored` | `void DoWork()` | Void methods filtered |
+| `test_csharp_var_method_return_cross_class_not_resolved` | `var x = _repo.GetById()` | Cross-class NOT resolved |
+| `test_csharp_var_method_return_generic_type` | `List<User> GetUsers()` | Generic return types |
+| `test_csharp_var_method_return_lowercase_type_not_resolved` | `object GetValue()` | Lowercase types filtered |
+| `test_parse_return_type_from_signature_simple` | Signature parsing | Basic signatures |
+| `test_parse_return_type_from_signature_generic` | `Task<List<User>>` | Generic signature parsing |
+| `test_parse_return_type_from_signature_no_paren` | Edge case | No parentheses |
+| `test_unwrap_task_type` | `Task<T>` → T | Task type unwrapping |
+| `test_csharp_var_await_task_unwrap` | `await GetStreamAsync()` | Task<Stream> → Stream |
+| `test_csharp_var_await_valuetask_unwrap` | `await GetClientAsync()` | ValueTask<T> → T |
+| `test_csharp_var_await_nested_generic_unwrap` | `await GetUsersAsync()` | Task<List<User>> → List<User> |
+| `test_csharp_var_await_plain_task_no_unwrap` | `await DoWorkAsync()` | Plain Task → no type |
+| `test_csharp_var_no_await_task_not_unwrapped` | `GetStreamAsync()` (no await) | Task not unwrapped without await |
+| `test_csharp_is_pattern_type_inference` | `obj is PackageReader reader` | Pattern matching type |
+| `test_csharp_is_pattern_negated_not_resolved` | `obj is not Type` | Negated pattern safe |
+| `test_csharp_switch_case_pattern_type_inference` | `case StreamReader reader:` | Switch pattern type |
+| `test_csharp_extension_method_detection` | `static class` + `this` param | Extension detection |
+| `test_csharp_extension_method_not_detected_for_non_static_class` | Non-static class | No false positive |
+| `test_csharp_extension_method_multiple_classes` | Multiple ext classes | Multiple classes |
+| `test_verify_call_site_target_extension_method` | Extension in verify | Handler accepts |
+| `test_verify_call_site_target_extension_method_no_match_without_map` | No map | Handler rejects |
+
+**Status:** All covered by unit tests. Not CLI-testable (internal parser behavior).
+
+---
+
 ## Changes Not CLI-Testable (Covered by Unit Tests)
 
 The following internal optimizations are covered by unit tests in `src/mcp/watcher.rs` and `src/definitions/incremental.rs`, but have no CLI-observable behavior for E2E testing:

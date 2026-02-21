@@ -39,6 +39,16 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Features
 
+- **Type inference improvements for `search_callers` (7 user stories)** — Improved recall for `verify_call_site_target()` by adding 6 new type inference paths for local variables in C#:
+  1. **Return type inference (US-1)**: `var stream = GetDataStream()` now resolves to the return type of same-class methods via signature parsing. Uses `parse_return_type_from_signature()` with angle-bracket-aware tokenization for generic types.
+  2. **Cast expression (US-2)**: `var reader = (PackageReader)obj` → `reader : PackageReader`
+  3. **`as` expression (US-3)**: `var reader = obj as PackageReader` → `reader : PackageReader`
+  4. **`await` + Task unwrap (US-5)**: `var stream = await GetStreamAsync()` where return type is `Task<Stream>` → unwraps to `stream : Stream`. Handles `Task<T>` and `ValueTask<T>`.
+  5. **Extension method detection (US-6)**: Builds extension method index during definition parsing (static classes with `this` parameter methods). `verify_call_site_target()` accepts extension method calls regardless of receiver type.
+  6. **Pattern matching (US-7)**: `if (obj is PackageReader reader)` and `case StreamReader reader:` → extracts type from `declaration_pattern` AST node.
+
+  US-4 (`using var`) was verified to already work — tree-sitter C# parses it as `local_declaration_statement`. 23 new unit tests.
+
 - **`search_git_pickaxe` MCP tool** — New tool that finds commits where specific text was added or removed using git pickaxe (`git log -S`/`-G`). Unlike `search_git_history` which shows all commits for a file, pickaxe finds exactly the commits where a given string or regex first appeared or was deleted. Supports exact text (`-S`) and regex (`-G`) modes, optional file filter, date range filters, and `maxResults` limit. Patch output truncated to 2000 chars per commit. Tool count: 16. 14 new unit tests.
 
 - **`search_branch_status` MCP tool** — New tool that shows the current git branch status before investigating production bugs. Returns: current branch name, whether it's main/master, how far behind/ahead of remote main, uncommitted (dirty) files list, last fetch timestamp with human-readable age, and a warning if the index is built on a non-main branch or is behind remote. Fetch age warnings use thresholds: < 1 hour (none), 1–24 hours (info), 1–7 days (outdated), > 7 days (recommend fetch). Tool count: 15. 14 new unit tests (6 handler tests + 8 helper function tests).

@@ -201,6 +201,10 @@ pub struct DefinitionIndex {
     /// Always populated when --definitions is used.
     #[serde(default)]
     pub code_stats: HashMap<u32, CodeStats>,
+    /// Extension method name → Vec of static class names containing the extension.
+    /// Populated during C# parsing by detecting static classes with `this` parameter methods.
+    #[serde(default)]
+    pub extension_methods: HashMap<String, Vec<String>>,
 }
 
 impl Default for DefinitionIndex {
@@ -222,6 +226,7 @@ impl Default for DefinitionIndex {
             parse_errors: 0,
             lossy_file_count: 0,
             empty_file_ids: Vec::new(),
+            extension_methods: HashMap::new(),
         }
     }
 }
