@@ -43,7 +43,7 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 
    > **Tip:** Include non-code file extensions like `csproj`, `xml`, `config`, `manifestxml` in `--ext` to search NuGet dependencies, project settings, connection strings, and other configuration files alongside your code.
 
-4. **Restart VS Code** — the MCP server starts automatically. Your AI agent (Copilot, Roo, Claude) now has access to all MCP tools. The server also sends an `instructions` field during MCP initialization with best practices for tool selection.
+4. **Restart VS Code** — the MCP server starts automatically. Your MCP-compatible AI agent (Roo Code, Cline, etc.) now has access to all MCP tools. The server also sends an `instructions` field during MCP initialization with best practices for tool selection.
 
 5. **Verify** — ask the AI: _"Use search_grep to find all files containing HttpClient"_
 

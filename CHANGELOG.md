@@ -17,6 +17,8 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Documentation
 
+- **Fixed inaccurate Copilot MCP claim in docs** — `README.md` and `docs/mcp-guide.md` incorrectly listed "Copilot" as an MCP-compatible client. GitHub Copilot does not read `.vscode/mcp.json`, does not launch local stdio servers, and is not an MCP client. Changed "(VS Code Roo, Copilot, Claude)" → "(Roo Code, Cline, or any MCP-compatible client)" in both files.
+
 - **CLI help, LLM instructions, and documentation updated for new features** — 6 documentation changes across the codebase:
   1. `src/cli/args.rs` — Added 5 missing tools to AVAILABLE TOOLS list (`search_git_blame`, `search_branch_status`, `search_git_pickaxe`, `search_help`, `search_reindex_definitions`), bringing the list from 11 to 16 tools
   2. `src/tips.rs` — Added 3 new tips (branch status check, pickaxe usage, noCache parameter), 1 new "Code History Investigation" strategy recipe, git tools brief mention in `render_instructions()`, and `search_branch_status` in tool priority list

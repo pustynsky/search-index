@@ -56,7 +56,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Regex support** — full Rust regex syntax for pattern matching
 - **Respects `.gitignore`** — automatically skips ignored files
 - **Extension filtering** — limit search to specific file types
-- **MCP Server** — native Model Context Protocol server for AI agents (VS Code Roo, Copilot, Claude) with async startup
+- **MCP Server** — native Model Context Protocol server for AI agents (Roo Code, Cline, or any MCP-compatible client) with async startup
 - **Code definition index** — tree-sitter AST parsing for structural code search *(C# and TypeScript/TSX)*
 - **Code complexity metrics** — 7 metrics computed during AST indexing: cyclomatic complexity, cognitive complexity (SonarSource), max nesting depth, parameter count, return/throw count, call count, lambda count. Query with `includeCodeStats`, sort by any metric, filter with `min*` thresholds
 - **Parallel tokenization** — content index tokenization parallelized across all CPU cores
