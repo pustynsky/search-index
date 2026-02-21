@@ -5353,15 +5353,36 @@ echo $msgs | search serve --dir . --ext rs
 
 ---
 
-### T-GIT-BLAME-04: Blame date formatting
+### T-GIT-BLAME-04: Blame date formatting with timezone offset
 
-**Scenario:** `format_blame_date()` converts Unix timestamp + timezone offset to human-readable date string.
+**Scenario:** `format_blame_date()` converts Unix timestamp + timezone offset to human-readable local date string, applying the timezone offset to the timestamp before formatting.
 
 **Expected:**
 
-- `format_blame_date(1700000000, "+0000")` starts with `"2023-11-14"` and ends with `"+0000"`
+- `format_blame_date(1700000000, "+0000")` → `"2023-11-14 22:13:20 +0000"` (UTC baseline)
+- `format_blame_date(1700000000, "+0300")` → `"2023-11-15 01:13:20 +0300"` (crosses midnight)
+- `format_blame_date(1700000000, "-0500")` → `"2023-11-14 17:13:20 -0500"` (goes back 5h)
+- `format_blame_date(1700000000, "+0545")` → `"2023-11-15 03:58:20 +0545"` (Nepal quarter-hour offset)
 
-**Unit test:** `test_format_blame_date`
+**Unit tests:** `test_format_blame_date`, `test_format_blame_date_positive_offset`, `test_format_blame_date_negative_offset`, `test_format_blame_date_nepal_offset`, `test_parse_tz_offset`
+
+---
+
+### T-GIT-BLAME-05: Blame date timezone offset parsing
+
+**Scenario:** `parse_tz_offset()` converts timezone offset strings to seconds.
+
+**Expected:**
+
+- `parse_tz_offset("+0000")` → `0`
+- `parse_tz_offset("+0300")` → `10800`
+- `parse_tz_offset("-0500")` → `-18000`
+- `parse_tz_offset("+0545")` → `20700` (Nepal — 5h45m)
+- `parse_tz_offset("")` → `0` (empty)
+- `parse_tz_offset("UTC")` → `0` (text zone)
+- `parse_tz_offset("+00")` → `0` (truncated)
+
+**Unit test:** `test_parse_tz_offset`
 
 ---
 

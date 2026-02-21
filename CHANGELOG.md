@@ -6,6 +6,18 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-02-21
+
+### Bug Fixes
+
+- **Mutex `into_inner().unwrap()` → graceful recovery** — Added `recover_mutex<T>()` helper in `src/index.rs` that handles poisoned mutex with a warning log instead of panicking. Applied to 3 locations: file index build (`src/index.rs`), content index build (`src/index.rs`), and definition index build (`src/definitions/mod.rs`). Consistent with the `.lock().unwrap_or_else(|e| e.into_inner())` pattern already used for mutex lock operations throughout the codebase.
+
+- **`format_blame_date` timezone offset not applied** — `format_blame_date()` in `src/git/mod.rs` now applies the timezone offset string (e.g., `+0300`, `-0500`, `+0545`) to the Unix timestamp before civil date calculation. Previously, the timezone string was displayed but not used in the date math, causing all blame dates to show UTC time regardless of the author's timezone. Added `parse_tz_offset()` helper. 5 new tests for timezone formatting and 9 assertions for offset parsing.
+
+- **`next_day()` broken fallback** — The `next_day()` function in `src/git/mod.rs` previously appended `T23:59:59` to unparseable date strings, producing invalid git date arguments. Now logs a warning and returns the original date string unchanged. This path is unreachable in practice (`validate_date()` is always called first), but the fix prevents silent corruption if the code path is ever reached. 1 new test for malformed date fallback.
+
+---
+
 ## 2026-02-20
 
 ### Features
@@ -137,12 +149,12 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 | Metric | Value |
 |--------|-------|
-| Total PRs | 25 |
+| Total PRs | 26 |
 | Features | 19 |
-| Bug Fixes | 5 |
+| Bug Fixes | 8 |
 | Performance | 3 |
 | Internal | 5 |
-| Unit tests (latest) | 474+ |
+| Unit tests (latest) | 603+ |
 | E2E tests (latest) | 47+ |
 | Binary size reduction | 20.4 MB → 9.8 MB (−52%) |
 | Index size reduction | 566 MB → 327 MB (−42%, LZ4) |

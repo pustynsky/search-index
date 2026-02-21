@@ -69,7 +69,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         })
     });
 
-    let files: Vec<String> = all_files.into_inner().unwrap();
+    let files: Vec<String> = crate::index::recover_mutex(all_files, "def-index");
     let total_files = files.len();
     eprintln!("[def-index] Found {} files to parse", total_files);
 

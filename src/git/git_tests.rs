@@ -375,8 +375,51 @@ fn test_parse_blame_porcelain_empty_input() {
 }
 
 #[test]
+fn test_next_day_malformed_fallback() {
+    // Fallback should return original date unchanged (not append garbage)
+    assert_eq!(next_day("baddate"), "baddate");
+    assert_eq!(next_day(""), "");
+}
+
+// ─── format_blame_date / parse_tz_offset tests ─────────────────────
+
+#[test]
 fn test_format_blame_date() {
+    // UTC — baseline (no offset)
     let date = format_blame_date(1700000000, "+0000");
-    assert!(date.starts_with("2023-11-14"), "Expected 2023-11-14, got {}", date);
-    assert!(date.ends_with("+0000"));
+    assert_eq!(date, "2023-11-14 22:13:20 +0000");
+}
+
+#[test]
+fn test_format_blame_date_positive_offset() {
+    // +0300 — crosses midnight (UTC 22:13 + 3h = next day 01:13)
+    let date = format_blame_date(1700000000, "+0300");
+    assert_eq!(date, "2023-11-15 01:13:20 +0300");
+}
+
+#[test]
+fn test_format_blame_date_negative_offset() {
+    // -0500 — goes back 5 hours
+    let date = format_blame_date(1700000000, "-0500");
+    assert_eq!(date, "2023-11-14 17:13:20 -0500");
+}
+
+#[test]
+fn test_format_blame_date_nepal_offset() {
+    // +0545 — quarter-hour offset (Nepal)
+    let date = format_blame_date(1700000000, "+0545");
+    assert_eq!(date, "2023-11-15 03:58:20 +0545");
+}
+
+#[test]
+fn test_parse_tz_offset() {
+    assert_eq!(parse_tz_offset("+0000"), 0);
+    assert_eq!(parse_tz_offset("+0300"), 10800);
+    assert_eq!(parse_tz_offset("-0500"), -18000);
+    assert_eq!(parse_tz_offset("+0545"), 20700);
+    assert_eq!(parse_tz_offset("+1200"), 43200);
+    assert_eq!(parse_tz_offset("-1200"), -43200);
+    assert_eq!(parse_tz_offset(""), 0);       // empty
+    assert_eq!(parse_tz_offset("UTC"), 0);    // text zone
+    assert_eq!(parse_tz_offset("+00"), 0);    // truncated
 }

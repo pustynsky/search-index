@@ -14,6 +14,20 @@ use search::{clean_path, extract_semantic_prefix, generate_trigrams, read_file_l
 
 use crate::{ContentIndexArgs, IndexArgs};
 
+/// Recover data from a Mutex, handling poisoned state gracefully.
+/// If the mutex was poisoned (a thread panicked while holding the lock),
+/// logs a warning and recovers the data. This is consistent with the
+/// `.lock().unwrap_or_else(|e| e.into_inner())` pattern used throughout.
+pub(crate) fn recover_mutex<T>(mutex: std::sync::Mutex<T>, label: &str) -> T {
+    match mutex.into_inner() {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[WARN] {} mutex was poisoned (a worker thread panicked), recovering data", label);
+            e.into_inner()
+        }
+    }
+}
+
 // ─── LZ4 compression helpers ────────────────────────────────────────
 
 /// Magic bytes identifying LZ4-compressed index files.
@@ -334,7 +348,7 @@ pub fn build_index(args: &IndexArgs) -> FileIndex {
         })
     });
 
-    let entries = entries.into_inner().unwrap();
+    let entries = recover_mutex(entries, "file-index");
     let count = entries.len();
 
     let now = SystemTime::now()
@@ -418,7 +432,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
         })
     });
 
-    let file_data = file_data.into_inner().unwrap();
+    let file_data = recover_mutex(file_data, "content-index");
     let file_count = file_data.len();
     let min_len = args.min_token_len;
 
