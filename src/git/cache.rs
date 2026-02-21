@@ -206,7 +206,7 @@ impl GitHistoryCacheBuilder {
     }
 
     /// Convert builder into a finalized cache.
-    fn build(mut self, head_hash: String, branch: String) -> GitHistoryCache {
+    pub(crate) fn build(mut self, head_hash: String, branch: String) -> GitHistoryCache {
         // Shrink allocations to fit
         self.commits.shrink_to_fit();
         self.authors.shrink_to_fit();

@@ -10,6 +10,31 @@ use crate::clean_path;
 
 use super::HandlerContext;
 
+// ─── Branch warning ─────────────────────────────────────────────────
+
+/// Returns a warning message if the current branch is not `main` or `master`.
+/// Used by index-based tools (search_grep, search_definitions, search_callers,
+/// search_fast) to alert the user that results may differ from production.
+pub(crate) fn branch_warning(ctx: &HandlerContext) -> Option<String> {
+    ctx.current_branch.as_ref().and_then(|b| {
+        if b == "main" || b == "master" {
+            None
+        } else {
+            Some(format!(
+                "Index is built on branch '{}', not on main/master. Results may differ from production.",
+                b
+            ))
+        }
+    })
+}
+
+/// Inject branchWarning into a summary JSON object if needed.
+pub(crate) fn inject_branch_warning(summary: &mut Value, ctx: &HandlerContext) {
+    if let Some(warning) = branch_warning(ctx) {
+        summary["branchWarning"] = serde_json::Value::String(warning);
+    }
+}
+
 // ─── Dir validation ─────────────────────────────────────────────────
 
 /// Normalize path separators to forward slashes for cross-platform comparison.
@@ -1072,5 +1097,96 @@ mod tests {
         assert_eq!(best_match_tier("UserService", &terms), 1);
         // "IUserService" contains "user" but doesn't start with it → tier 2
         assert_eq!(best_match_tier("IUserService", &terms), 2);
+    }
+
+    // ─── branch_warning tests ─────────────────────────────────────────
+
+    /// Helper: create a minimal HandlerContext with a given current_branch.
+    fn make_ctx_with_branch(branch: Option<&str>) -> HandlerContext {
+        use std::sync::atomic::AtomicBool;
+        use crate::{ContentIndex, TrigramIndex};
+
+        let index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec![],
+            file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(index)),
+            def_index: None,
+            server_dir: ".".to_string(),
+            server_ext: "cs".to_string(),
+            metrics: false,
+            index_base: std::path::PathBuf::from("."),
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
+            content_ready: std::sync::Arc::new(AtomicBool::new(true)),
+            def_ready: std::sync::Arc::new(AtomicBool::new(true)),
+            git_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            git_cache_ready: std::sync::Arc::new(AtomicBool::new(false)),
+            current_branch: branch.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn test_branch_warning_feature_branch() {
+        let ctx = make_ctx_with_branch(Some("feature/xyz"));
+        let warning = branch_warning(&ctx);
+        assert!(warning.is_some());
+        let msg = warning.unwrap();
+        assert!(msg.contains("feature/xyz"));
+        assert!(msg.contains("not on main/master"));
+    }
+
+    #[test]
+    fn test_branch_warning_main_branch() {
+        let ctx = make_ctx_with_branch(Some("main"));
+        assert!(branch_warning(&ctx).is_none());
+    }
+
+    #[test]
+    fn test_branch_warning_master_branch() {
+        let ctx = make_ctx_with_branch(Some("master"));
+        assert!(branch_warning(&ctx).is_none());
+    }
+
+    #[test]
+    fn test_branch_warning_none_branch() {
+        let ctx = make_ctx_with_branch(None);
+        assert!(branch_warning(&ctx).is_none());
+    }
+
+    #[test]
+    fn test_inject_branch_warning_adds_field() {
+        let ctx = make_ctx_with_branch(Some("users/dev/my-feature"));
+        let mut summary = json!({"totalFiles": 5});
+        inject_branch_warning(&mut summary, &ctx);
+        assert!(summary.get("branchWarning").is_some());
+        let warning = summary["branchWarning"].as_str().unwrap();
+        assert!(warning.contains("users/dev/my-feature"));
+    }
+
+    #[test]
+    fn test_inject_branch_warning_skips_main() {
+        let ctx = make_ctx_with_branch(Some("main"));
+        let mut summary = json!({"totalFiles": 5});
+        inject_branch_warning(&mut summary, &ctx);
+        assert!(summary.get("branchWarning").is_none());
+    }
+
+    #[test]
+    fn test_inject_branch_warning_skips_none() {
+        let ctx = make_ctx_with_branch(None);
+        let mut summary = json!({"totalFiles": 5});
+        inject_branch_warning(&mut summary, &ctx);
+        assert!(summary.get("branchWarning").is_none());
     }
 }

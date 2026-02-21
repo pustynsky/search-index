@@ -13,7 +13,7 @@ use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionK
 use search::generate_trigrams;
 
 use super::HandlerContext;
-use super::utils::sorted_intersect;
+use super::utils::{inject_branch_warning, sorted_intersect};
 
 /// Built-in JavaScript/TypeScript types whose methods should never be resolved
 /// to user-defined classes. When a call site has one of these as its receiver type,
@@ -171,6 +171,13 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
         let truncated = total_nodes >= max_total_nodes;
         let search_elapsed = search_start.elapsed();
+        let mut summary = json!({
+            "nodesVisited": visited.len(),
+            "totalNodes": total_nodes,
+            "truncated": truncated,
+            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+        });
+        inject_branch_warning(&mut summary, ctx);
         let mut output = json!({
             "callTree": tree,
             "query": {
@@ -180,12 +187,7 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
                 "maxCallersPerLevel": max_callers_per_level,
                 "maxTotalNodes": max_total_nodes,
             },
-            "summary": {
-                "nodesVisited": visited.len(),
-                "totalNodes": total_nodes,
-                "truncated": truncated,
-                "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-            }
+            "summary": summary
         });
         if let Some(ref warning) = ambiguity_warning {
             output["warning"] = json!(warning);
@@ -211,6 +213,11 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
 
         let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
         let search_elapsed = search_start.elapsed();
+        let mut summary = json!({
+            "totalNodes": total_nodes,
+            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+        });
+        inject_branch_warning(&mut summary, ctx);
         let mut output = json!({
             "callTree": tree,
             "query": {
@@ -220,10 +227,7 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
                 "maxCallersPerLevel": max_callers_per_level,
                 "maxTotalNodes": max_total_nodes,
             },
-            "summary": {
-                "totalNodes": total_nodes,
-                "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-            }
+            "summary": summary
         });
         if let Some(ref warning) = ambiguity_warning {
             output["warning"] = json!(warning);

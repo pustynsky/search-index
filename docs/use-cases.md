@@ -237,6 +237,33 @@ Total: <3 milliseconds
 
 ---
 
+### 🕵️ 8. When Was This Error Introduced?
+
+**Situation:** A new error message `"Entry not found for tenant"` appears in production logs. You need to find exactly when and by whom it was introduced.
+
+```json
+// Step 1: Verify you're on the right branch (45ms)
+{"repo": "."}
+→ branch=main, behindMain=0, fetchAge="2 hours ago" ✓
+
+// Step 2: Find the exact commit that introduced the text (~1.5s)
+{"repo": ".", "text": "Entry not found for tenant", "maxResults": 3}
+→ commit abc123de by Alice on 2025-01-10: "Add tenant validation to EntryService"
+
+// Step 3: See who maintains the file (< 1ms from cache)
+{"repo": ".", "path": "src/Services/EntryService.cs", "top": 3}
+→ Alice (42 commits), Bob (17 commits), Carol (5 commits)
+
+// Step 4: Get full commit context (~2s)
+{"repo": ".", "file": "src/Services/EntryService.cs", "from": "2025-01-09", "to": "2025-01-11"}
+→ full diff showing the exact lines added
+```
+
+**Tools used:** `search_branch_status` → `search_git_pickaxe` → `search_git_authors` → `search_git_diff`
+**Total time:** ~4 seconds. Without search-index: ~10 minutes of `git log`, `git blame`, manual searching.
+
+---
+
 ### ⚡ Time Savings Summary
 
 | Scenario | Without | With | Speedup |
@@ -270,12 +297,12 @@ flowchart TD
     MGR2 -->|Get metadata| ENG[Database Engine - DMV queries]
     MGR2 -->|Read cached schemas| BLOB[(Blob Storage)]
     MGR2 -->|Write results| BLOB
-    
+
     Client2[REST Client] -->|GET /status| GW2[API Gateway]
     GW2 --> CTRL2[Controller]
     CTRL2 --> MGR3[Manager]
     MGR3 -->|Check job status| DB
-    
+
     Client3[REST Client] -->|GET /result| GW3[API Gateway]
     GW3 --> CTRL3[Controller]
     CTRL3 --> MGR4[Manager]

@@ -263,6 +263,7 @@ Index directory: C:\Users\you\AppData\Local\search-index
 
   [FILE] C:\Windows — 333875 entries, 47.8 MB, 0.1h ago
   [CONTENT] C:\Projects — 48986 files, 33229888 tokens, exts: [cs, rs], 242.7 MB, 0.5h ago
+  [GIT]  branch=main  commits=12345  files=2500  authors=42  HEAD=abc123de  1.2 MB  0.5 hours
 ```
 
 ---

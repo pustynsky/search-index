@@ -79,6 +79,11 @@ pub fn validate_date(s: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Public wrapper for next_day, used by MCP handler for pickaxe date filters.
+pub fn next_day_public(date: &str) -> String {
+    next_day(date)
+}
+
 /// Increment a YYYY-MM-DD date by one day for --before filter.
 /// Simple implementation that handles month/year boundaries.
 fn next_day(date: &str) -> String {
@@ -152,6 +157,15 @@ const FIELD_SEP: &str = "␞";
 /// Separator between records in git log output.
 const RECORD_SEP: &str = "␟";
 
+/// Public accessor for FIELD_SEP (used by MCP handler).
+pub const FIELD_SEP_STR: &str = FIELD_SEP;
+/// Public accessor for RECORD_SEP (used by MCP handler).
+pub const RECORD_SEP_STR: &str = RECORD_SEP;
+/// FIELD_SEP as a char for splitting.
+pub const FIELD_SEP_CHAR: char = '␞';
+/// RECORD_SEP as a char for splitting.
+pub const RECORD_SEP_CHAR: char = '␟';
+
 /// Build common git log arguments for date filtering.
 ///
 /// Appends `T00:00:00Z` to force UTC interpretation, matching the cache path
@@ -166,6 +180,12 @@ fn add_date_args(cmd: &mut Command, filter: &DateFilter) {
         let next = next_day(to);
         cmd.arg(format!("--before={}T00:00:00Z", next));
     }
+}
+
+/// Run a git command and return stdout as String.
+/// Public wrapper for use by MCP handlers.
+pub fn run_git_public(cmd: &mut Command) -> Result<String, String> {
+    run_git(cmd)
 }
 
 /// Run a git command and return stdout as String.
@@ -445,6 +465,26 @@ pub fn repo_activity(
     }
 
     Ok((file_history, commits_processed))
+}
+
+// ─── File existence check ───────────────────────────────────────────
+
+/// Check whether a file is tracked by git in the given repository.
+///
+/// Runs `git ls-files -- <file>` and returns `true` if the output is non-empty
+/// (i.e., the file is tracked). Returns `false` if the file is not tracked or
+/// if the git command fails (e.g., invalid repo path).
+pub fn file_exists_in_git(repo: &str, file: &str) -> bool {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(repo)
+        .arg("ls-files")
+        .arg("--")
+        .arg(file);
+
+    match run_git(&mut cmd) {
+        Ok(output) => !output.trim().is_empty(),
+        Err(_) => false,
+    }
 }
 
 // ─── Blame ──────────────────────────────────────────────────────────

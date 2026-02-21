@@ -254,6 +254,7 @@ fn make_ts_ctx_with_defs() -> HandlerContext {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     }
 }
 
@@ -366,6 +367,7 @@ fn make_ts_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
     (ctx, tmp_dir)
 }
@@ -840,6 +842,7 @@ fn test_ts_search_callers_inject_support() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // search_callers up: who calls getUser in UserService?
@@ -963,6 +966,7 @@ fn test_mixed_cs_ts_definitions_query() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // Query by name — should find both C# and TS versions
@@ -1104,6 +1108,7 @@ fn test_mixed_cs_ts_callers_ext_filter() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // Without ext filter — should find callers from both languages
@@ -1209,6 +1214,7 @@ fn test_tsx_file_support_through_handler() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // Find class in .tsx file
@@ -1302,6 +1308,7 @@ fn test_ts_incremental_update_through_handler() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // Verify OldService is found
@@ -1434,6 +1441,7 @@ fn test_ts_search_definitions_exclude_dir() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // Exclude __tests__ directory
@@ -1625,6 +1633,7 @@ fn test_ts_direction_down_with_typed_local_variable() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // direction=down from Orchestrator.run() should find DataProcessor.transform()

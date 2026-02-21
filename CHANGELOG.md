@@ -8,7 +8,43 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-21
 
+### Documentation
+
+- **CLI help, LLM instructions, and documentation updated for new features** — 6 documentation changes across the codebase:
+  1. `src/cli/args.rs` — Added 5 missing tools to AVAILABLE TOOLS list (`search_git_blame`, `search_branch_status`, `search_git_pickaxe`, `search_help`, `search_reindex_definitions`), bringing the list from 11 to 16 tools
+  2. `src/tips.rs` — Added 3 new tips (branch status check, pickaxe usage, noCache parameter), 1 new "Code History Investigation" strategy recipe, git tools brief mention in `render_instructions()`, and `search_branch_status` in tool priority list
+  3. `docs/mcp-guide.md` — Added "File Not Found Warning" section documenting the `warning` field in git tool responses when a file doesn't exist in git
+  4. `docs/cli-reference.md` — Added `[GIT]` example output line to `search info` section
+  5. `README.md` — Added "Branch awareness" feature mention for `branchWarning`
+  6. `docs/use-cases.md` — Added "When Was This Error Introduced?" use case showing `search_branch_status` → `search_git_pickaxe` → `search_git_authors` → `search_git_diff` workflow
+
+### Features
+
+- **`search_git_pickaxe` MCP tool** — New tool that finds commits where specific text was added or removed using git pickaxe (`git log -S`/`-G`). Unlike `search_git_history` which shows all commits for a file, pickaxe finds exactly the commits where a given string or regex first appeared or was deleted. Supports exact text (`-S`) and regex (`-G`) modes, optional file filter, date range filters, and `maxResults` limit. Patch output truncated to 2000 chars per commit. Tool count: 16. 14 new unit tests.
+
+- **`search_branch_status` MCP tool** — New tool that shows the current git branch status before investigating production bugs. Returns: current branch name, whether it's main/master, how far behind/ahead of remote main, uncommitted (dirty) files list, last fetch timestamp with human-readable age, and a warning if the index is built on a non-main branch or is behind remote. Fetch age warnings use thresholds: < 1 hour (none), 1–24 hours (info), 1–7 days (outdated), > 7 days (recommend fetch). Tool count: 15. 14 new unit tests (6 handler tests + 8 helper function tests).
+
+- **`branchWarning` in index-based tool responses** — When the MCP server is started on a branch other than `main` or `master`, all index-based tool responses (`search_grep`, `search_definitions`, `search_callers`, `search_fast`) now include a `branchWarning` field in the `summary` object: `"Index is built on branch '<name>', not on main/master. Results may differ from production."` The branch is detected at server startup via `git rev-parse --abbrev-ref HEAD`. Warning is absent on `main`/`master`, when not in a git repo, or when git is unavailable. Git tools are not affected (they query git directly). 7 new unit tests.
+
+- **Empty results validation in `search_git_history`** — When `search_git_history` returns 0 commits, the tool now checks whether the queried file is tracked by git. If the file doesn't exist in git, the response includes a `"warning"` field: `"File not found in git: <path>. Check the path."`. This helps users distinguish between "no commits in the date range" and "wrong file path". Works in both cache and CLI fallback paths. New `file_exists_in_git()` helper function. 5 new unit tests, 2 new E2E test scenarios (T70, T70b).
+
+- **`noCache` parameter for git tools** — Added `noCache` boolean parameter to `search_git_history`, `search_git_authors`, and `search_git_activity`. When `true`, bypasses the in-memory git history cache and queries git CLI directly. Useful when cache may be stale after recent commits. Default is `false` (use cache when available). 5 new unit tests.
+
+### Performance
+
+- **Trigram pre-warming on server start** — Added `ContentIndex::warm_up()` method that forces all trigram index pages into resident memory after deserialization. Previously, the first 1-2 substring queries took ~3.4 seconds due to OS page faults on freshly deserialized memory. Pre-warming touches all trigram posting lists, token strings, and inverted index HashMap buckets in a background thread at server startup, eliminating the cold-start penalty without delaying server readiness. Runs after both the disk-load fast path and the background-build path. Stderr logging: `[warmup] Starting trigram pre-warm...` / `[warmup] Trigram pre-warm completed in X.Xms (N trigrams, M tokens)`. 4 new unit tests.
+
+### Internal
+
+- **Substring search timing instrumentation** — Added `[substring-trace]` `eprintln!` timing traces to `handle_substring_search()` in `grep.rs` for diagnosing slow cold-start substring queries (~3.4s on first 1-2 queries). Traces cover 8 stages: terms parsing, trigram dirty check + rebuild, trigram intersection (per term), token verification (`.contains()`), main index lookups, file filter checks, response JSON building, and total elapsed time. Always-on via stderr (no feature flag), does not interfere with MCP protocol on stdout. Also instruments the trigram rebuild path in `handle_search_grep()`. E2E test plan updated with T-SUBSTRING-TRACE scenario.
+
+### Features
+
+- **Git history cache in `search info` / `search_info`** — The `info` CLI command and MCP `search_info` tool now display `.git-history` cache files alongside existing index types (`.file-list`, `.word-search`, `.code-structure`). CLI output shows `[GIT]` entries with branch, commit count, file count, author count, HEAD hash (first 8 chars), size, and age. MCP JSON output includes `type: "git-history"` entries with full metadata. Previously, `.git-history` cache files existed on disk but were silently skipped by the info command. 4 new unit tests.
+
 ### Bug Fixes
+
+- **File-not-found warning in `search_git_authors` and `search_git_activity`** — When these tools return 0 results and a `path`/`file` parameter was provided, they now check whether the path exists in git. If not found, the response includes `"warning": "File not found in git: <path>. Check the path."` — matching the existing behavior of `search_git_history`. Works in both cache and CLI fallback paths. 4 new unit tests.
 
 - **7 bugs found and fixed via code review** — Comprehensive code review of `callers.rs`, `grep.rs`, and `utils.rs` found 7 bugs (2 major, 4 minor, 1 cosmetic). All fixed with tests:
   - **`is_implementation_of` dead code in production (BUG-CR-2, MAJOR)** — `verify_call_site_target()` lowercased both arguments before calling `is_implementation_of()`, which checks for uppercase `'I'` prefix — always returned false. Fuzzy DI matching (e.g., `IDataModelService` → `DataModelWebService`) never worked in the call verification path. Unit tests passed because they called the function with original-case inputs directly. **Fix:** pass original-case values from `verify_call_site_target()`. 2 new regression tests.
@@ -170,13 +206,13 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 | Metric | Value |
 |--------|-------|
-| Total PRs | 27 |
-| Features | 19 |
+| Total PRs | 28 |
+| Features | 20 |
 | Bug Fixes | 10 |
 | Performance | 3 |
 | Internal | 5 |
-| Unit tests (latest) | 624+ |
-| E2E tests (latest) | 47+ |
+| Unit tests (latest) | 659+ |
+| E2E tests (latest) | 48+ |
 | Binary size reduction | 20.4 MB → 9.8 MB (−52%) |
 | Index size reduction | 566 MB → 327 MB (−42%, LZ4) |
 | Memory reduction | 3.7 GB → 2.1 GB (−43%) |

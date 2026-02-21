@@ -45,6 +45,14 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
 
 - **Tracked files only** — when committing to branches (via `commit_and_push`, `git add`, or any other tool), always stage only tracked (modified) files. Never auto-add untracked files. Use `git add -u` / `includeUntrackedFiles: false`. Untracked files must be added explicitly by the user.
 
+## MCP Tool Design Rules
+
+- **⚠️ NO new combo tools** — never create a new MCP tool that internally calls multiple existing tools (e.g., a `search_blast_radius` that combines `search_callers` + `search_grep` + `search_git_authors`). Each new tool increases the tool selection burden on the LLM. Currently we have 14 tools — at 20+ the LLM starts to degrade in tool selection accuracy.
+- **Extend existing tools with parameters** — if a feature combines data from multiple indexes, add it as an optional parameter to the most relevant existing tool. Example: `crossServiceScan: true` in `search_callers` (internally calls `search_grep`) is correct — the LLM doesn't need to choose a new tool, just add a flag.
+- **Before implementing a new tool, ask**: "Can this be a parameter on an existing tool?" If yes — do that instead.
+- **If a new tool IS genuinely needed** (new data source, fundamentally different operation), keep it atomic — one index, one data source, one concern. Examples of correct atomic tools: `search_grep` (content index), `search_definitions` (definition index), `search_git_blame` (git CLI).
+- **Tool count budget**: aim to stay under 16 tools total. Every tool beyond that should have a strong justification.
+
 ## Lessons Learned
 
 - **Verify facts, don't assume** — always run `git status` / `git log` before stating whether a file is tracked, staged, or committed. Never claim a file's git state from memory — check it.

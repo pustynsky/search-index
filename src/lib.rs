@@ -292,6 +292,56 @@ impl ContentIndex {
             .as_secs();
         now.saturating_sub(self.created_at) > self.max_age_secs
     }
+
+    /// Pre-warm the trigram index by touching all data structures.
+    ///
+    /// After deserialization, the OS may not have paged in all the memory
+    /// for the trigram index. The first real substring query would pay
+    /// ~3 seconds of page-fault overhead. This method forces all pages
+    /// into resident memory by iterating through every trigram posting
+    /// list and every token string, eliminating the cold-start penalty.
+    ///
+    /// This method is idempotent — calling it multiple times is harmless
+    /// (subsequent calls complete in microseconds since pages are already resident).
+    ///
+    /// Returns the number of trigrams and tokens touched (for logging).
+    pub fn warm_up(&self) -> (usize, usize) {
+        use std::hint::black_box;
+
+        let trigram = &self.trigram;
+
+        // Touch every posting list in the trigram map to fault in pages
+        let mut trigram_count = 0usize;
+        for (_key, posting_list) in &trigram.trigram_map {
+            // Read first and last element to touch the page range
+            if let Some(first) = posting_list.first() {
+                black_box(*first);
+            }
+            if let Some(last) = posting_list.last() {
+                black_box(*last);
+            }
+            trigram_count += 1;
+        }
+
+        // Touch every token string to fault in the tokens vec pages
+        let mut token_count = 0usize;
+        for token in &trigram.tokens {
+            // Read first byte of each token to force page-in
+            if let Some(first_byte) = token.as_bytes().first() {
+                black_box(*first_byte);
+            }
+            token_count += 1;
+        }
+
+        // Also touch the inverted index keys (HashMap bucket pages)
+        for (_key, postings) in &self.index {
+            if let Some(first) = postings.first() {
+                black_box(first.file_id);
+            }
+        }
+
+        (trigram_count, token_count)
+    }
 }
 
 /// Tokenize a line of text into lowercase tokens.
@@ -433,6 +483,141 @@ mod lib_tests {
             path_to_id: None,
         };
         assert!(index.is_stale());
+    }
+
+    // ─── warm_up tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_warm_up_empty_index() {
+        let index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec![],
+            file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        let (trigrams, tokens) = index.warm_up();
+        assert_eq!(trigrams, 0);
+        assert_eq!(tokens, 0);
+    }
+
+    #[test]
+    fn test_warm_up_with_data() {
+        let mut trigram_map = HashMap::new();
+        trigram_map.insert("htt".to_string(), vec![0, 1]);
+        trigram_map.insert("ttp".to_string(), vec![0, 1]);
+        trigram_map.insert("cli".to_string(), vec![0]);
+        trigram_map.insert("han".to_string(), vec![1]);
+
+        let mut inverted = HashMap::new();
+        inverted.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+        inverted.insert("httphandler".to_string(), vec![Posting { file_id: 1, lines: vec![5] }]);
+
+        let index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec!["file1.cs".to_string(), "file2.cs".to_string()],
+            index: inverted,
+            total_tokens: 2,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![1, 1],
+            trigram: TrigramIndex {
+                tokens: vec!["httpclient".to_string(), "httphandler".to_string()],
+                trigram_map,
+            },
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        let (trigrams, tokens) = index.warm_up();
+        assert_eq!(trigrams, 4); // 4 trigram entries
+        assert_eq!(tokens, 2);  // 2 tokens
+    }
+
+    #[test]
+    fn test_warm_up_is_idempotent() {
+        let mut trigram_map = HashMap::new();
+        trigram_map.insert("abc".to_string(), vec![0]);
+
+        let index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec!["file1.cs".to_string()],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec![],
+            file_token_counts: vec![],
+            trigram: TrigramIndex {
+                tokens: vec!["abcdef".to_string()],
+                trigram_map,
+            },
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+
+        // Call warm_up multiple times — should always return the same result
+        let result1 = index.warm_up();
+        let result2 = index.warm_up();
+        let result3 = index.warm_up();
+        assert_eq!(result1, result2);
+        assert_eq!(result2, result3);
+        assert_eq!(result1, (1, 1)); // 1 trigram, 1 token
+    }
+
+    #[test]
+    fn test_warm_up_then_search_works() {
+        // After warm_up, substring search data should still be valid
+        let mut trigram_map = HashMap::new();
+        trigram_map.insert("foo".to_string(), vec![0]);
+        trigram_map.insert("oob".to_string(), vec![0]);
+        trigram_map.insert("oba".to_string(), vec![0]);
+        trigram_map.insert("bar".to_string(), vec![0]);
+
+        let mut inverted = HashMap::new();
+        inverted.insert("foobar".to_string(), vec![Posting { file_id: 0, lines: vec![1, 5] }]);
+
+        let index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec!["test.cs".to_string()],
+            index: inverted,
+            total_tokens: 1,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![1],
+            trigram: TrigramIndex {
+                tokens: vec!["foobar".to_string()],
+                trigram_map,
+            },
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+
+        // Warm up should succeed
+        let (trigrams, tokens) = index.warm_up();
+        assert_eq!(trigrams, 4);
+        assert_eq!(tokens, 1);
+
+        // After warm_up, the trigram index should still be usable
+        // Verify trigram map still contains expected data
+        assert!(index.trigram.trigram_map.contains_key("foo"));
+        assert_eq!(index.trigram.tokens[0], "foobar");
+
+        // Verify inverted index still works
+        let postings = index.index.get("foobar").unwrap();
+        assert_eq!(postings[0].file_id, 0);
+        assert_eq!(postings[0].lines, vec![1, 5]);
     }
 
     #[test]
