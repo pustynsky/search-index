@@ -69,13 +69,26 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         }
         raw.min(10) as usize
     };
-    let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("up");
+    let direction = {
+        let raw = args.get("direction").and_then(|v| v.as_str()).unwrap_or("up");
+        let d = raw.to_lowercase();
+        if d != "up" && d != "down" {
+            return ToolCallResult::error(format!(
+                "Invalid direction '{}'. Must be 'up' or 'down'.", raw
+            ));
+        }
+        d
+    };
+    let direction = direction.as_str();
     let ext_filter = args.get("ext").and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| ctx.server_ext.clone());
     let resolve_interfaces = args.get("resolveInterfaces").and_then(|v| v.as_bool()).unwrap_or(true);
     let max_callers_per_level = args.get("maxCallersPerLevel").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
-    let max_total_nodes = args.get("maxTotalNodes").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+    let max_total_nodes = {
+        let raw = args.get("maxTotalNodes").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+        if raw == 0 { usize::MAX } else { raw }
+    };
     let exclude_dir: Vec<String> = args.get("excludeDir")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
@@ -428,11 +441,13 @@ fn verify_call_site_target(
                 }
                 // Fuzzy DI interface matching: IDataModelService → DataModelWebService
                 // Check if target_class is an implementation of the receiver interface
-                if is_implementation_of(&target_lower, &rt_lower) {
+                // NOTE: pass original-case values — is_implementation_of checks for
+                // uppercase 'I' prefix and would always fail on lowercased inputs.
+                if is_implementation_of(target_class, rt) {
                     return true;
                 }
                 // Reverse: receiver is the implementation, target is the interface
-                if is_implementation_of(&rt_lower, &target_lower) {
+                if is_implementation_of(rt, target_class) {
                     return true;
                 }
             }
@@ -2034,6 +2049,70 @@ mod tests {
         // "UnrelatedRunner" does NOT contain "Service" → should NOT match
         assert!(!verify_call_site_target(&def_idx, 1, 25, "run", Some("UnrelatedRunner")),
             "IService → UnrelatedRunner should NOT match (no 'Service' in class name)");
+    }
+
+    // ─── Test 22a: Fuzzy DI via verify_call_site_target WITHOUT base_types ──
+    // This is the key regression test for BUG #2: is_implementation_of was dead code
+    // because verify_call_site_target passed lowercased inputs, but the function
+    // checked for uppercase 'I'. Now we pass original-case values.
+
+    #[test]
+    fn test_verify_fuzzy_di_without_base_types() {
+        // DataModelWebService does NOT declare IDataModelService in base_types
+        // but follows the naming convention (contains stem "DataModelService")
+        // Receiver is IDataModelService → should match via is_implementation_of
+        let definitions = vec![
+            class_def(0, "SomeController", vec![]),                        // idx 0
+            method_def(0, "process", "SomeController", 20, 40),           // idx 1
+            class_def(1, "DataModelWebService", vec![]),                   // idx 2 — NO base_types!
+            method_def(1, "getData", "DataModelWebService", 10, 30),      // idx 3
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(1u32, vec![
+            CallSite {
+                method_name: "getData".to_string(),
+                receiver_type: Some("IDataModelService".to_string()),
+                line: 25,
+                receiver_is_generic: false,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        // Without base_types, the only way to match is via is_implementation_of
+        // This test would FAIL before the BUG #2 fix (lowercased inputs)
+        assert!(verify_call_site_target(&def_idx, 1, 25, "getData", Some("DataModelWebService")),
+            "IDataModelService → DataModelWebService should match via is_implementation_of (fuzzy DI) even without base_types");
+    }
+
+    // ─── Test 22b: Reverse fuzzy DI — target is interface, receiver is implementation ──
+
+    #[test]
+    fn test_verify_reverse_fuzzy_di_without_base_types() {
+        // Target is IDataModelService, receiver is DataModelWebService
+        let definitions = vec![
+            class_def(0, "SomeController", vec![]),                        // idx 0
+            method_def(0, "process", "SomeController", 20, 40),           // idx 1
+            class_def(1, "SomeService", vec![]),                           // idx 2
+            method_def(1, "getData", "SomeService", 10, 30),              // idx 3
+        ];
+
+        let mut method_calls = HashMap::new();
+        method_calls.insert(1u32, vec![
+            CallSite {
+                method_name: "getData".to_string(),
+                receiver_type: Some("DataModelWebService".to_string()),
+                line: 25,
+                receiver_is_generic: false,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        // Reverse: target is IDataModelService, receiver is DataModelWebService
+        assert!(verify_call_site_target(&def_idx, 1, 25, "getData", Some("IDataModelService")),
+            "DataModelWebService → IDataModelService should match via reverse is_implementation_of");
     }
 
     // ─── Test 22: find_implementations_of_interface via base_type_index ──

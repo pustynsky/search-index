@@ -65,6 +65,21 @@ pub(crate) fn is_under_dir(file_path: &str, dir_prefix: &str) -> bool {
     file_norm.starts_with(&dir_norm)
 }
 
+// ─── Extension filter helper ────────────────────────────────────────
+
+/// Check if a file path's extension matches a filter string.
+/// Supports comma-separated extensions: `"cs,sql"` matches both `.cs` and `.sql`.
+/// Comparison is case-insensitive. Whitespace around extensions is trimmed.
+pub(crate) fn matches_ext_filter(file_path: &str, ext_filter: &str) -> bool {
+    std::path::Path::new(file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| {
+            ext_filter.split(',')
+                .any(|allowed| e.eq_ignore_ascii_case(allowed.trim()))
+        })
+}
+
 // ─── Set operations ─────────────────────────────────────────────────
 
 /// Merge-intersect two sorted u32 slices. Returns sorted intersection.
@@ -452,10 +467,15 @@ pub(crate) fn inject_body_into_obj(
         return;
     }
 
-    // Read file via cache
+    // Read file via cache (use read_file_lossy to handle non-UTF-8 files
+    // like Windows-1252 encoded content — BUG #6 fix)
     let content_opt = file_cache
         .entry(file_path.to_string())
-        .or_insert_with(|| std::fs::read_to_string(file_path).ok())
+        .or_insert_with(|| {
+            crate::read_file_lossy(std::path::Path::new(file_path))
+                .ok()
+                .map(|(content, _lossy)| content)
+        })
         .clone();
 
     match content_opt {
@@ -1011,6 +1031,38 @@ mod tests {
         assert_eq!(best_match_tier("UserService", &terms), 0);
         // "IUserService" is exact for "iuserservice" → 0
         assert_eq!(best_match_tier("IUserService", &terms), 0);
+    }
+
+    // ─── matches_ext_filter tests ────────────────────────────────────
+
+    #[test]
+    fn test_matches_ext_filter_single() {
+        assert!(matches_ext_filter("src/file.cs", "cs"));
+        assert!(!matches_ext_filter("src/file.ts", "cs"));
+    }
+
+    #[test]
+    fn test_matches_ext_filter_multi() {
+        assert!(matches_ext_filter("src/file.cs", "cs,sql"));
+        assert!(matches_ext_filter("src/file.sql", "cs,sql"));
+        assert!(!matches_ext_filter("src/file.ts", "cs,sql"));
+    }
+
+    #[test]
+    fn test_matches_ext_filter_case_insensitive() {
+        assert!(matches_ext_filter("src/file.CS", "cs"));
+        assert!(matches_ext_filter("src/file.cs", "CS"));
+    }
+
+    #[test]
+    fn test_matches_ext_filter_with_spaces() {
+        assert!(matches_ext_filter("src/file.cs", " cs , sql "));
+        assert!(matches_ext_filter("src/file.sql", " cs , sql "));
+    }
+
+    #[test]
+    fn test_matches_ext_filter_no_extension() {
+        assert!(!matches_ext_filter("Makefile", "cs"));
     }
 
     #[test]

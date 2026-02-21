@@ -353,7 +353,8 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "ab", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    assert!(output["summary"]["warning"].is_string());
+    assert!(output["summary"]["warnings"].is_array(),
+        "Expected 'warnings' array in summary, got: {}", output["summary"]);
 }
 
 #[test] fn test_substring_search_mutually_exclusive_with_regex() {
@@ -634,7 +635,8 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "ok", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    assert!(output["summary"]["warning"].is_string());
+    assert!(output["summary"]["warnings"].is_array(),
+        "Expected 'warnings' array in summary, got: {}", output["summary"]);
     cleanup_tmp(&tmp);
 }
 

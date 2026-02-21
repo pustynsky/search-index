@@ -1,7 +1,6 @@
 //! search_grep handler: token search, substring search, phrase search.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::time::Instant;
 
 use serde_json::{json, Value};
@@ -12,7 +11,8 @@ use crate::index::build_trigram_index;
 use search::generate_trigrams;
 
 use super::utils::{
-    build_line_content_from_matches, is_under_dir, sorted_intersect, validate_search_dir,
+    build_line_content_from_matches, is_under_dir, matches_ext_filter, sorted_intersect,
+    validate_search_dir,
 };
 use super::HandlerContext;
 
@@ -128,6 +128,11 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
         .filter(|s| !s.is_empty())
         .collect();
 
+    // BUG #7 fix: check for empty terms after filtering (consistent with substring mode)
+    if raw_terms.is_empty() {
+        return ToolCallResult::error("No search terms provided".to_string());
+    }
+
     // If regex mode, expand each pattern
     let terms: Vec<String> = if use_regex {
         let mut expanded = Vec::new();
@@ -171,13 +176,9 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
                     if !is_under_dir(file_path, prefix) { continue; }
                 }
 
-                // Extension filter
+                // Extension filter (BUG #1 fix: supports comma-separated extensions)
                 if let Some(ref ext) = ext_filter {
-                    let matches = Path::new(file_path)
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
-                    if !matches { continue; }
+                    if !matches_ext_filter(file_path, ext) { continue; }
                 }
 
                 // Exclude dir filter
@@ -405,13 +406,9 @@ fn handle_substring_search(
                         if !is_under_dir(file_path, prefix) { continue; }
                     }
 
-                    // Extension filter
+                    // Extension filter (BUG #1 fix: supports comma-separated extensions)
                     if let Some(ext) = ext_filter {
-                        let matches = Path::new(file_path)
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .is_some_and(|e| e.eq_ignore_ascii_case(ext));
-                        if !matches { continue; }
+                        if !matches_ext_filter(file_path, ext) { continue; }
                     }
 
                     // Exclude dir filter
@@ -496,7 +493,7 @@ fn handle_substring_search(
             "matchedTokens": all_matched_tokens,
         });
         if !warnings.is_empty() {
-            summary["warning"] = json!(warnings[0]);
+            summary["warnings"] = json!(warnings);
         }
         let output = json!({
             "summary": summary
@@ -530,7 +527,7 @@ fn handle_substring_search(
         "matchedTokens": all_matched_tokens,
     });
     if !warnings.is_empty() {
-        summary["warning"] = json!(warnings[0]);
+        summary["warnings"] = json!(warnings);
     }
     let output = json!({
         "files": files_json,
@@ -586,10 +583,7 @@ fn handle_phrase_search(
                         if !is_under_dir(path, prefix) { return false; }
                     }
                     if let Some(ext) = ext_filter {
-                        let m = Path::new(path).extension()
-                            .and_then(|e| e.to_str())
-                            .is_some_and(|e| e.eq_ignore_ascii_case(ext));
-                        if !m { return false; }
+                        if !matches_ext_filter(path, ext) { return false; }
                     }
                     if exclude_dir.iter().any(|excl| path.to_lowercase().contains(&excl.to_lowercase())) {
                         return false;

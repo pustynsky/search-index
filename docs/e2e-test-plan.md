@@ -5499,6 +5499,107 @@ echo $msgs | search serve --dir . --ext rs
 
 ---
 
+### T-CR-01: `search_callers` — Fuzzy DI matching works via `is_implementation_of` (BUG-CR-2)
+
+**Tool:** `search_callers`
+
+**Scenario:** When a class `DataModelWebService` does NOT declare `IDataModelService` in its `base_types` but follows the naming convention (contains stem "DataModelService"), callers through `IDataModelService` should still be found via fuzzy DI matching in `is_implementation_of()`. Previously this was dead code because the function received lowercased inputs.
+
+**Expected:**
+
+- `verify_call_site_target` returns `true` for receiver `IDataModelService` → target `DataModelWebService` even without `base_types`
+- The stem "DataModelService" (from `IDataModelService`) is checked as a substring of `DataModelWebService`
+- No false positives: `IService` → `UnrelatedRunner` does NOT match (stem "Service" not in "UnrelatedRunner")
+
+**Unit tests:** [`test_verify_fuzzy_di_without_base_types`](../src/mcp/handlers/callers.rs), [`test_verify_reverse_fuzzy_di_without_base_types`](../src/mcp/handlers/callers.rs)
+
+---
+
+### T-CR-02: `search_grep` — Multi-extension ext filter (BUG-CR-1)
+
+**Tool:** `search_grep`
+
+**Scenario:** Passing `ext: "cs,sql"` should match both `.cs` and `.sql` files. Previously, the ext filter compared the entire string (e.g., `"cs" == "cs,sql"` → false), silently returning zero results.
+
+**Expected:**
+
+- `ext: "cs,sql"` returns files with both `.cs` and `.sql` extensions
+- `ext: "cs"` still works (single extension)
+- Case-insensitive: `ext: "CS"` matches `.cs` files
+- Whitespace trimmed: `ext: " cs , sql "` works
+
+**Unit tests:** [`test_matches_ext_filter_single`](../src/mcp/handlers/utils.rs), [`test_matches_ext_filter_multi`](../src/mcp/handlers/utils.rs), [`test_matches_ext_filter_case_insensitive`](../src/mcp/handlers/utils.rs), [`test_matches_ext_filter_with_spaces`](../src/mcp/handlers/utils.rs)
+
+---
+
+### T-CR-03: `search_callers` — `maxTotalNodes: 0` means unlimited (BUG-CR-3)
+
+**Tool:** `search_callers`
+
+**Scenario:** Passing `maxTotalNodes: 0` should treat 0 as unlimited (not return empty tree). Previously, `0 >= 0` was always true, causing immediate return.
+
+**Expected:**
+
+- `maxTotalNodes: 0` returns results (treated as `usize::MAX`)
+- Default `maxTotalNodes: 200` still works
+
+---
+
+### T-CR-04: `search_callers` — Invalid direction returns error (BUG-CR-4)
+
+**Tool:** `search_callers`
+
+**Scenario:** Passing `direction: "sideways"` or `direction: "UP"` should be handled. Invalid values return an error. Case-insensitive comparison: `"UP"` is accepted as `"up"`.
+
+**Expected:**
+
+- `direction: "up"` and `direction: "UP"` both work (case-insensitive)
+- `direction: "down"` and `direction: "DOWN"` both work
+- `direction: "sideways"` returns error: `"Invalid direction 'sideways'. Must be 'up' or 'down'."`
+
+---
+
+### T-CR-05: `search_grep` — Warnings array (BUG-CR-5)
+
+**Tool:** `search_grep`
+
+**Scenario:** Short substring queries now return `summary.warnings` (array) instead of `summary.warning` (string). **Breaking change** for consumers reading the `warning` key.
+
+**Expected:**
+
+- Short query (`terms: "ab"`, `substring: true`) returns `summary.warnings` as a JSON array
+- The old `summary.warning` key is no longer present
+
+**Unit tests:** [`test_substring_search_short_query_warning`](../src/mcp/handlers/handlers_tests.rs), [`e2e_substring_search_short_query_warning`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+### T-CR-06: `inject_body_into_obj` — Non-UTF-8 files handled via `read_file_lossy` (BUG-CR-6)
+
+**Tool:** `search_definitions` (with `includeBody: true`)
+
+**Scenario:** Files with non-UTF-8 content (e.g., Windows-1252 encoded) should have their body content returned via `read_file_lossy` instead of failing with `bodyError`. Previously, `std::fs::read_to_string` was used which fails on non-UTF-8 files.
+
+**Expected:**
+
+- Non-UTF-8 files return `body` array with lossy-converted content (replacement characters for invalid bytes)
+- No `bodyError` for files that were successfully indexed
+
+---
+
+### T-CR-07: `search_grep` — Empty terms in normal mode returns error (BUG-CR-7)
+
+**Tool:** `search_grep`
+
+**Scenario:** Passing `terms: ",,,"` in normal token mode should return an explicit error, consistent with substring mode behavior. Previously, normal mode silently returned empty results.
+
+**Expected:**
+
+- `isError: true`
+- Error message: `"No search terms provided"`
+
+---
+
 ### T-VAL-06: `search_grep` — `contextLines` auto-enables `showLines` (BUG-6)
 
 **Tool:** `search_grep`

@@ -49,7 +49,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "ext": {
                         "type": "string",
-                        "description": "File extension filter, e.g. 'cs', 'csproj', 'xml', 'config' (default: server's --ext)"
+                        "description": "File extension filter. Supports comma-separated for multiple extensions, e.g. 'cs', 'cs,sql', 'xml,config' (default: no filter — searches all indexed extensions)"
                     },
                     "mode": {
                         "type": "string",

@@ -10,6 +10,15 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Bug Fixes
 
+- **7 bugs found and fixed via code review** — Comprehensive code review of `callers.rs`, `grep.rs`, and `utils.rs` found 7 bugs (2 major, 4 minor, 1 cosmetic). All fixed with tests:
+  - **`is_implementation_of` dead code in production (BUG-CR-2, MAJOR)** — `verify_call_site_target()` lowercased both arguments before calling `is_implementation_of()`, which checks for uppercase `'I'` prefix — always returned false. Fuzzy DI matching (e.g., `IDataModelService` → `DataModelWebService`) never worked in the call verification path. Unit tests passed because they called the function with original-case inputs directly. **Fix:** pass original-case values from `verify_call_site_target()`. 2 new regression tests.
+  - **`search_grep` ext filter single-string comparison (BUG-CR-1)** — `search_grep` compared the ext filter as a whole string (e.g., `"cs" == "cs,sql"` → false), while `search_callers` correctly split by comma. Extracted shared `matches_ext_filter()` helper. Also fixed misleading doc: schema said "(default: server's --ext)" but actual default was None. 5 new unit tests.
+  - **`inject_body_into_obj` uses `read_to_string` (BUG-CR-6)** — Files with non-UTF-8 content (Windows-1252) failed body reads while the definition index was built with `read_file_lossy`. Now uses `read_file_lossy` for consistency. ~44 lossy files no longer show `bodyError`.
+  - **Normal grep mode missing empty terms check (BUG-CR-7)** — `terms: ",,,"` silently returned empty results in normal mode but gave an explicit error in substring mode. Added consistent empty terms check.
+  - **`maxTotalNodes: 0` returns empty tree (BUG-CR-3)** — `0 >= 0` was always true, causing immediate return. Now treats 0 as unlimited (`usize::MAX`).
+  - **`direction` parameter accepts any value as "down" (BUG-CR-4)** — `"UP"`, `"sideways"`, etc. silently ran as "down". Added validation with case-insensitive comparison.
+  - **Warnings array shows only first warning (BUG-CR-5, cosmetic)** — Changed from `summary["warning"]` (singular string) to `summary["warnings"]` (array) for future-proofing. **Breaking change** for consumers reading `warning` key.
+
 - **`search_grep` substring `matchedTokens` data leak (BUG-7)** — `matchedTokens` in substring search responses was populated from the global trigram index before applying `dir`/`ext`/`exclude` filters, showing tokens from files outside the requested scope. Now `matchedTokens` only includes tokens that have at least one file passing all filters. Affects `countOnly` and full response modes.
 
 - **Input validation hardening (6 bugs fixed)** — Systematic input validation improvements across MCP tools, found via manual fuzzing:
@@ -166,7 +175,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 | Bug Fixes | 10 |
 | Performance | 3 |
 | Internal | 5 |
-| Unit tests (latest) | 613+ |
+| Unit tests (latest) | 624+ |
 | E2E tests (latest) | 47+ |
 | Binary size reduction | 20.4 MB → 9.8 MB (−52%) |
 | Index size reduction | 566 MB → 327 MB (−42%, LZ4) |
