@@ -10,6 +10,16 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Bug Fixes
 
+- **Input validation hardening (6 bugs fixed)** — Systematic input validation improvements across MCP tools, found via manual fuzzing:
+  - `search_definitions`: `name: ""` now treated as "no filter" instead of returning 0 results (BUG-1)
+  - `search_definitions`: `containsLine: -1` now returns error instead of silently returning ALL definitions (BUG-2, most critical)
+  - `search_callers`: `depth: 0` now returns error instead of empty tree (BUG-3)
+  - `search_git_history`/`search_git_diff`/`search_git_activity`: reversed date range (`from > to`) now returns descriptive error instead of silently returning 0 results (BUG-4)
+  - `search_fast`: `pattern: ""` now returns error instead of scanning 97K files for 0 results (BUG-5)
+  - `search_grep`: `contextLines > 0` now auto-enables `showLines: true` instead of silently ignoring context (BUG-6)
+
+- **Panic-safety in background threads** — `.write().unwrap()` on `RwLock` in `serve.rs` (4 places) replaced with `.write().unwrap_or_else(|e| e.into_inner())` to handle poisoned locks gracefully (MAJOR-1). `.join().unwrap()` on thread handles in `index.rs` and `definitions/mod.rs` replaced with `unwrap_or_else` + warning log to survive individual worker thread panics during index building (MAJOR-2).
+
 - **Mutex `into_inner().unwrap()` → graceful recovery** — Added `recover_mutex<T>()` helper in `src/index.rs` that handles poisoned mutex with a warning log instead of panicking. Applied to 3 locations: file index build (`src/index.rs`), content index build (`src/index.rs`), and definition index build (`src/definitions/mod.rs`). Consistent with the `.lock().unwrap_or_else(|e| e.into_inner())` pattern already used for mutex lock operations throughout the codebase.
 
 - **`format_blame_date` timezone offset not applied** — `format_blame_date()` in `src/git/mod.rs` now applies the timezone offset string (e.g., `+0300`, `-0500`, `+0545`) to the Unix timestamp before civil date calculation. Previously, the timezone string was displayed but not used in the date math, causing all blame dates to show UTC time regardless of the author's timezone. Added `parse_tz_offset()` helper. 5 new tests for timezone formatting and 9 assertions for offset parsing.
@@ -74,7 +84,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
   - `search_git_diff` — commit history with full diff/patch (truncated to ~200 lines per commit)
   - `search_git_authors` — top authors for a file ranked by commit count
   - `search_git_activity` — repo-wide activity (all changed files) for a date range
-  
+
   All tools support `from`/`to`/`date` filters and `maxResults` (default: 50). Performance: ~2 sec for single file, ~8 sec for full year in a 13K-commit repo. Response truncation via existing `truncate_large_response` mechanism.
 
 - **Code complexity metrics (`includeCodeStats`)** — `search_definitions` now computes and returns 7 code complexity metrics for methods/functions during AST indexing: cyclomatic complexity, cognitive complexity (SonarSource), max nesting depth, parameter count, return/throw count, call count (fan-out), and lambda count. Always computed when `--definitions` is used (~2-5% CPU overhead, ~7 MB RAM). Query with `includeCodeStats=true` to see metrics, or use `sortBy` (e.g., `sortBy='cognitiveComplexity'`) and `min*` filters (e.g., `minComplexity=10`, `minParams=5`) to find complex methods. Supports C# and TypeScript/TSX.
@@ -149,12 +159,12 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 | Metric | Value |
 |--------|-------|
-| Total PRs | 26 |
+| Total PRs | 27 |
 | Features | 19 |
-| Bug Fixes | 8 |
+| Bug Fixes | 10 |
 | Performance | 3 |
 | Internal | 5 |
-| Unit tests (latest) | 603+ |
+| Unit tests (latest) | 613+ |
 | E2E tests (latest) | 47+ |
 | Binary size reduction | 20.4 MB → 9.8 MB (−52%) |
 | Index size reduction | 566 MB → 327 MB (−42%, LZ4) |

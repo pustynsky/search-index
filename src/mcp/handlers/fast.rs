@@ -13,6 +13,9 @@ use super::utils::best_match_tier;
 
 pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
+        Some(p) if p.is_empty() => return ToolCallResult::error(
+            "Empty pattern. Provide a file name or pattern to search for.".to_string()
+        ),
         Some(p) => p.to_string(),
         None => return ToolCallResult::error("Missing required parameter: pattern".to_string()),
     };

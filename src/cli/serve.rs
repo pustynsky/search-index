@@ -82,7 +82,7 @@ pub fn cmd_serve(args: ServeArgs) {
         } else {
             idx
         };
-        *index.write().unwrap() = idx;
+        *index.write().unwrap_or_else(|e| e.into_inner()) = idx;
         content_ready.store(true, Ordering::Release);
     } else {
         // Build in background — don't block the event loop
@@ -137,7 +137,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 tokens = token_count,
                 "Content index ready (background build complete)"
             );
-            *bg_index.write().unwrap() = new_idx;
+            *bg_index.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
             bg_ready.store(true, Ordering::Release);
         });
     }
@@ -188,7 +188,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 files = idx.files.len(),
                 "Definition index loaded from disk"
             );
-            *def_arc.write().unwrap() = idx;
+            *def_arc.write().unwrap_or_else(|e| e.into_inner()) = idx;
             def_ready.store(true, Ordering::Release);
         } else {
             // Build in background
@@ -229,7 +229,7 @@ pub fn cmd_serve(args: ServeArgs) {
                     files = file_count,
                     "Definition index ready (background build complete)"
                 );
-                *bg_def.write().unwrap() = new_idx;
+                *bg_def.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
                 bg_def_ready.store(true, Ordering::Release);
             });
         }

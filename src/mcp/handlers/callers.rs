@@ -60,7 +60,15 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
     };
     let class_filter = args.get("class").and_then(|v| v.as_str()).map(|s| s.to_string());
 
-    let max_depth = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3).min(10) as usize;
+    let max_depth = {
+        let raw = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3);
+        if raw == 0 {
+            return ToolCallResult::error(
+                "depth must be >= 1. Use depth=1 to find direct callers without recursion.".to_string()
+            );
+        }
+        raw.min(10) as usize
+    };
     let direction = args.get("direction").and_then(|v| v.as_str()).unwrap_or("up");
     let ext_filter = args.get("ext").and_then(|v| v.as_str())
         .map(|s| s.to_string())

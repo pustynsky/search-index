@@ -160,7 +160,10 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
             })
         }).collect();
 
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| {
+            eprintln!("[WARN] Worker thread panicked during definition index building");
+            (Vec::new(), 0, Vec::new(), Vec::new())
+        })).collect()
     });
 
     // ─── Merge results ────────────────────────────────────────

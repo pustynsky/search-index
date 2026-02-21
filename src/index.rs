@@ -484,7 +484,10 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
             })
             .collect();
 
-        handles.into_iter().map(|h| h.join().unwrap()).collect()
+        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| {
+            eprintln!("[WARN] Worker thread panicked during content index building");
+            (Vec::new(), Vec::new(), HashMap::new(), 0u64)
+        })).collect()
     });
 
     // Free raw file contents — no longer needed after tokenization.

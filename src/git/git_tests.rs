@@ -262,7 +262,7 @@ fn test_blame_lines_returns_results() {
     assert!(result.is_ok(), "Should succeed: {:?}", result.err());
     let lines = result.unwrap();
     assert_eq!(lines.len(), 3, "Should return 3 blame lines");
-    
+
     for line in &lines {
         assert!(!line.hash.is_empty(), "Hash should not be empty");
         assert!(!line.author_name.is_empty(), "Author should not be empty");
@@ -422,4 +422,27 @@ fn test_parse_tz_offset() {
     assert_eq!(parse_tz_offset(""), 0);       // empty
     assert_eq!(parse_tz_offset("UTC"), 0);    // text zone
     assert_eq!(parse_tz_offset("+00"), 0);    // truncated
+}
+// ─── BUG-4: Reversed date range validation ──────────────────────────
+
+#[test]
+fn test_parse_date_filter_reversed_range_returns_error() {
+    // from > to should return an error (BUG-4 fix)
+    let result = parse_date_filter(Some("2026-12-31"), Some("2026-01-01"), None);
+    assert!(result.is_err(), "Reversed date range (from > to) should return error");
+    let err = result.unwrap_err();
+    assert!(err.contains("after"), "Error should mention 'after', got: {}", err);
+}
+
+#[test]
+fn test_parse_date_filter_same_dates_is_ok() {
+    // from == to is valid (single-day filter)
+    let result = parse_date_filter(Some("2026-06-15"), Some("2026-06-15"), None);
+    assert!(result.is_ok(), "Same from/to dates should be valid");
+}
+
+#[test]
+fn test_parse_date_filter_correct_order_is_ok() {
+    let result = parse_date_filter(Some("2026-01-01"), Some("2026-12-31"), None);
+    assert!(result.is_ok(), "Correct date order should be valid");
 }
