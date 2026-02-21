@@ -5398,3 +5398,100 @@ echo $msgs | search serve --dir . --ext rs
 
 **Unit tests:** `test_hex_to_bytes_roundtrip`, `test_hex_to_bytes_mixed_case`,
 `test_hex_to_bytes_invalid_length`, `test_hex_to_bytes_invalid_chars`
+
+
+---
+
+## Input Validation Bug Fix Tests
+
+### T-VAL-01: `search_definitions` — Empty name treated as no filter (BUG-1)
+
+**Tool:** `search_definitions`
+
+**Scenario:** Passing `name: ""` (empty string) should behave identically to not passing `name` at all — returning all definitions filtered only by other parameters.
+
+**Expected:**
+
+- `name: ""` returns the same `totalResults` as omitting `name` entirely
+- No error returned
+- `definitions` array is non-empty
+
+**Unit test:** [`test_search_definitions_empty_name_treated_as_no_filter`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+### T-VAL-02: `search_definitions` — Negative `containsLine` returns error (BUG-2)
+
+**Tool:** `search_definitions`
+
+**Scenario:** Passing `containsLine: -1` should return a validation error instead of silently returning all definitions from the file. This was the most critical bug: negative values caused `as_u64()` to return `None`, skipping the `containsLine` filter entirely.
+
+**Expected:**
+
+- `isError: true`
+- Error message: `"containsLine must be >= 1"`
+- `containsLine: 0` also returns error
+
+**Unit tests:** [`test_search_definitions_contains_line_negative_returns_error`](../src/mcp/handlers/handlers_tests.rs), [`test_search_definitions_contains_line_zero_returns_error`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+### T-VAL-03: `search_callers` — `depth: 0` returns error (BUG-3)
+
+**Tool:** `search_callers`
+
+**Scenario:** Passing `depth: 0` should return a validation error instead of silently returning an empty call tree.
+
+**Expected:**
+
+- `isError: true`
+- Error message: `"depth must be >= 1"`
+
+**Unit test:** [`test_search_callers_depth_zero_returns_error`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+### T-VAL-04: `search_git_history` — Reversed date range returns error (BUG-4)
+
+**Tool:** `search_git_history`, `search_git_diff`, `search_git_activity`
+
+**Scenario:** Passing `from: "2026-12-31", to: "2026-01-01"` (from > to) should return a descriptive error instead of silently returning 0 results.
+
+**Expected:**
+
+- `isError: true`
+- Error message: `"'from' date (2026-12-31) is after 'to' date (2026-01-01)"`
+- Works in both cache and CLI paths
+
+**Unit tests:** [`test_parse_date_filter_reversed_range_returns_error`](../src/git/git_tests.rs), [`test_git_history_cached_reversed_dates_returns_error`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+### T-VAL-05: `search_fast` — Empty pattern returns error (BUG-5)
+
+**Tool:** `search_fast`
+
+**Scenario:** Passing `pattern: ""` should return an error instead of scanning the entire file index for 0 results.
+
+**Expected:**
+
+- `isError: true`
+- Error message mentions "empty"
+
+**Unit test:** [`test_search_fast_empty_pattern_returns_error`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
+### T-VAL-06: `search_grep` — `contextLines` auto-enables `showLines` (BUG-6)
+
+**Tool:** `search_grep`
+
+**Scenario:** Passing `contextLines: 3` without `showLines: true` should automatically enable `showLines` and return line content with context.
+
+**Expected:**
+
+- `isError: false`
+- Response includes `lineContent` arrays (auto-enabled)
+- No need to explicitly pass `showLines: true` when `contextLines > 0`
+
+**Unit test:** [`test_search_grep_context_lines_auto_enables_show_lines`](../src/mcp/handlers/handlers_tests.rs)

@@ -2611,3 +2611,116 @@ fn test_search_grep_phrase_sort_by_occurrences() {
 
     cleanup_tmp(&tmp_dir);
 }
+// ═══════════════════════════════════════════════════════════════════════
+// Input validation bug fix tests (BUG-1 through BUG-6)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// BUG-1: search_definitions with name="" should behave like no name filter (return all).
+#[test]
+fn test_search_definitions_empty_name_treated_as_no_filter() {
+    let ctx = make_ctx_with_defs();
+    // With name="" — should return all definitions (empty string ignored)
+    let result_empty = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "",
+        "maxResults": 5
+    }));
+    assert!(!result_empty.is_error, "name='' should not error: {}", result_empty.content[0].text);
+    let output_empty: Value = serde_json::from_str(&result_empty.content[0].text).unwrap();
+    let count_empty = output_empty["summary"]["totalResults"].as_u64().unwrap();
+
+    // Without name — should return all definitions
+    let result_no_name = dispatch_tool(&ctx, "search_definitions", &json!({
+        "maxResults": 5
+    }));
+    let output_no_name: Value = serde_json::from_str(&result_no_name.content[0].text).unwrap();
+    let count_no_name = output_no_name["summary"]["totalResults"].as_u64().unwrap();
+
+    assert_eq!(count_empty, count_no_name,
+        "name='' should behave like no name filter. Got {} vs {} results",
+        count_empty, count_no_name);
+    assert!(count_empty > 0, "Should have some definitions in test context");
+}
+
+/// BUG-2: search_definitions with containsLine=-1 should return error.
+#[test]
+fn test_search_definitions_contains_line_negative_returns_error() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "QueryService",
+        "containsLine": -1
+    }));
+    assert!(result.is_error, "containsLine=-1 should return an error");
+    assert!(result.content[0].text.contains("containsLine must be >= 1"),
+        "Error should mention 'containsLine must be >= 1', got: {}", result.content[0].text);
+}
+
+/// BUG-2: search_definitions with containsLine=0 should return error.
+#[test]
+fn test_search_definitions_contains_line_zero_returns_error() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "QueryService",
+        "containsLine": 0
+    }));
+    assert!(result.is_error, "containsLine=0 should return an error");
+    assert!(result.content[0].text.contains("containsLine must be >= 1"),
+        "Error should mention 'containsLine must be >= 1', got: {}", result.content[0].text);
+}
+
+/// BUG-3: search_callers with depth=0 should return error.
+#[test]
+fn test_search_callers_depth_zero_returns_error() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "Execute",
+        "depth": 0
+    }));
+    assert!(result.is_error, "depth=0 should return an error");
+    assert!(result.content[0].text.contains("depth must be >= 1"),
+        "Error should mention 'depth must be >= 1', got: {}", result.content[0].text);
+}
+
+/// BUG-5: search_fast with pattern="" should return error.
+#[test]
+fn test_search_fast_empty_pattern_returns_error() {
+    let (ctx, tmp) = make_search_fast_ctx();
+    let result = handle_search_fast(&ctx, &json!({"pattern": ""}));
+    assert!(result.is_error, "Empty pattern should return an error");
+    assert!(result.content[0].text.to_lowercase().contains("empty"),
+        "Error should mention 'empty', got: {}", result.content[0].text);
+    cleanup_tmp(&tmp);
+}
+
+/// BUG-6: search_grep with contextLines>0 should auto-enable showLines.
+#[test]
+fn test_search_grep_context_lines_auto_enables_show_lines() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    // contextLines=3 without explicit showLines=true
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "httpclient",
+        "contextLines": 3
+    }));
+    assert!(!result.is_error, "contextLines without showLines should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+    if !files.is_empty() {
+        assert!(files[0].get("lineContent").is_some(),
+            "contextLines>0 should auto-enable showLines, but lineContent is missing");
+    }
+    cleanup_tmp(&tmp);
+}
+
+/// BUG-4: search_git_history with reversed date range should return error (cache path).
+#[test]
+fn test_git_history_cached_reversed_dates_returns_error() {
+    let ctx = make_ctx_with_git_cache();
+    let result = dispatch_tool(&ctx, "search_git_history", &json!({
+        "repo": ".",
+        "file": "src/main.rs",
+        "from": "2026-12-31",
+        "to": "2026-01-01"
+    }));
+    assert!(result.is_error, "Reversed date range should return error");
+    assert!(result.content[0].text.contains("after"),
+        "Error should mention 'after', got: {}", result.content[0].text);
+}

@@ -258,6 +258,7 @@ fn date_str_to_timestamp_end(date: &str) -> Result<i64, String> {
 
 /// Parse from/to/date strings into Option<i64> timestamps for cache queries.
 /// `date` overrides `from`/`to` (single-day filter).
+/// Returns error if `from` date is after `to` date (BUG-4).
 fn parse_cache_date_range(
     from: Option<&str>,
     to: Option<&str>,
@@ -276,6 +277,15 @@ fn parse_cache_date_range(
             Some(t) => Some(date_str_to_timestamp_end(t)?),
             None => None,
         };
+        // Validate from <= to (BUG-4: reversed date range silently returned 0 results)
+        if let (Some(f), Some(t)) = (from_ts, to_ts) {
+            if f > t {
+                return Err(format!(
+                    "'from' date ({}) is after 'to' date ({}). Swap them or correct the range.",
+                    from.unwrap_or("?"), to.unwrap_or("?")
+                ));
+            }
+        }
         Ok((from_ts, to_ts))
     }
 }

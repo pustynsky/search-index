@@ -39,13 +39,25 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
 
     let search_start = Instant::now();
 
-    let name_filter = args.get("name").and_then(|v| v.as_str());
+    let name_filter = args.get("name").and_then(|v| v.as_str())
+        .and_then(|s| if s.is_empty() { None } else { Some(s) });
     let kind_filter = args.get("kind").and_then(|v| v.as_str());
     let attribute_filter = args.get("attribute").and_then(|v| v.as_str());
     let base_type_filter = args.get("baseType").and_then(|v| v.as_str());
     let file_filter = args.get("file").and_then(|v| v.as_str());
     let parent_filter = args.get("parent").and_then(|v| v.as_str());
-    let contains_line = args.get("containsLine").and_then(|v| v.as_u64()).map(|v| v as u32);
+    let contains_line = match args.get("containsLine") {
+        Some(v) if v.is_i64() || v.is_u64() => {
+            match v.as_i64() {
+                Some(n) if n < 1 => return ToolCallResult::error(
+                    format!("containsLine must be >= 1, got {}", n)
+                ),
+                Some(n) => Some(n as u32),
+                None => None,
+            }
+        }
+        _ => None,
+    };
     let use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
     let max_results = args.get("maxResults")
         .and_then(|v| v.as_u64())

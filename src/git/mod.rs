@@ -128,6 +128,15 @@ pub fn parse_date_filter(
         if let Some(t) = to {
             validate_date(t)?;
         }
+        // Validate from <= to (BUG-4: reversed date range silently returned 0 results)
+        if let (Some(f), Some(t)) = (from, to) {
+            if f > t {
+                return Err(format!(
+                    "'from' date ({}) is after 'to' date ({}). Swap them or correct the range.",
+                    f, t
+                ));
+            }
+        }
         Ok(DateFilter {
             from_date: from.map(|s| s.to_string()),
             to_date: to.map(|s| s.to_string()),

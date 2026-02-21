@@ -57,8 +57,10 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
     } else {
         args.get("substring").and_then(|v| v.as_bool()).unwrap_or(true)
     };
-    let show_lines = args.get("showLines").and_then(|v| v.as_bool()).unwrap_or(false);
     let context_lines = args.get("contextLines").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    // Auto-enable showLines when contextLines > 0 (BUG-6: contextLines without showLines was silently ignored)
+    let show_lines = args.get("showLines").and_then(|v| v.as_bool()).unwrap_or(false)
+        || context_lines > 0;
     let max_results = args.get("maxResults").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
     let count_only = args.get("countOnly").and_then(|v| v.as_bool()).unwrap_or(false);
     let exclude_dir: Vec<String> = args.get("excludeDir")
