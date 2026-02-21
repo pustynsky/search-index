@@ -1266,12 +1266,13 @@ fn walk_ts_for_invocations(
             if let Some(call) = extract_ts_call(node, source, class_name, field_types) {
                 calls.push(call);
             }
-            // Walk into arguments for nested calls
+            // Recurse into ALL children — not just arguments.
+            // The function child (first child, typically member_expression)
+            // may contain nested call_expressions for chained calls like:
+            //   service.method1().method2().then(...)
             for i in 0..node.child_count() {
                 if let Some(child) = node.child(i) {
-                    if child.kind() == "arguments" {
-                        walk_ts_for_invocations(child, source, class_name, field_types, calls);
-                    }
+                    walk_ts_for_invocations(child, source, class_name, field_types, calls);
                 }
             }
             return;
@@ -1280,12 +1281,10 @@ fn walk_ts_for_invocations(
             if let Some(call) = extract_ts_new_expression(node, source) {
                 calls.push(call);
             }
-            // Walk into arguments for nested calls
+            // Same fix: recurse into all children to capture nested calls
             for i in 0..node.child_count() {
                 if let Some(child) = node.child(i) {
-                    if child.kind() == "arguments" {
-                        walk_ts_for_invocations(child, source, class_name, field_types, calls);
-                    }
+                    walk_ts_for_invocations(child, source, class_name, field_types, calls);
                 }
             }
             return;

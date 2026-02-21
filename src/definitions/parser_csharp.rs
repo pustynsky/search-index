@@ -204,11 +204,14 @@ fn walk_for_invocations(
             if let Some(call) = extract_invocation(node, source, class_name, field_types, base_types) {
                 calls.push(call);
             }
+            // Recurse into ALL children — not just argument_list.
+            // The expression child (first child, typically member_access_expression)
+            // may contain nested invocation_expressions for chained calls like:
+            //   a.Method1().Method2().ConfigureAwait(false)
+            // AST: invocation(member_access(invocation(member_access(...)), name), args)
             for i in 0..node.child_count() {
                 let child = node.child(i).unwrap();
-                if child.kind() == "argument_list" {
-                    walk_for_invocations(child, source, class_name, field_types, base_types, calls);
-                }
+                walk_for_invocations(child, source, class_name, field_types, base_types, calls);
             }
             return;
         }
@@ -216,11 +219,10 @@ fn walk_for_invocations(
             if let Some(call) = extract_object_creation(node, source) {
                 calls.push(call);
             }
+            // Same fix: recurse into all children to capture nested calls in arguments
             for i in 0..node.child_count() {
                 let child = node.child(i).unwrap();
-                if child.kind() == "argument_list" {
-                    walk_for_invocations(child, source, class_name, field_types, base_types, calls);
-                }
+                walk_for_invocations(child, source, class_name, field_types, base_types, calls);
             }
             return;
         }

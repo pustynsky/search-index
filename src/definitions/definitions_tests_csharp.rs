@@ -439,7 +439,9 @@ public class Processor {
     let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
     assert!(!rc.is_empty());
     let names: Vec<&str> = rc[0].1.iter().map(|c| c.method_name.as_str()).collect();
-    assert!(names.contains(&"ToList"));
+    assert!(names.contains(&"ToList"), "Expected outermost call 'ToList', got: {:?}", names);
+    assert!(names.contains(&"OrderBy"), "Expected inner call 'OrderBy', got: {:?}", names);
+    assert!(names.contains(&"Where"), "Expected innermost call 'Where', got: {:?}", names);
 }
 
 #[test] fn test_call_sites_lambda() {
@@ -1260,4 +1262,44 @@ public class ConfigLoader {
     let parse_all = lc[0].1.iter().find(|c| c.method_name == "ParseAll");
     assert!(parse_all.is_some(), "Expected 'ParseAll' (without <Item>)");
     assert_eq!(parse_all.unwrap().receiver_type.as_deref(), Some("Parser"));
+}
+
+// ─── Chained call extraction regression tests ────────────────────────
+// Regression: walk_for_invocations() previously only recursed into argument_list
+// children of invocation_expression, missing inner calls in method chains like
+// a.Method1().Method2().ConfigureAwait(false).
+
+#[test]
+fn test_chained_call_configure_await_extracts_inner_call() {
+    // Regression test: .ConfigureAwait(false) wrapping a generic method call.
+    // Both the outer ConfigureAwait and inner SearchForAllTenantsAsync must be found.
+    let source = r#"
+public class TestBlock {
+    private readonly ISearchClient m_searchClient;
+    public TestBlock(ISearchClient searchClient) { m_searchClient = searchClient; }
+    public async Task ExecuteSearch() {
+        return await m_searchClient.SearchForAllTenantsAsync<object>(1, "index", "query").ConfigureAwait(false);
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let mi = defs.iter().position(|d| d.name == "ExecuteSearch").unwrap();
+    let mc: Vec<_> = cs.iter().filter(|(i, _)| *i == mi).collect();
+    assert!(!mc.is_empty(), "Expected call sites for 'ExecuteSearch'");
+
+    let names: Vec<&str> = mc[0].1.iter().map(|c| c.method_name.as_str()).collect();
+
+    assert!(names.contains(&"ConfigureAwait"),
+        "Expected 'ConfigureAwait' in call sites, got: {:?}", names);
+    assert!(names.contains(&"SearchForAllTenantsAsync"),
+        "Inner call 'SearchForAllTenantsAsync' must be extracted from chained \
+         .SearchForAllTenantsAsync<object>(...).ConfigureAwait(false). Got: {:?}", names);
+
+    // Verify receiver type resolution through DI field
+    let inner = mc[0].1.iter().find(|c| c.method_name == "SearchForAllTenantsAsync").unwrap();
+    assert_eq!(inner.receiver_type.as_deref(), Some("ISearchClient"),
+        "Receiver type should be resolved via constructor DI field");
 }

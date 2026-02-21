@@ -10,6 +10,8 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Bug Fixes
 
+- **Chained method calls missing from call-site index (C# and TypeScript)** — Inner calls in method chains like `service.SearchAsync<T>(...).ConfigureAwait(false)` and `builder.Where(...).OrderBy(...).ToList()` were not extracted. Only the outermost call (e.g., `ConfigureAwait`, `ToList`) was found; all inner calls were silently dropped. Root cause: `walk_for_invocations()` (C#) and `walk_ts_for_invocations()` (TypeScript) only recursed into `argument_list` children of `invocation_expression`/`call_expression` nodes, skipping the `member_access_expression` child where nested invocations live in the AST. The fix recurses into ALL children, capturing every call in the chain. This affects `search_callers` results for any code using `.ConfigureAwait(false)`, fluent APIs, LINQ chains, or promise chains. 2 new regression tests, 1 existing test strengthened.
+
 - **Generic method call-site indexing in C# parser** — Call sites for generic method invocations like `client.SearchAsync<T>(args)` were stored with `method_name = "SearchAsync<T>"` (including type arguments) instead of `"SearchAsync"`. This caused `verify_call_site_target()` to fail matching when `class` filter was used in `search_callers`, producing 0 callers for any generic method. The fix adds `extract_method_name_from_name_node()` that strips type arguments from `generic_name` AST nodes in both `extract_member_access_call()` and `extract_conditional_access_call()`. Also fixes `direction=down` callee resolution for generic methods. TypeScript parser was NOT affected (different AST structure). 6 new unit tests.
 
 ### Internal
