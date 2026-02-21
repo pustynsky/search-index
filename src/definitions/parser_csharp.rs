@@ -276,7 +276,7 @@ fn extract_member_access_call(
     line: u32,
 ) -> Option<CallSite> {
     let name_node = find_child_by_field(node, "name")?;
-    let method_name = node_text(name_node, source).to_string();
+    let method_name = extract_method_name_from_name_node(name_node, source);
 
     let receiver_node = find_child_by_field(node, "expression")
         .or_else(|| node.child(0))?;
@@ -307,11 +307,30 @@ fn extract_conditional_access_call(
     let binding = binding?;
     let name_node = find_child_by_field(binding, "name")
         .or_else(|| binding.child(binding.child_count().saturating_sub(1)))?;
-    let method_name = node_text(name_node, source).to_string();
+    let method_name = extract_method_name_from_name_node(name_node, source);
 
     let receiver_type = resolve_receiver_type(receiver_node, source, class_name, field_types, base_types);
 
     Some(CallSite { method_name, receiver_type, line, receiver_is_generic: false })
+}
+
+/// Extract the method name from a name node, handling `generic_name` by stripping
+/// type arguments. For `generic_name` nodes (e.g., `Method<T>`), returns just the
+/// identifier (`Method`). For other nodes (e.g., `identifier`), returns the full text.
+fn extract_method_name_from_name_node(name_node: tree_sitter::Node, source: &[u8]) -> String {
+    if name_node.kind() == "generic_name" {
+        // generic_name: child(0) = identifier, child(1) = type_argument_list
+        if let Some(id_node) = name_node.child(0) {
+            if id_node.kind() == "identifier" {
+                return node_text(id_node, source).to_string();
+            }
+        }
+        // Fallback: strip everything from '<' onwards
+        let text = node_text(name_node, source);
+        text.split('<').next().unwrap_or(text).to_string()
+    } else {
+        node_text(name_node, source).to_string()
+    }
 }
 
 fn extract_object_creation(

@@ -3862,6 +3862,46 @@ correctly parsed as variable definitions.
 
 ---
 
+### T-GENERIC-CALLERS: `search_callers` — Generic method calls correctly matched with class filter
+
+**Background:** C# generic method calls like `_service.SearchAsync<T>(args)` were stored with
+`method_name = "SearchAsync<T>"` (including type arguments) instead of `"SearchAsync"`. This
+caused `verify_call_site_target()` to fail when `class` filter was used, producing 0 callers.
+The fix strips type arguments from `generic_name` AST nodes in the C# parser.
+
+**Setup:** Create C# files:
+
+- `SearchService.cs`: `public class SearchService { public Task<T> SearchAsync<T>(string q) { ... } }`
+- `Consumer.cs`: `public class Consumer { private ISearchService _svc; void Run() { _svc.SearchAsync<Document>("q"); } }`
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"SearchAsync","class":"SearchService","direction":"up","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
+```
+
+**Expected:**
+
+- `callTree` includes `Consumer.Run` as a caller
+- Generic type arguments (`<Document>`) are stripped from the stored `method_name`
+- `summary.totalNodes` ≥ 1
+
+**Validates:** `extract_method_name_from_name_node()` in `parser_csharp.rs` correctly strips
+type arguments from `generic_name` AST nodes for member access calls (`obj.Method<T>()`) and
+conditional access calls (`obj?.Method<T>()`).
+
+**Status:** ✅ Covered by unit tests: `test_generic_method_call_via_member_access`,
+`test_generic_method_call_with_multiple_type_args`, `test_generic_method_call_via_this`,
+`test_generic_and_nongeneric_calls_coexist`, `test_generic_static_method_call`,
+`test_verify_call_site_target_generic_method_call`
+
+---
+
 ## Changes Not CLI-Testable (Covered by Unit Tests)
 
 The following internal optimizations are covered by unit tests in `src/mcp/watcher.rs` and `src/definitions/incremental.rs`, but have no CLI-observable behavior for E2E testing:
