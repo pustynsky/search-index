@@ -84,7 +84,10 @@ pub fn validate_date(s: &str) -> Result<(), String> {
 fn next_day(date: &str) -> String {
     let parts: Vec<u32> = date.split('-').filter_map(|p| p.parse().ok()).collect();
     if parts.len() != 3 {
-        return format!("{}T23:59:59", date); // fallback
+        // This branch should be unreachable — validate_date() is always called before next_day().
+        // If reached, return original date; git will either handle it or return a clear error.
+        eprintln!("[WARN] next_day called with unparseable date: {}", date);
+        return date.to_string();
     }
     let (year, month, day) = (parts[0], parts[1], parts[2]);
 
@@ -586,11 +589,28 @@ pub(crate) fn parse_blame_porcelain(output: &str) -> Result<Vec<BlameLine>, Stri
     Ok(results)
 }
 
+/// Parse a timezone offset string like "+0300", "-0500", "+0545" into seconds.
+/// Returns 0 for invalid/empty input.
+fn parse_tz_offset(tz: &str) -> i64 {
+    if tz.len() < 5 {
+        return 0;
+    }
+    let sign: i64 = if tz.starts_with('-') { -1 } else { 1 };
+    let hours: i64 = tz[1..3].parse().unwrap_or(0);
+    let minutes: i64 = tz[3..5].parse().unwrap_or(0);
+    sign * (hours * 3600 + minutes * 60)
+}
+
 /// Format a Unix timestamp + timezone offset into "YYYY-MM-DD HH:MM:SS <tz>" string.
+/// Applies the timezone offset to get local civil time before formatting.
 pub(crate) fn format_blame_date(timestamp: i64, tz: &str) -> String {
+    // Apply timezone offset to get local time
+    let offset = parse_tz_offset(tz);
+    let local_timestamp = timestamp + offset;
+
     let secs_per_day: i64 = 86400;
-    let days = if timestamp >= 0 { timestamp / secs_per_day } else { (timestamp - secs_per_day + 1) / secs_per_day };
-    let time_of_day = timestamp - days * secs_per_day;
+    let days = if local_timestamp >= 0 { local_timestamp / secs_per_day } else { (local_timestamp - secs_per_day + 1) / secs_per_day };
+    let time_of_day = local_timestamp - days * secs_per_day;
     let hours = time_of_day / 3600;
     let minutes = (time_of_day % 3600) / 60;
     let seconds = time_of_day % 60;

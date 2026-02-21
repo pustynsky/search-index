@@ -25,11 +25,12 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
    - If on `main`: run `git pull` then `git checkout -b <branch-name>`
    - If NOT on `main`: run `git stash`, `git checkout main`, `git pull`, `git checkout -b <branch-name>`, `git stash pop`
    - Branch name format: `users/<user-alias>/<feature-name>`
-3. **Stage tracked changes only** — `git add -u` (never auto-add untracked files)
-4. **Prepare commit message** — write a concise commit title
-5. **Prepare PR description** — write a detailed description of all changes in Markdown format
-6. **Write PR description to file** — save the PR description to `docs/pr-description.md` so the user can copy it easily (this file is NOT tracked in git — it's a temp artifact)
-7. **Ask user to commit manually** — present the commit title + PR description and let the user do `git commit` themselves
+3. **Product name check** — run `powershell -File scripts/check-product-names.ps1` and confirm the output says "No product-specific names found". If any product-specific names are reported, stop and make them neutral before proceeding.
+4. **Stage tracked changes only** — `git add -u` (never auto-add untracked files)
+5. **Prepare commit message** — write a concise commit title
+6. **Prepare PR description** — write a detailed description of all changes in Markdown format
+7. **Write PR description to file** — save the PR description to `docs/pr-description.md` so the user can copy it easily (this file is NOT tracked in git — it's a temp artifact)
+8. **Ask user to commit manually** — present the commit title + PR description and let the user do `git commit` themselves
 
 ## Environment Rules
 
@@ -52,3 +53,4 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
 - **Documentation is a contract** — if docs describe a flag/feature, the code MUST support it. If a doc says `--substring` exists as a CLI flag but the code doesn't have it, that's a bug — either fix the code or fix the docs. Never leave docs and code out of sync.
 - **Use PS script files for complex commands** — when a PowerShell command is too complex for inline execution (escaping issues, multi-line, regex with special chars), write it to a `.ps1` file, execute it, then delete the file. Inline PowerShell via `powershell -Command "..."` breaks on colons, backticks, and nested quotes. Script files avoid all escaping issues.
 - **Stop MCP server before reinstall** — before running `cargo install --path . --force`, propose running `taskkill /IM search.exe /F` to stop any running search.exe processes. If the user agrees, run it yourself. Don't ask the user to restart VS Code — just kill the process directly.
+- **Always run product name check before staging** — run `scripts/check-product-names.ps1` before `git add -u`. If product-specific names are found in documentation or code, replace them with neutral equivalents before committing. This prevents accidental exposure of internal/proprietary names in the public repository.
