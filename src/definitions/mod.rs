@@ -316,3 +316,7 @@ mod tests_csharp;
 #[cfg(test)]
 #[path = "definitions_tests_typescript.rs"]
 mod tests_typescript;
+
+#[cfg(test)]
+#[path = "audit_tests.rs"]
+mod audit_tests;

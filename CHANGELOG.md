@@ -8,6 +8,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-21
 
+### Internal
+
+- **Independent audit test suite for code stats and call chains** — Added `src/definitions/audit_tests.rs` with 22 golden fixture tests that independently verify the accuracy of tree-sitter-based code complexity metrics and call chain analysis. Each fixture is hand-crafted code where every metric (cyclomatic complexity, cognitive complexity, nesting depth, param count, return count, call count, lambda count) is manually computed line-by-line. The audit covers: C# code stats (7 tests), TypeScript code stats (5 tests), call site accuracy with receiver type verification (2 tests), multi-class call graph completeness (2 tests), edge cases (4 tests), and statistical consistency checks including axiomatic invariants and cross-language parity (3 tests). Documents known tree-sitter grammar differences between C# and TypeScript (else-if handling, try nesting).
+
 ### Bug Fixes
 
 - **UTF-16 BOM detection in `read_file_lossy()`** — Files encoded in UTF-16LE or UTF-16BE (with BOM) were previously read as lossy UTF-8, producing garbled content (`��/ / - - - -`). Tree-sitter received garbage instead of valid source code, resulting in 0 definitions for affected files. The fix adds BOM detection to `read_file_lossy()`: UTF-16LE BOM (`FF FE`) → decode as UTF-16LE, UTF-16BE BOM (`FE FF`) → decode as UTF-16BE, UTF-8 BOM (`EF BB BF`) → strip BOM. All three indexes (content, definitions, callers) benefit from this single-function fix. Affects ~44 files previously reported as `lossyUtf8Files` in audit. 15 new unit tests.
@@ -220,7 +224,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 | Bug Fixes | 10 |
 | Performance | 3 |
 | Internal | 5 |
-| Unit tests (latest) | 659+ |
+| Unit tests (latest) | 704+ |
 | E2E tests (latest) | 48+ |
 | Binary size reduction | 20.4 MB → 9.8 MB (−52%) |
 | Index size reduction | 566 MB → 327 MB (−42%, LZ4) |

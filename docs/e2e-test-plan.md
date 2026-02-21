@@ -4608,6 +4608,34 @@ lines) in descending order — files with more matches appear first.
 
 ## Code Stats Tests
 
+### T-AUDIT: Independent Audit Tests for Code Stats and Call Chains
+
+**Background:** The `audit_tests.rs` module provides independent verification of code complexity metrics and call chain analysis accuracy. It uses golden fixtures — hand-crafted code where every metric is manually computed line-by-line. The audit covers 6 areas:
+
+1. **C# Code Stats (7 tests)** — comprehensive method, while/do/try-catch, flat switch, mixed logical operators, lambdas, expression-bodied members, foreach nesting
+2. **TypeScript Code Stats (5 tests)** — comprehensive function, arrow function counting, flat else-if chain, switch/case, empty method baseline
+3. **Call Site Accuracy (2 tests)** — verifies all call patterns (DI field, this, static, new, local var, lambda) with correct receiver types for both C# and TypeScript
+4. **Call Graph Verification (2 tests)** — multi-class call graph completeness for both C# and TypeScript, verifying receiver types across class boundaries
+5. **Edge Cases (4 tests)** — nested lambdas nesting depth, constructor stats, no stats for non-method definitions (class/interface/enum)
+6. **Statistical Consistency (3 tests)** — invariant checks (CC≥1, CC=1→cognitive=0, call_count matches call_sites.len()), cross-language consistency between C# and TypeScript
+
+**Unit tests:** 22 tests in `src/definitions/audit_tests.rs`:
+- `audit_cs_comprehensive_method`, `audit_cs_while_do_try_catch`, `audit_cs_switch_flat`, `audit_cs_mixed_logical_operators`, `audit_cs_lambda_counting`, `audit_cs_expression_body`, `audit_cs_foreach_complexity`
+- `audit_ts_comprehensive_function`, `audit_ts_arrow_function_counting`, `audit_ts_else_if_chain_flat`, `audit_ts_switch_case`, `audit_cs_empty_method`, `audit_ts_empty_method`
+- `audit_cs_call_site_completeness`, `audit_ts_call_site_completeness`
+- `audit_cs_call_graph_multi_class`, `audit_ts_call_graph_multi_class`
+- `audit_cs_nested_lambdas_nesting`, `audit_ts_nested_arrows_nesting`, `audit_cs_constructor_stats`
+- `audit_cs_no_stats_for_non_methods`, `audit_ts_no_stats_for_non_methods`
+- `audit_cs_invariants_comprehensive`, `audit_ts_invariants_comprehensive`, `audit_cross_language_consistency`
+
+**Key findings documented in test comments:**
+- C# tree-sitter does NOT emit `else_clause` nodes — else-if is parsed as direct `if_statement → if_statement` child
+- `try_statement` adds +1 nesting in C#, so `catch_clause` inside try gets cognitive penalty at nesting=1
+- TypeScript parser correctly handles else-if as flat, with `else_clause` wrapper
+- Cross-language tests must avoid `else` constructs due to grammar differences
+
+---
+
 ### T-CODESTATS-01: `search_definitions` — `includeCodeStats=true` returns metrics
 
 **Tool:** `search_definitions`
