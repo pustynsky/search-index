@@ -10,12 +10,12 @@ pub(crate) fn parse_csharp_definitions(
     parser: &mut tree_sitter::Parser,
     source: &str,
     file_id: u32,
-) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>) {
+) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>, HashMap<String, Vec<String>>) {
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => {
             eprintln!("[def-index] WARNING: tree-sitter C# parse returned None for file_id={}", file_id);
-            return (Vec::new(), Vec::new(), Vec::new());
+            return (Vec::new(), Vec::new(), Vec::new(), HashMap::new());
         }
     };
 
@@ -24,9 +24,10 @@ pub(crate) fn parse_csharp_definitions(
     let mut method_nodes: Vec<(usize, tree_sitter::Node)> = Vec::new();
     walk_csharp_node_collecting(tree.root_node(), source_bytes, file_id, None, &mut defs, &mut method_nodes);
 
-    // Build per-class field type maps from the collected defs
+    // Build per-class field type maps and method return type maps from the collected defs
     let mut class_field_types: HashMap<String, HashMap<String, String>> = HashMap::new();
     let mut class_base_types: HashMap<String, Vec<String>> = HashMap::new();
+    let mut class_method_return_types: HashMap<String, HashMap<String, String>> = HashMap::new();
 
     for def in &defs {
         if let Some(ref parent) = def.parent {
@@ -38,6 +39,16 @@ pub(crate) fn parse_csharp_definitions(
                                 .entry(parent.clone())
                                 .or_default()
                                 .insert(def.name.clone(), type_name);
+                        }
+                    }
+                }
+                DefinitionKind::Method => {
+                    if let Some(ref sig) = def.signature {
+                        if let Some(return_type) = parse_return_type_from_signature(sig) {
+                            class_method_return_types
+                                .entry(parent.clone())
+                                .or_default()
+                                .insert(def.name.clone(), return_type);
                         }
                     }
                 }
@@ -89,7 +100,11 @@ pub(crate) fn parse_csharp_definitions(
             .cloned()
             .unwrap_or_default();
 
-        let calls = extract_call_sites(method_node, source_bytes, parent_name, &field_types, &base_types);
+        let method_return_types = class_method_return_types.get(parent_name)
+            .cloned()
+            .unwrap_or_default();
+
+        let calls = extract_call_sites(method_node, source_bytes, parent_name, &field_types, &base_types, &method_return_types);
         if !calls.is_empty() {
             call_sites.push((def_local_idx, calls));
         }
@@ -107,10 +122,137 @@ pub(crate) fn parse_csharp_definitions(
         code_stats_entries.push((def_local_idx, stats));
     }
 
-    (defs, call_sites, code_stats_entries)
+    // Build extension method map: detect static classes with `this` parameter methods
+    let extension_methods = build_extension_method_map(&defs);
+
+    (defs, call_sites, code_stats_entries, extension_methods)
 }
 
-// ─── Field/Constructor signature parsing ────────────────────────────
+/// Build a map of extension method names to the static classes that define them.
+/// An extension method is a static method in a static class whose first parameter
+/// has the `this` modifier (detected via signature pattern `(this `).
+fn build_extension_method_map(defs: &[DefinitionEntry]) -> HashMap<String, Vec<String>> {
+    use std::collections::HashSet;
+
+    let mut extension_methods: HashMap<String, Vec<String>> = HashMap::new();
+
+    // Step 1: Find all static classes
+    let static_classes: HashSet<&str> = defs.iter()
+        .filter(|d| matches!(d.kind, DefinitionKind::Class | DefinitionKind::Struct))
+        .filter(|d| d.modifiers.iter().any(|m| m == "static"))
+        .map(|d| d.name.as_str())
+        .collect();
+
+    if static_classes.is_empty() {
+        return extension_methods;
+    }
+
+    // Step 2: For each method in a static class, check if the signature contains `(this `
+    for def in defs {
+        if def.kind != DefinitionKind::Method {
+            continue;
+        }
+        let parent = match &def.parent {
+            Some(p) => p.as_str(),
+            None => continue,
+        };
+        if !static_classes.contains(parent) {
+            continue;
+        }
+        // Check if the method signature has `(this ` indicating an extension method
+        if let Some(ref sig) = def.signature {
+            if sig.contains("(this ") {
+                extension_methods
+                    .entry(def.name.clone())
+                    .or_default()
+                    .push(parent.to_string());
+            }
+        }
+    }
+
+    extension_methods
+}
+
+// ─── Field/Constructor/Method signature parsing ─────────────────────
+
+/// Parse a method signature to extract the return type.
+/// Examples:
+///   "private Stream GetDataStream()" → Some("Stream")
+///   "public async Task<List<User>> GetUsersAsync(string id)" → Some("Task<List<User>>")
+///   "public static void Main(string[] args)" → None (void)
+///   "override string ToString()" → Some("string")
+pub(crate) fn parse_return_type_from_signature(signature: &str) -> Option<String> {
+    const MODIFIERS: &[&str] = &[
+        "public", "private", "protected", "internal",
+        "static", "async", "virtual", "override", "abstract",
+        "sealed", "new", "extern", "unsafe", "partial", "readonly",
+    ];
+
+    // Find the opening paren — everything before it is modifiers + return_type + method_name
+    let paren_pos = signature.find('(')?;
+    let before_paren = signature[..paren_pos].trim();
+
+    // Split into tokens, respecting that generic types like Task<List<User>> are a single token
+    // We need to handle angle brackets properly
+    let tokens = tokenize_signature_before_paren(before_paren);
+
+    if tokens.len() < 2 {
+        return None; // Need at least return_type + method_name
+    }
+
+    // The last token is the method name. The token before it is the return type.
+    // But we need to skip modifiers that appear before the return type.
+    // Work backwards: last = method_name, second-to-last = return_type
+    // Verify second-to-last is not a modifier (it shouldn't be, but just in case)
+    let return_type_idx = tokens.len() - 2;
+    let candidate = &tokens[return_type_idx];
+
+    // Check if the candidate is actually a modifier (edge case: shouldn't happen in valid C#)
+    if MODIFIERS.contains(&candidate.to_lowercase().as_str()) {
+        return None;
+    }
+
+    let return_type = candidate.to_string();
+    if return_type == "void" {
+        return None;
+    }
+
+    Some(return_type)
+}
+
+/// Tokenize the part of a method signature before the opening paren,
+/// keeping generic types like `Task<List<User>>` as single tokens.
+fn tokenize_signature_before_paren(s: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut angle_depth = 0;
+
+    for ch in s.chars() {
+        match ch {
+            '<' => {
+                angle_depth += 1;
+                current.push(ch);
+            }
+            '>' => {
+                angle_depth -= 1;
+                current.push(ch);
+            }
+            c if c.is_whitespace() && angle_depth == 0 => {
+                if !current.is_empty() {
+                    tokens.push(current.clone());
+                    current.clear();
+                }
+            }
+            _ => {
+                current.push(ch);
+            }
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens
+}
 
 /// Parse a field/property signature like "IUserService _userService" into (type, name)
 pub(crate) fn parse_field_signature(sig: &str) -> Option<(String, String)> {
@@ -166,6 +308,7 @@ fn extract_call_sites(
     class_name: &str,
     field_types: &HashMap<String, String>,
     base_types: &[String],
+    method_return_types: &HashMap<String, String>,
 ) -> Vec<CallSite> {
     let mut calls = Vec::new();
 
@@ -174,7 +317,7 @@ fn extract_call_sites(
 
     if let Some(body_node) = body {
         // Extract local variable types and merge with field types
-        let local_vars = extract_csharp_local_var_types(body_node, source);
+        let local_vars = extract_csharp_local_var_types(body_node, source, method_return_types);
         let mut combined_types = field_types.clone();
         for (name, type_name) in local_vars {
             combined_types.entry(name).or_insert(type_name);
@@ -381,6 +524,31 @@ fn resolve_receiver_type(
         }
         "this_expression" => Some(class_name.to_string()),
         "base_expression" => base_types.first().map(|bt| bt.split('<').next().unwrap_or(bt).to_string()),
+        "member_access_expression" => {
+            // Chained property access: _context.RuntimeContext.UtteranceIndexBuilder
+            // Extract the LAST member name as the receiver type.
+            // This handles patterns like: field.Property.Type.Method()
+            // where we want "Type" as the receiver.
+            let name_node = find_child_by_field(receiver, "name");
+            if let Some(name) = name_node {
+                let name_text = node_text(name, source).trim();
+                // If the last segment is a known field/property, resolve its type
+                if let Some(type_name) = field_types.get(name_text) {
+                    return Some(type_name.clone());
+                }
+                // If starts with uppercase, treat as type name (PascalCase convention)
+                if !name_text.is_empty() && name_text.chars().next().is_some_and(|c| c.is_uppercase()) {
+                    return Some(name_text.to_string());
+                }
+            }
+            // Fallback: try to resolve the leftmost identifier through field_types
+            let expr_node = find_child_by_field(receiver, "expression")
+                .or_else(|| receiver.child(0));
+            if let Some(expr) = expr_node {
+                return resolve_receiver_type(expr, source, class_name, field_types, base_types);
+            }
+            None
+        }
         _ => {
             let trimmed = text.trim();
             if trimmed == "this" {
@@ -755,9 +923,10 @@ fn extract_csharp_event_def(
 fn extract_csharp_local_var_types(
     body_node: tree_sitter::Node,
     source: &[u8],
+    method_return_types: &HashMap<String, String>,
 ) -> HashMap<String, String> {
     let mut vars = HashMap::new();
-    collect_csharp_local_var_types(body_node, source, &mut vars);
+    collect_csharp_local_var_types(body_node, source, &mut vars, method_return_types);
     vars
 }
 
@@ -765,11 +934,28 @@ fn collect_csharp_local_var_types(
     node: tree_sitter::Node,
     source: &[u8],
     vars: &mut HashMap<String, String>,
+    method_return_types: &HashMap<String, String>,
 ) {
     match node.kind() {
         "local_declaration_statement" => {
             if let Some(var_decl) = find_child_by_kind(node, "variable_declaration") {
-                extract_csharp_var_declaration_types(var_decl, source, vars);
+                extract_csharp_var_declaration_types(var_decl, source, vars, method_return_types);
+            }
+        }
+        // Pattern matching: if (obj is TypeName varName) { ... }
+        // Also handles switch case patterns: case TypeName varName:
+        // AST: declaration_pattern → [identifier(type), identifier(name)]
+        "declaration_pattern" => {
+            let type_node = node.child(0);
+            let name_node = node.child(1);
+            if let (Some(t), Some(n)) = (type_node, name_node) {
+                let type_name = node_text(t, source).trim().to_string();
+                let var_name = node_text(n, source).trim().to_string();
+                if !type_name.is_empty() && !var_name.is_empty()
+                    && type_name.chars().next().is_some_and(|c| c.is_uppercase())
+                {
+                    vars.insert(var_name, type_name);
+                }
             }
         }
         // Don't recurse into nested methods/lambdas
@@ -780,7 +966,7 @@ fn collect_csharp_local_var_types(
 
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            collect_csharp_local_var_types(child, source, vars);
+            collect_csharp_local_var_types(child, source, vars, method_return_types);
         }
     }
 }
@@ -789,6 +975,7 @@ fn extract_csharp_var_declaration_types(
     var_decl: tree_sitter::Node,
     source: &[u8],
     vars: &mut HashMap<String, String>,
+    method_return_types: &HashMap<String, String>,
 ) {
     // Get the type node — first child of variable_declaration
     let type_node = match var_decl.child(0) {
@@ -827,13 +1014,50 @@ fn extract_csharp_var_declaration_types(
                             // Path 1: explicit type
                             vars.insert(name, base_type.clone());
                         } else if is_var_or_dynamic {
-                            // Path 2: try to infer from new expression
+                            // Path 2a: try to infer from new expression
                             // Try equals_value_clause first, then direct child (tree-sitter C# 0.23
                             // puts object_creation_expression as a direct child of variable_declarator)
-                            let new_type = find_child_by_kind(child, "equals_value_clause")
+                            let mut inferred_type = find_child_by_kind(child, "equals_value_clause")
                                 .and_then(|eq| extract_csharp_type_from_new_expr(eq, source))
                                 .or_else(|| extract_csharp_type_from_new_expr(child, source));
-                            if let Some(t) = new_type {
+
+                            // Path 2b: var x = (TypeName)expr → extract type from cast_expression
+                            // AST: cast_expression -> child(0)="(", child(1)=type, child(2)=")", child(3)=expr
+                            if inferred_type.is_none() {
+                                inferred_type = find_descendant_by_kind(child, "cast_expression")
+                                    .and_then(|cast| cast.child(1))
+                                    .map(|type_node| node_text(type_node, source).trim().to_string())
+                                    .filter(|t| !t.is_empty() && t.chars().next().is_some_and(|c| c.is_uppercase()));
+                            }
+
+                            // Path 2c: var x = expr as TypeName
+                            // AST: as_expression -> child(0)=expr, child(1)="as", child(2)=type
+                            if inferred_type.is_none() {
+                                inferred_type = find_descendant_by_kind(child, "as_expression")
+                                    .and_then(|as_expr| as_expr.child(2))
+                                    .map(|type_node| node_text(type_node, source).trim().to_string())
+                                    .filter(|t| !t.is_empty() && t.chars().next().is_some_and(|c| c.is_uppercase()));
+                            }
+
+                            // Path 2d: var x = MethodCall() or var x = this.MethodCall()
+                            // Path 2d+: var x = await MethodCall() → unwrap Task<T> to T
+                            // Look up the return type of the method in the current class
+                            if inferred_type.is_none() {
+                                let has_await = find_descendant_by_kind(child, "await_expression").is_some();
+                                inferred_type = find_descendant_by_kind(child, "invocation_expression")
+                                    .and_then(|inv| extract_simple_method_name_from_invocation(inv, source))
+                                    .and_then(|method_name| method_return_types.get(&method_name))
+                                    .map(|return_type| {
+                                        if has_await {
+                                            unwrap_task_type(return_type)
+                                        } else {
+                                            return_type.clone()
+                                        }
+                                    })
+                                    .filter(|t| !t.is_empty() && t.chars().next().is_some_and(|c| c.is_uppercase()));
+                            }
+
+                            if let Some(t) = inferred_type {
                                 vars.insert(name, t);
                             }
                         }
@@ -872,6 +1096,94 @@ fn extract_csharp_type_from_new_expr(
     } else {
         None
     }
+}
+
+/// Extract the method name from an invocation_expression, but only for simple
+/// calls (same-class methods). Returns None for cross-class calls via fields.
+///
+/// Supported patterns:
+///   - `GetDataStream()`         → Some("GetDataStream")
+///   - `this.GetDataStream()`    → Some("GetDataStream")
+///   - `_service.GetData()`      → None (cross-class, field receiver)
+///   - `SomeClass.StaticMethod()`→ None (cross-class, static)
+///   - `a.b.c.Method()`         → None (cross-class, chained)
+fn extract_simple_method_name_from_invocation(
+    invocation: tree_sitter::Node,
+    source: &[u8],
+) -> Option<String> {
+    let expr = invocation.child(0)?;
+
+    match expr.kind() {
+        // Simple call: GetDataStream()
+        "identifier" => {
+            let name = node_text(expr, source).trim();
+            if !name.is_empty() {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        }
+        // Bare generic call: GetDataStream<T>()
+        "generic_name" => {
+            let name = extract_method_name_from_name_node(expr, source);
+            if !name.is_empty() {
+                Some(name)
+            } else {
+                None
+            }
+        }
+        // Member access: this.GetDataStream() or _field.Method()
+        "member_access_expression" => {
+            let receiver_node = find_child_by_field(expr, "expression")
+                .or_else(|| expr.child(0))?;
+            // Only resolve if receiver is `this`
+            let receiver_text = node_text(receiver_node, source).trim();
+            if receiver_text == "this" || receiver_node.kind() == "this_expression" {
+                let name_node = find_child_by_field(expr, "name")?;
+                let method_name = extract_method_name_from_name_node(name_node, source);
+                if !method_name.is_empty() {
+                    Some(method_name)
+                } else {
+                    None
+                }
+            } else {
+                // Cross-class call (_field.Method(), ClassName.Method()) — skip
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+// ─── Task<T> unwrapping for await expressions ───────────────────────
+
+/// Unwraps `Task<T>` and `ValueTask<T>` to their inner type `T`.
+/// - `"Task<HttpResponseMessage>"` → `"HttpResponseMessage"`
+/// - `"ValueTask<Stream>"` → `"Stream"`
+/// - `"Task<List<User>>"` → `"List<User>"` (nested generics preserved)
+/// - `"Task"` (no generic) → `"Task"` (unchanged, no inner type)
+/// - `"Stream"` (not a Task) → `"Stream"` (unchanged)
+/// - `"Task<>"` (edge case) → `"Task<>"` (unchanged)
+pub(crate) fn unwrap_task_type(type_name: &str) -> String {
+    let prefix_len = if type_name.starts_with("Task<") {
+        5
+    } else if type_name.starts_with("ValueTask<") {
+        10
+    } else {
+        return type_name.to_string(); // not a Task type, return as-is
+    };
+
+    // Must end with '>'
+    if !type_name.ends_with('>') {
+        return type_name.to_string();
+    }
+
+    // Extract inner type: Task<HttpResponseMessage> → HttpResponseMessage
+    let inner = &type_name[prefix_len..type_name.len() - 1];
+    if inner.is_empty() {
+        return type_name.to_string(); // Task<> edge case
+    }
+    inner.to_string()
 }
 
 // ─── Code stats computation ─────────────────────────────────────────

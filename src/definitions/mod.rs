@@ -106,6 +106,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                 let mut tsx_parser: Option<tree_sitter::Parser> = None;
 
                 let mut chunk_defs: Vec<(u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>)> = Vec::new();
+                let mut chunk_ext_methods: HashMap<String, Vec<String>> = HashMap::new();
                 let mut errors = 0usize;
                 let mut lossy_files: Vec<String> = Vec::new();
                 let mut empty_files: Vec<(u32, u64)> = Vec::new(); // (file_id, byte_size) for files with 0 defs
@@ -127,7 +128,14 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                         .unwrap_or("");
 
                     let (file_defs, file_calls, file_stats) = match ext.to_lowercase().as_str() {
-                        "cs" => parser_csharp::parse_csharp_definitions(&mut cs_parser, &content, *file_id),
+                        "cs" => {
+                            let (defs, calls, stats, ext_methods) = parser_csharp::parse_csharp_definitions(&mut cs_parser, &content, *file_id);
+                            // Merge extension methods from this file into chunk accumulator
+                            for (method_name, classes) in ext_methods {
+                                chunk_ext_methods.entry(method_name).or_default().extend(classes);
+                            }
+                            (defs, calls, stats)
+                        }
                         "ts" if need_ts => {
                             let parser = ts_parser.get_or_insert_with(|| {
                                 let mut p = tree_sitter::Parser::new();
@@ -156,13 +164,13 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                     }
                 }
 
-                (chunk_defs, errors, lossy_files, empty_files)
+                (chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods)
             })
         }).collect();
 
         handles.into_iter().map(|h| h.join().unwrap_or_else(|_| {
             eprintln!("[WARN] Worker thread panicked during definition index building");
-            (Vec::new(), 0, Vec::new(), Vec::new())
+            (Vec::new(), 0, Vec::new(), Vec::new(), HashMap::new())
         })).collect()
     });
 
@@ -176,6 +184,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
     let mut code_stats: HashMap<u32, CodeStats> = HashMap::new();
+    let mut extension_methods: HashMap<String, Vec<String>> = HashMap::new();
     let mut parse_errors = 0usize;
     let mut total_call_sites = 0usize;
 
@@ -186,7 +195,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 
     let mut lossy_file_count = 0usize;
     let mut empty_file_ids: Vec<(u32, u64)> = Vec::new();
-    for (chunk_defs, errors, lossy_files, empty_files) in thread_results {
+    for (chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods) in thread_results {
         parse_errors += errors;
         for f in &lossy_files {
             eprintln!("[def-index] WARNING: file contains non-UTF8 bytes (lossy conversion applied): {}", f);
@@ -247,6 +256,11 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                 code_stats.insert(global_idx, stats);
             }
         }
+
+        // Merge extension methods from this chunk
+        for (method_name, classes) in chunk_ext_methods {
+            extension_methods.entry(method_name).or_default().extend(classes);
+        }
     }
 
     // Report suspicious files (>500 bytes but 0 definitions)
@@ -300,6 +314,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         lossy_file_count,
         empty_file_ids,
         code_stats,
+        extension_methods,
     }
 }
 

@@ -266,7 +266,7 @@ fn test_ts_incremental_update() {
         files: Vec::new(), definitions: Vec::new(), name_index: HashMap::new(),
         kind_index: HashMap::new(), attribute_index: HashMap::new(),
         base_type_index: HashMap::new(), file_index: HashMap::new(),
-        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
     };
 
     let clean = PathBuf::from(crate::clean_path(&test_file.to_string_lossy()));
@@ -532,7 +532,7 @@ public class NotificationService {
 "#;
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
-    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     let ni = defs.iter().position(|d| d.name == "Notify").unwrap();
     let nc: Vec<_> = cs.iter().filter(|(i, _)| *i == ni).collect();
