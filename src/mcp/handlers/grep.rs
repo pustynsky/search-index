@@ -330,7 +330,9 @@ fn handle_substring_search(
     }
 
     // For each term, find matching tokens via trigram index
-    let mut all_matched_tokens: Vec<String> = Vec::new();
+    // BUG-7 fix: collect matchedTokens only from tokens that have at least one
+    // file passing dir/ext/exclude filters, not from the global trigram index.
+    let mut tokens_with_hits: HashSet<String> = HashSet::new();
     let mut file_scores: HashMap<u32, FileScoreEntry> = HashMap::new();
     let term_count = raw_terms.len();
     // Track which distinct term indices matched per file (for correct AND-mode filtering)
@@ -380,11 +382,10 @@ fn handle_substring_search(
             }
         };
 
-        // Collect matched token names
+        // Collect matched token names (not yet filtered by dir/ext/exclude)
         let matched_tokens: Vec<String> = matched_token_indices.iter()
             .filter_map(|&idx| trigram_idx.tokens.get(idx as usize).cloned())
             .collect();
-        all_matched_tokens.extend(matched_tokens.iter().cloned());
 
         // For each matched token, look up in main inverted index to get file postings
         for token in &matched_tokens {
@@ -423,6 +424,9 @@ fn handle_substring_search(
                         file_path.to_lowercase().contains(&excl.to_lowercase())
                     }) { continue; }
 
+                    // BUG-7 fix: token passed all filters, record it
+                    tokens_with_hits.insert(token.clone());
+
                     let occurrences = posting.lines.len();
                     let file_total = if (posting.file_id as usize) < index.file_token_counts.len() {
                         index.file_token_counts[posting.file_id as usize] as f64
@@ -449,9 +453,9 @@ fn handle_substring_search(
         }
     }
 
-    // Dedup matched tokens
+    // BUG-7 fix: matchedTokens now only contains tokens from files that passed filters
+    let mut all_matched_tokens: Vec<String> = tokens_with_hits.into_iter().collect();
     all_matched_tokens.sort();
-    all_matched_tokens.dedup();
 
     // Set terms_matched from the distinct matched term indices
     for (file_id, entry) in &mut file_scores {

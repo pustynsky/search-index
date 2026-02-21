@@ -10,6 +10,8 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Bug Fixes
 
+- **`search_grep` substring `matchedTokens` data leak (BUG-7)** — `matchedTokens` in substring search responses was populated from the global trigram index before applying `dir`/`ext`/`exclude` filters, showing tokens from files outside the requested scope. Now `matchedTokens` only includes tokens that have at least one file passing all filters. Affects `countOnly` and full response modes.
+
 - **Input validation hardening (6 bugs fixed)** — Systematic input validation improvements across MCP tools, found via manual fuzzing:
   - `search_definitions`: `name: ""` now treated as "no filter" instead of returning 0 results (BUG-1)
   - `search_definitions`: `containsLine: -1` now returns error instead of silently returning ALL definitions (BUG-2, most critical)
