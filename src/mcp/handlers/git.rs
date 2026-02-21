@@ -32,42 +32,15 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "repo": {
-                        "type": "string",
-                        "description": "Path to local git repository"
-                    },
-                    "file": {
-                        "type": "string",
-                        "description": "File path relative to repo root. Example: 'src/main.rs'"
-                    },
-                    "from": {
-                        "type": "string",
-                        "description": "Start date (YYYY-MM-DD, inclusive). Example: '2025-01-01'"
-                    },
-                    "to": {
-                        "type": "string",
-                        "description": "End date (YYYY-MM-DD, inclusive). Example: '2025-12-31'"
-                    },
-                    "date": {
-                        "type": "string",
-                        "description": "Exact date (YYYY-MM-DD). Overrides from/to. Example: '2025-06-15'"
-                    },
-                    "maxResults": {
-                        "type": "integer",
-                        "description": "Maximum number of commits to return (default: 50, 0 = unlimited)"
-                    },
-                    "author": {
-                        "type": "string",
-                        "description": "Filter by author name or email (substring, case-insensitive). Example: 'john', 'john@example.com'"
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "Filter by commit message (substring, case-insensitive). Example: 'fix bug', 'PR 12345', '[GI]'"
-                    },
-                    "noCache": {
-                        "type": "boolean",
-                        "description": "If true, bypass the in-memory git history cache and query git CLI directly. Useful when cache may be stale."
-                    }
+                    "repo": { "type": "string", "description": "Path to git repository" },
+                    "file": { "type": "string", "description": "File path relative to repo root" },
+                    "from": { "type": "string", "description": "Start date (YYYY-MM-DD, inclusive)" },
+                    "to": { "type": "string", "description": "End date (YYYY-MM-DD, inclusive)" },
+                    "date": { "type": "string", "description": "Exact date (YYYY-MM-DD), overrides from/to" },
+                    "maxResults": { "type": "integer", "description": "Max commits (default: 50, 0=unlimited)" },
+                    "author": { "type": "string", "description": "Filter by author name/email (substring, case-insensitive)" },
+                    "message": { "type": "string", "description": "Filter by commit message (substring, case-insensitive)" },
+                    "noCache": { "type": "boolean", "description": "Bypass cache, query git CLI directly (default: false)" }
                 },
                 "required": ["repo", "file"]
             }),
@@ -78,38 +51,14 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "repo": {
-                        "type": "string",
-                        "description": "Path to local git repository"
-                    },
-                    "file": {
-                        "type": "string",
-                        "description": "File path relative to repo root"
-                    },
-                    "from": {
-                        "type": "string",
-                        "description": "Start date (YYYY-MM-DD, inclusive)"
-                    },
-                    "to": {
-                        "type": "string",
-                        "description": "End date (YYYY-MM-DD, inclusive)"
-                    },
-                    "date": {
-                        "type": "string",
-                        "description": "Exact date (YYYY-MM-DD). Overrides from/to."
-                    },
-                    "maxResults": {
-                        "type": "integer",
-                        "description": "Maximum number of commits to return (default: 50, 0 = unlimited)"
-                    },
-                    "author": {
-                        "type": "string",
-                        "description": "Filter by author name or email (substring, case-insensitive). Example: 'john', 'john@example.com'"
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "Filter by commit message (substring, case-insensitive). Example: 'fix bug', 'PR 12345', '[GI]'"
-                    }
+                    "repo": { "type": "string", "description": "Path to git repository" },
+                    "file": { "type": "string", "description": "File path relative to repo root" },
+                    "from": { "type": "string", "description": "Start date (YYYY-MM-DD, inclusive)" },
+                    "to": { "type": "string", "description": "End date (YYYY-MM-DD, inclusive)" },
+                    "date": { "type": "string", "description": "Exact date (YYYY-MM-DD), overrides from/to" },
+                    "maxResults": { "type": "integer", "description": "Max commits (default: 50, 0=unlimited)" },
+                    "author": { "type": "string", "description": "Filter by author name/email (substring, case-insensitive)" },
+                    "message": { "type": "string", "description": "Filter by commit message (substring, case-insensitive)" }
                 },
                 "required": ["repo", "file"]
             }),
@@ -120,38 +69,14 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "repo": {
-                        "type": "string",
-                        "description": "Path to local git repository"
-                    },
-                    "path": {
-                        "type": "string",
-                        "description": "Path to file or directory (relative to repo root). For directories, returns aggregated author statistics across all files inside. If omitted, returns ownership for the entire repo. Example: 'src/controllers'"
-                    },
-                    "file": {
-                        "type": "string",
-                        "description": "File path relative to repo root (alias for 'path', kept for backward compatibility)"
-                    },
-                    "from": {
-                        "type": "string",
-                        "description": "Start date (YYYY-MM-DD, inclusive)"
-                    },
-                    "to": {
-                        "type": "string",
-                        "description": "End date (YYYY-MM-DD, inclusive)"
-                    },
-                    "top": {
-                        "type": "integer",
-                        "description": "Number of top authors to return (default: 10)"
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "Filter by commit message (substring, case-insensitive). Example: 'fix bug', 'PR 12345', '[GI]'"
-                    },
-                    "noCache": {
-                        "type": "boolean",
-                        "description": "If true, bypass the in-memory git history cache and query git CLI directly. Useful when cache may be stale."
-                    }
+                    "repo": { "type": "string", "description": "Path to git repository" },
+                    "path": { "type": "string", "description": "Path to file/directory. For directories, aggregates. If omitted, whole repo." },
+                    "file": { "type": "string", "description": "Alias for 'path' (backward compatibility)" },
+                    "from": { "type": "string", "description": "Start date (YYYY-MM-DD, inclusive)" },
+                    "to": { "type": "string", "description": "End date (YYYY-MM-DD, inclusive)" },
+                    "top": { "type": "integer", "description": "Top N authors (default: 10)" },
+                    "message": { "type": "string", "description": "Filter by commit message (substring, case-insensitive)" },
+                    "noCache": { "type": "boolean", "description": "Bypass cache, query git CLI directly (default: false)" }
                 },
                 "required": ["repo"]
             }),
@@ -162,22 +87,10 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "repo": {
-                        "type": "string",
-                        "description": "Path to local git repository"
-                    },
-                    "file": {
-                        "type": "string",
-                        "description": "File path relative to repo root"
-                    },
-                    "startLine": {
-                        "type": "integer",
-                        "description": "Start line number (1-based, inclusive)"
-                    },
-                    "endLine": {
-                        "type": "integer",
-                        "description": "End line number (1-based, inclusive). If omitted, only startLine is blamed."
-                    }
+                    "repo": { "type": "string", "description": "Path to git repository" },
+                    "file": { "type": "string", "description": "File path relative to repo root" },
+                    "startLine": { "type": "integer", "description": "Start line (1-based, inclusive)" },
+                    "endLine": { "type": "integer", "description": "End line (1-based, inclusive). If omitted, only startLine." }
                 },
                 "required": ["repo", "file", "startLine"]
             }),
@@ -188,34 +101,13 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "repo": {
-                        "type": "string",
-                        "description": "Path to local git repository"
-                    },
-                    "from": {
-                        "type": "string",
-                        "description": "Start date (YYYY-MM-DD, inclusive). Recommended to keep results manageable."
-                    },
-                    "to": {
-                        "type": "string",
-                        "description": "End date (YYYY-MM-DD, inclusive)"
-                    },
-                    "date": {
-                        "type": "string",
-                        "description": "Exact date (YYYY-MM-DD). Overrides from/to."
-                    },
-                    "author": {
-                        "type": "string",
-                        "description": "Filter by author name or email (substring, case-insensitive). Example: 'john', 'john@example.com'"
-                    },
-                    "message": {
-                        "type": "string",
-                        "description": "Filter by commit message (substring, case-insensitive). Example: 'fix bug', 'PR 12345', '[GI]'"
-                    },
-                    "noCache": {
-                        "type": "boolean",
-                        "description": "If true, bypass the in-memory git history cache and query git CLI directly. Useful when cache may be stale."
-                    }
+                    "repo": { "type": "string", "description": "Path to git repository" },
+                    "from": { "type": "string", "description": "Start date (YYYY-MM-DD, inclusive). Recommended." },
+                    "to": { "type": "string", "description": "End date (YYYY-MM-DD, inclusive)" },
+                    "date": { "type": "string", "description": "Exact date (YYYY-MM-DD), overrides from/to" },
+                    "author": { "type": "string", "description": "Filter by author name/email (substring, case-insensitive)" },
+                    "message": { "type": "string", "description": "Filter by commit message (substring, case-insensitive)" },
+                    "noCache": { "type": "boolean", "description": "Bypass cache, query git CLI directly (default: false)" }
                 },
                 "required": ["repo"]
             }),
@@ -226,10 +118,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "repo": {
-                        "type": "string",
-                        "description": "Path to the git repository"
-                    }
+                    "repo": { "type": "string", "description": "Path to git repository" }
                 },
                 "required": ["repo"]
             }),
@@ -240,34 +129,13 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "repo": {
-                        "type": "string",
-                        "description": "Path to the git repository"
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "Text to search for in commit diffs. Searches for commits that changed the number of occurrences of this text."
-                    },
-                    "file": {
-                        "type": "string",
-                        "description": "Optional: limit search to a specific file path"
-                    },
-                    "regex": {
-                        "type": "boolean",
-                        "description": "If true, treat text as regex pattern (uses git log -G instead of -S). Default: false"
-                    },
-                    "maxResults": {
-                        "type": "integer",
-                        "description": "Maximum number of commits to return. Default: 10"
-                    },
-                    "from": {
-                        "type": "string",
-                        "description": "Optional: start date filter (YYYY-MM-DD, inclusive)"
-                    },
-                    "to": {
-                        "type": "string",
-                        "description": "Optional: end date filter (YYYY-MM-DD, inclusive)"
-                    }
+                    "repo": { "type": "string", "description": "Path to git repository" },
+                    "text": { "type": "string", "description": "Text to search for in commit diffs" },
+                    "file": { "type": "string", "description": "Limit search to a specific file path" },
+                    "regex": { "type": "boolean", "description": "Treat text as regex, uses git -G (default: false)" },
+                    "maxResults": { "type": "integer", "description": "Max commits (default: 10)" },
+                    "from": { "type": "string", "description": "Start date (YYYY-MM-DD, inclusive)" },
+                    "to": { "type": "string", "description": "End date (YYYY-MM-DD, inclusive)" }
                 },
                 "required": ["repo", "text"]
             }),

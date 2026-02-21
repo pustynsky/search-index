@@ -258,6 +258,54 @@ pub fn tool_priority() -> Vec<ToolPriority> {
     ]
 }
 
+// ─── Parameter examples (moved from inline tool descriptions) ───────
+
+/// Examples for tool parameters, organized by tool.
+/// Displayed via search_help so LLMs can look up usage patterns on demand,
+/// without consuming tokens on every turn in the system prompt.
+pub fn parameter_examples() -> Value {
+    json!({
+        "search_definitions": {
+            "name": "Single: 'UserService'. Multi-term OR: 'UserService,IUserService,UserController' (finds ALL in one query). Naming variants: 'Order,IOrder,OrderFactory'",
+            "containsLine": "file='UserService.cs', containsLine=42 -> returns GetUserAsync (lines 35-50), parent: UserService",
+            "includeBody": "parent='UserService', includeBody=true, maxBodyLines=20 -> returns method bodies inline",
+            "sortBy": "sortBy='cognitiveComplexity' maxResults=20 -> 20 most complex methods. sortBy='lines' -> longest definitions",
+            "attribute": "'ApiController', 'Authorize', 'ServiceProvider'",
+            "baseType": "'ControllerBase', 'IUserService' -> finds classes implementing IUserService",
+            "file": "'Controllers', 'Services' -> substring match on file path",
+            "parent": "'UserService' -> all members of that class",
+            "regex": "name='I.*Cache' with regex=true -> all types matching pattern",
+            "kind": "C# kinds: class, interface, method, property, field, enum, struct, record, constructor, delegate, event. TypeScript kinds: function, typeAlias, variable (plus shared: class, interface, method, property, enum, constructor, enumMember). SQL kinds: storedProcedure, table, view, sqlFunction, userDefinedType",
+            "includeCodeStats": "Each method gets: lines, cyclomaticComplexity, cognitiveComplexity, maxNestingDepth, paramCount, returnCount, callCount, lambdaCount",
+            "audit": "Shows: total files, files with/without definitions, read errors, lossy UTF-8, suspicious files (large files with 0 definitions)"
+        },
+        "search_grep": {
+            "terms": "Token: 'HttpClient'. Multi-term OR: 'HttpClient,ILogger,Task'. Multi-term AND (mode='and'): 'ServiceProvider,IUserService'. Phrase (phrase=true): 'new HttpClient'. Regex (regex=true): 'I.*Cache'",
+            "contextLines": "contextLines=5 shows 5 lines before and 5 lines after each match (like grep -C)",
+            "showLines": "Returns groups of consecutive lines with startLine, lines array, and matchIndices",
+            "ext": "'cs', 'cs,sql', 'xml,config' (comma-separated for multiple)",
+            "substring": "Default: terms='UserService' finds IUserService, m_userService. Set substring=false for exact-token-only"
+        },
+        "search_callers": {
+            "class": "'UserService' -> DI-aware: also finds callers using IUserService. Without class, results mix callers from ALL classes with same method name",
+            "method": "'GetUserAsync'",
+            "direction": "'up' = who calls this (callers, default). 'down' = what this calls (callees)",
+            "resolveInterfaces": "When tracing callers of IFoo.Bar(), also finds callers of FooImpl.Bar() where FooImpl implements IFoo"
+        },
+        "search_fast": {
+            "pattern": "Single: 'UserService'. Multi-term OR: 'UserService,OrderProcessor' finds files matching ANY term"
+        },
+        "search_git_pickaxe": {
+            "text": "'ErrorMessage' -> finds commits that added/removed this text",
+            "regex": "true + text='Error\\w+' -> uses git -G for regex matching"
+        },
+        "search_git_history": {
+            "author": "'john', 'john@example.com'",
+            "message": "'fix bug', 'PR 12345', '[GI]'"
+        }
+    })
+}
+
 // ─── Renderers ──────────────────────────────────────────────────────
 
 /// Render tips as human-readable CLI output.
@@ -340,6 +388,7 @@ pub fn render_json() -> Value {
         "strategyRecipes": strategy_recipes,
         "performanceTiers": tiers,
         "toolPriority": priority,
+        "parameterExamples": parameter_examples(),
     })
 }
 
@@ -494,6 +543,43 @@ mod tests {
                 ch, ch as u32, i
             );
         }
+    }
+
+    #[test]
+    fn test_render_json_has_parameter_examples() {
+        let json = render_json();
+        let examples = &json["parameterExamples"];
+        assert!(examples.is_object(), "parameterExamples should be an object");
+        // Key tools should have examples
+        assert!(examples["search_definitions"].is_object(), "search_definitions should have examples");
+        assert!(examples["search_grep"].is_object(), "search_grep should have examples");
+        assert!(examples["search_callers"].is_object(), "search_callers should have examples");
+        assert!(examples["search_fast"].is_object(), "search_fast should have examples");
+        // Spot-check a few specific examples
+        assert!(examples["search_definitions"]["name"].is_string(), "name should have example");
+        assert!(examples["search_definitions"]["containsLine"].is_string(), "containsLine should have example");
+        assert!(examples["search_grep"]["terms"].is_string(), "terms should have example");
+        assert!(examples["search_callers"]["class"].is_string(), "class should have example");
+    }
+
+    /// Verify tool definitions stay within a reasonable token budget.
+    /// This test prevents description bloat from re-accumulating over time.
+    /// Target: <5000 approx tokens (word_count / 0.75).
+    #[test]
+    fn test_tool_definitions_token_budget() {
+        use crate::mcp::handlers::tool_definitions;
+        let tools = tool_definitions();
+        let json = serde_json::to_string(&tools).unwrap();
+        let word_count = json.split_whitespace().count();
+        let approx_tokens = (word_count as f64 / 0.75) as usize;
+
+        // Budget: ~5000 tokens (down from ~6500 before optimization)
+        assert!(
+            approx_tokens < 5500,
+            "Tool definitions exceed token budget: ~{} tokens ({} words). \
+             Target: <5500. Shorten parameter descriptions or move examples to search_help.",
+            approx_tokens, word_count
+        );
     }
 
     #[test]
