@@ -3902,6 +3902,45 @@ conditional access calls (`obj?.Method<T>()`).
 
 ---
 
+### T-CHAINED-CALLS: Chained method calls extracted from call-site index (C# and TypeScript)
+
+**Background:** Inner calls in method chains like `service.SearchAsync<T>(...).ConfigureAwait(false)` and `builder.Where(...).OrderBy(...).ToList()` were previously not extracted. Only the outermost call was found. The fix makes `walk_for_invocations()` (C#) and `walk_ts_for_invocations()` (TypeScript) recurse into ALL children of `invocation_expression` / `call_expression` nodes, not just `argument_list`.
+
+**Setup:** Create a C# file with chained calls:
+
+```csharp
+public class TestBlock {
+    private readonly ISearchClient m_searchClient;
+    public TestBlock(ISearchClient searchClient) { m_searchClient = searchClient; }
+    public async Task ExecuteSearch() {
+        return await m_searchClient.SearchForAllTenantsAsync<object>(1, "index", "query").ConfigureAwait(false);
+    }
+}
+```
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"SearchForAllTenantsAsync","class":"SearchClient","direction":"up","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
+```
+
+**Expected:**
+
+- `callTree` includes `TestBlock.ExecuteSearch` as a caller
+- Previously, this caller was missed because `SearchForAllTenantsAsync` was nested inside `.ConfigureAwait(false)` and the parser only recursed into `argument_list` children
+- `summary.totalNodes` ≥ 1
+
+**Validates:** `walk_for_invocations()` in `parser_csharp.rs` and `walk_ts_for_invocations()` in `parser_typescript.rs` now recurse into all children of invocation nodes, extracting inner calls from chained method expressions.
+
+**Status:** ✅ Covered by unit tests: `test_chained_call_configure_await_extracts_inner_call`, `test_call_sites_chained_calls` (strengthened to verify all inner calls)
+
+---
+
 ## Changes Not CLI-Testable (Covered by Unit Tests)
 
 The following internal optimizations are covered by unit tests in `src/mcp/watcher.rs` and `src/definitions/incremental.rs`, but have no CLI-observable behavior for E2E testing:
