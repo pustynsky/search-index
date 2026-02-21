@@ -446,3 +446,27 @@ fn test_parse_date_filter_correct_order_is_ok() {
     let result = parse_date_filter(Some("2026-01-01"), Some("2026-12-31"), None);
     assert!(result.is_ok(), "Correct date order should be valid");
 }
+
+// ─── file_exists_in_git tests ───────────────────────────────────────
+
+#[test]
+fn test_file_exists_in_git_tracked_file() {
+    // Cargo.toml is tracked in the search repo
+    assert!(file_exists_in_git(".", "Cargo.toml"), "Cargo.toml should be tracked in git");
+}
+
+#[test]
+fn test_file_exists_in_git_nonexistent_file() {
+    assert!(
+        !file_exists_in_git(".", "nonexistent_file_xyz_abc_123.rs"),
+        "Nonexistent file should not be tracked in git"
+    );
+}
+
+#[test]
+fn test_file_exists_in_git_bad_repo() {
+    assert!(
+        !file_exists_in_git("C:\\nonexistent\\repo\\path\\xyz", "file.rs"),
+        "Bad repo should return false"
+    );
+}

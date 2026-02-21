@@ -65,6 +65,8 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 | `search_git_authors`         | Top authors for a file ranked by commit count. Uses in-memory cache when available (sub-millisecond), falls back to CLI                  |
 | `search_git_activity`        | Repo-wide activity (all changed files) for a date range. Uses in-memory cache when available (sub-millisecond), falls back to CLI        |
 | `search_git_blame`           | Line-level attribution (`git blame`) for a file or line range. Returns commit hash, author, date, and content per line                   |
+| `search_branch_status`       | Shows current git branch status: branch name, main/master check, behind/ahead counts, dirty files, fetch age. Call before investigating production bugs |
+| `search_git_pickaxe`         | Find commits where specific text was added or removed (git pickaxe). Uses `git log -S` (exact) or `git log -G` (regex) to trace when code was introduced or deleted |
 
 ## What the AI Agent Sees
 
@@ -355,6 +357,7 @@ Cache responses include a `"(from cache)"` hint in the `summary` field so the AI
 | `top`        | number | — | Maximum authors to return (default: 10, `search_git_authors` only) |
 | `author`     | string | — | Filter by author name or email (case-insensitive substring match). Available on `search_git_history`, `search_git_diff`, `search_git_activity` |
 | `message`    | string | — | Filter by commit message (case-insensitive substring match). Available on `search_git_history`, `search_git_diff`, `search_git_activity`, `search_git_authors` |
+| `noCache`    | boolean | — | If true, bypass the in-memory git history cache and query git CLI directly. Useful when cache may be stale. Available on `search_git_history`, `search_git_authors`, `search_git_activity` |
 
 ### Cache behavior
 
@@ -484,6 +487,134 @@ Get line-level attribution for a file or line range via `git blame`. Returns the
   "summary": {"totalLines":6,"file":"src/UserService.cs","startLine":10,"endLine":15,"tool":"search_git_blame"}
 }
 ```
+
+---
+
+## `search_git_pickaxe` — Git Pickaxe (Text Introduction Search)
+
+Find exactly which commits added or removed a specific text string or regex pattern. Unlike `search_git_history` which shows ALL commits that touched a file, pickaxe narrows to only the commits where the specified text's occurrence count changed.
+
+### Parameters
+
+| Parameter    | Type    | Required | Description |
+|---|---|---|---|
+| `repo`       | string  | ✅ | Path to local git repository |
+| `text`       | string  | ✅ | Text to search for in commit diffs |
+| `file`       | string  | — | Optional: limit search to a specific file path |
+| `regex`      | boolean | — | If true, treat text as regex pattern (uses `git log -G` instead of `-S`). Default: false |
+| `maxResults` | integer | — | Maximum number of commits to return (default: 10) |
+| `from`       | string  | — | Start date (YYYY-MM-DD, inclusive) |
+| `to`         | string  | — | End date (YYYY-MM-DD, inclusive) |
+
+### Use cases
+
+- **When was this error message introduced?** — `text: "Entry not found"`, `file: "src/Service.cs"`
+- **When was this function removed?** — `text: "fn deprecated_method"`, `regex: false`
+- **Find all commits that changed a regex pattern** — `text: "throw\\s+new\\s+InvalidOperationException"`, `regex: true`
+
+```json
+// Request — find when "search_git_pickaxe" was added to this codebase
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_pickaxe","arguments":{"repo":".","text":"search_git_pickaxe","maxResults":3}}}
+
+// Response
+{
+  "commits": [
+    {
+      "hash": "abc123de",
+      "date": "2025-06-15T14:22:00+00:00",
+      "author": "johndoe",
+      "email": "johndoe@example.com",
+      "message": "Add search_git_pickaxe MCP tool",
+      "patch": "+  \"search_git_pickaxe\" => handle_git_pickaxe(ctx, arguments),"
+    }
+  ],
+  "summary": {
+    "tool": "search_git_pickaxe",
+    "searchText": "search_git_pickaxe",
+    "mode": "exact",
+    "file": "(all files)",
+    "totalCommits": 1,
+    "maxResults": 3,
+    "elapsedMs": 1200.0
+  }
+}
+```
+
+> **Note:** Patch output is truncated to ~2000 characters per commit to prevent response explosion. Always uses git CLI (no cache).
+
+---
+
+## `search_branch_status` — Branch Status
+
+Shows whether you're on the right branch before investigating production bugs. Reports branch name, behind/ahead of remote main, uncommitted changes, and how fresh the last fetch is.
+
+```json
+// Request
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_branch_status","arguments":{"repo":"."}}}
+
+// Response
+{
+  "currentBranch": "users/dev/my-feature",
+  "isMainBranch": false,
+  "mainBranch": "master",
+  "behindMain": 47,
+  "aheadOfMain": 3,
+  "dirtyFiles": ["src/SomeFile.cs", "src/Other.cs"],
+  "dirtyFileCount": 2,
+  "lastFetchTime": "2025-06-15 10:30:00 +0000",
+  "fetchAge": "3 hours ago",
+  "fetchWarning": null,
+  "warning": "Index is built on 'users/dev/my-feature', not on master. Local branch is 47 commits behind remote master.",
+  "summary": { "tool": "search_branch_status", "elapsedMs": 45.2 }
+}
+```
+
+### Fetch age warning thresholds
+
+| Time since last fetch | Warning |
+|---|---|
+| < 1 hour | `null` (no warning) |
+| 1–24 hours | `"Last fetch: 6 hours ago"` |
+| 1–7 days | `"Last fetch: 3 days ago. Remote data may be outdated."` |
+| > 7 days | `"Last fetch: 12 days ago! Recommend: git fetch origin"` |
+
+---
+
+## File Not Found Warning
+
+When `search_git_history`, `search_git_authors`, or `search_git_activity` return 0 results and the specified file doesn't exist in git, the response includes a `"warning"` field:
+
+```json
+{
+  "commits": [],
+  "summary": { "totalCommits": 0, "tool": "search_git_history" },
+  "warning": "File not found in git: path/to/file.cs. Check the path."
+}
+```
+
+This helps distinguish between "no commits in the date range" and "wrong file path". The warning works in both cache and CLI fallback paths. When the file exists but simply has no matching commits, no warning is added.
+
+---
+
+## Branch Warning
+
+When the MCP server is started on a branch other than `main` or `master`, all index-based tool responses (`search_grep`, `search_definitions`, `search_callers`, `search_fast`) include a `branchWarning` field in the `summary` object:
+
+```json
+{
+  "summary": {
+    "totalFiles": 42,
+    "branchWarning": "Index is built on branch 'users/dev/my-feature', not on main/master. Results may differ from production."
+  }
+}
+```
+
+This warning is **absent** when:
+- The current branch is `main` or `master`
+- The indexed directory is not a git repository
+- The `git rev-parse` command fails (e.g., git not installed)
+
+The branch is detected **once at server startup** via `git rev-parse --abbrev-ref HEAD`. Git tools (`search_git_history`, `search_git_diff`, etc.) do **not** include this warning because they query the git repository directly and are not affected by which branch the index was built on.
 
 ---
 

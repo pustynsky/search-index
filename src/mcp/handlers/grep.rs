@@ -11,8 +11,8 @@ use crate::index::build_trigram_index;
 use search::generate_trigrams;
 
 use super::utils::{
-    build_line_content_from_matches, is_under_dir, matches_ext_filter, sorted_intersect,
-    validate_search_dir,
+    build_line_content_from_matches, inject_branch_warning, is_under_dir, matches_ext_filter,
+    sorted_intersect, validate_search_dir,
 };
 use super::HandlerContext;
 
@@ -78,8 +78,11 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
 
     // --- Substring: check if trigram index needs rebuild -----
     if use_substring {
+        let trigram_check_start = Instant::now();
         let needs_rebuild = ctx.index.read().map(|idx| idx.trigram_dirty).unwrap_or(false);
         if needs_rebuild {
+            eprintln!("[substring-trace] Trigram dirty, rebuilding...");
+            let rebuild_start = Instant::now();
             // Build trigram index under READ lock (doesn't block other readers)
             let new_trigram = ctx.index.read().ok().and_then(|idx| {
                 if idx.trigram_dirty {
@@ -99,6 +102,9 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
                     }
                 }
             }
+            eprintln!("[substring-trace] Trigram rebuild: {:.3}ms", rebuild_start.elapsed().as_secs_f64() * 1000.0);
+        } else {
+            eprintln!("[substring-trace] Trigram dirty check: clean in {:.3}ms", trigram_check_start.elapsed().as_secs_f64() * 1000.0);
         }
     }
 
@@ -116,7 +122,7 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
     // --- Phrase search mode ---------------------------------
     if use_phrase {
         return handle_phrase_search(
-            &index, &terms_str, &ext_filter, &exclude_dir, &exclude,
+            ctx, &index, &terms_str, &ext_filter, &exclude_dir, &exclude,
             show_lines, context_lines, max_results, count_only, search_start, &dir_filter,
         );
     }
@@ -241,17 +247,19 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
     let search_elapsed = search_start.elapsed();
 
     if count_only {
+        let mut summary = json!({
+            "totalFiles": total_files,
+            "totalOccurrences": total_occurrences,
+            "termsSearched": terms,
+            "searchMode": search_mode,
+            "indexFiles": index.files.len(),
+            "indexTokens": index.index.len(),
+            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+            "indexLoadTimeMs": 0.0
+        });
+        inject_branch_warning(&mut summary, ctx);
         let output = json!({
-            "summary": {
-                "totalFiles": total_files,
-                "totalOccurrences": total_occurrences,
-                "termsSearched": terms,
-                "searchMode": search_mode,
-                "indexFiles": index.files.len(),
-                "indexTokens": index.index.len(),
-                "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-                "indexLoadTimeMs": 0.0
-            }
+            "summary": summary
         });
         return ToolCallResult::success(serde_json::to_string(&output).unwrap());
     }
@@ -274,18 +282,20 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
         file_obj
     }).collect();
 
+    let mut summary = json!({
+        "totalFiles": total_files,
+        "totalOccurrences": total_occurrences,
+        "termsSearched": terms,
+        "searchMode": search_mode,
+        "indexFiles": index.files.len(),
+        "indexTokens": index.index.len(),
+        "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+        "indexLoadTimeMs": 0.0
+    });
+    inject_branch_warning(&mut summary, ctx);
     let output = json!({
         "files": files_json,
-        "summary": {
-            "totalFiles": total_files,
-            "totalOccurrences": total_occurrences,
-            "termsSearched": terms,
-            "searchMode": search_mode,
-            "indexFiles": index.files.len(),
-            "indexTokens": index.index.len(),
-            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-            "indexLoadTimeMs": 0.0
-        }
+        "summary": summary
     });
 
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
@@ -293,7 +303,7 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
 
 /// Substring search using the trigram index.
 fn handle_substring_search(
-    _ctx: &HandlerContext,
+    ctx: &HandlerContext,
     index: &ContentIndex,
     terms_str: &str,
     ext_filter: &Option<String>,
@@ -304,16 +314,19 @@ fn handle_substring_search(
     max_results_param: usize,
     mode_and: bool,
     count_only: bool,
-    _search_start: Instant,
+    search_start: Instant,
     dir_filter: &Option<String>,
 ) -> ToolCallResult {
     let max_results = if max_results_param == 0 { 0 } else { max_results_param };
 
+    // Stage 1: Terms parsing
+    let stage1 = Instant::now();
     let raw_terms: Vec<String> = terms_str
         .split(',')
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
         .collect();
+    eprintln!("[substring-trace] Terms parsed: {:?} in {:.3}ms", raw_terms, stage1.elapsed().as_secs_f64() * 1000.0);
 
     if raw_terms.is_empty() {
         return ToolCallResult::error("No search terms provided".to_string());
@@ -330,6 +343,9 @@ fn handle_substring_search(
         warnings.push("Short substring query (<4 chars) may return broad results".to_string());
     }
 
+    eprintln!("[substring-trace] Trigram index: {} tokens, {} trigrams",
+        trigram_idx.tokens.len(), trigram_idx.trigram_map.len());
+
     // For each term, find matching tokens via trigram index
     // BUG-7 fix: collect matchedTokens only from tokens that have at least one
     // file passing dir/ext/exclude filters, not from the global trigram index.
@@ -340,6 +356,9 @@ fn handle_substring_search(
     let mut file_matched_terms: HashMap<u32, HashSet<usize>> = HashMap::new();
 
     for (term_idx, term) in raw_terms.iter().enumerate() {
+        // Stage 3: Trigram intersection (per term)
+        let trigram_start = Instant::now();
+
         // Find tokens that contain this term as a substring
         let matched_token_indices: Vec<u32> = if term.len() < 3 {
             // Linear scan for very short terms (no trigrams possible)
@@ -370,8 +389,9 @@ fn handle_substring_search(
 
                 let candidate_indices = candidates.unwrap_or_default();
 
-                // Verify candidates: check that the token actually contains the substring
-                candidate_indices.into_iter()
+                // Stage 4: Token verification (.contains() check)
+                let verify_start = Instant::now();
+                let verified: Vec<u32> = candidate_indices.into_iter()
                     .filter(|&idx| {
                         if let Some(tok) = trigram_idx.tokens.get(idx as usize) {
                             tok.contains(term.as_str())
@@ -379,14 +399,25 @@ fn handle_substring_search(
                             false
                         }
                     })
-                    .collect()
+                    .collect();
+                eprintln!("[substring-trace] Token verification for '{}': {} verified from candidates in {:.3}ms",
+                    term, verified.len(), verify_start.elapsed().as_secs_f64() * 1000.0);
+                verified
             }
         };
+
+        eprintln!("[substring-trace] Trigram intersection for '{}': {} candidates in {:.3}ms",
+            term, matched_token_indices.len(), trigram_start.elapsed().as_secs_f64() * 1000.0);
 
         // Collect matched token names (not yet filtered by dir/ext/exclude)
         let matched_tokens: Vec<String> = matched_token_indices.iter()
             .filter_map(|&idx| trigram_idx.tokens.get(idx as usize).cloned())
             .collect();
+
+        // Stage 5: Main index lookups + Stage 6: File filter checks
+        let lookup_start = Instant::now();
+        let mut term_postings_checked: usize = 0;
+        let mut term_files_passed: usize = 0;
 
         // For each matched token, look up in main inverted index to get file postings
         for token in &matched_tokens {
@@ -396,6 +427,7 @@ fn handle_substring_search(
                 let idf = if doc_freq > 0.0 { (total_docs / doc_freq).ln() } else { 0.0 };
 
                 for posting in postings {
+                    term_postings_checked += 1;
                     let file_path = match index.files.get(posting.file_id as usize) {
                         Some(p) => p,
                         None => continue,
@@ -421,6 +453,7 @@ fn handle_substring_search(
                         file_path.to_lowercase().contains(&excl.to_lowercase())
                     }) { continue; }
 
+                    term_files_passed += 1;
                     // BUG-7 fix: token passed all filters, record it
                     tokens_with_hits.insert(token.clone());
 
@@ -448,6 +481,10 @@ fn handle_substring_search(
                 }
             }
         }
+
+        eprintln!("[substring-trace] Main index lookup for '{}': {} tokens, {} postings checked, {} files passed in {:.3}ms",
+            term, matched_tokens.len(), term_postings_checked, term_files_passed,
+            lookup_start.elapsed().as_secs_f64() * 1000.0);
     }
 
     // BUG-7 fix: matchedTokens now only contains tokens from files that passed filters
@@ -495,13 +532,16 @@ fn handle_substring_search(
         if !warnings.is_empty() {
             summary["warnings"] = json!(warnings);
         }
+        inject_branch_warning(&mut summary, ctx);
         let output = json!({
             "summary": summary
         });
+        eprintln!("[substring-trace] Total: {:.3}ms (count_only)", search_start.elapsed().as_secs_f64() * 1000.0);
         return ToolCallResult::success(output.to_string());
     }
 
-    // Build JSON output
+    // Stage 7: Response JSON building
+    let json_start = Instant::now();
     let files_json: Vec<Value> = results.iter().map(|r| {
         let mut file_obj = json!({
             "path": r.file_path,
@@ -529,16 +569,23 @@ fn handle_substring_search(
     if !warnings.is_empty() {
         summary["warnings"] = json!(warnings);
     }
+    inject_branch_warning(&mut summary, ctx);
     let output = json!({
         "files": files_json,
         "summary": summary
     });
+    eprintln!("[substring-trace] Response JSON: {:.3}ms", json_start.elapsed().as_secs_f64() * 1000.0);
+
+    // Stage 8: Total elapsed
+    eprintln!("[substring-trace] Total: {:.3}ms ({} files, {} tokens matched)",
+        search_start.elapsed().as_secs_f64() * 1000.0, total_files, all_matched_tokens.len());
 
     ToolCallResult::success(output.to_string())
 }
 
 
 fn handle_phrase_search(
+    ctx: &HandlerContext,
     index: &ContentIndex,
     phrase: &str,
     ext_filter: &Option<String>,
@@ -666,17 +713,19 @@ fn handle_phrase_search(
     let search_elapsed = search_start.elapsed();
 
     if count_only {
+        let mut summary = json!({
+            "totalFiles": total_files,
+            "totalOccurrences": total_occurrences,
+            "termsSearched": [phrase],
+            "searchMode": "phrase",
+            "indexFiles": index.files.len(),
+            "indexTokens": index.index.len(),
+            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+            "indexLoadTimeMs": 0.0
+        });
+        inject_branch_warning(&mut summary, ctx);
         let output = json!({
-            "summary": {
-                "totalFiles": total_files,
-                "totalOccurrences": total_occurrences,
-                "termsSearched": [phrase],
-                "searchMode": "phrase",
-                "indexFiles": index.files.len(),
-                "indexTokens": index.index.len(),
-                "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-                "indexLoadTimeMs": 0.0
-            }
+            "summary": summary
         });
         return ToolCallResult::success(serde_json::to_string(&output).unwrap());
     }
@@ -698,18 +747,20 @@ fn handle_phrase_search(
         file_obj
     }).collect();
 
+    let mut summary = json!({
+        "totalFiles": total_files,
+        "totalOccurrences": total_occurrences,
+        "termsSearched": [phrase],
+        "searchMode": "phrase",
+        "indexFiles": index.files.len(),
+        "indexTokens": index.index.len(),
+        "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+        "indexLoadTimeMs": 0.0
+    });
+    inject_branch_warning(&mut summary, ctx);
     let output = json!({
         "files": files_json,
-        "summary": {
-            "totalFiles": total_files,
-            "totalOccurrences": total_occurrences,
-            "termsSearched": [phrase],
-            "searchMode": "phrase",
-            "indexFiles": index.files.len(),
-            "indexTokens": index.index.len(),
-            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-            "indexLoadTimeMs": 0.0
-        }
+        "summary": summary
     });
 
     ToolCallResult::success(serde_json::to_string(&output).unwrap())

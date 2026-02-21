@@ -384,6 +384,9 @@ pub struct HandlerContext {
     pub git_cache: Arc<RwLock<Option<GitHistoryCache>>>,
     /// Fast readiness check for git cache (avoids RwLock contention).
     pub git_cache_ready: Arc<AtomicBool>,
+    /// Current checked-out branch name (detected at server startup).
+    /// Used to inject branchWarning into index-based tool responses.
+    pub current_branch: Option<String>,
 }
 
 /// Message returned when the content index is still building in background.
@@ -442,7 +445,7 @@ pub fn dispatch_tool(
         "search_callers" => callers::handle_search_callers(ctx, arguments),
         "search_help" => handle_search_help(),
         // Git history tools
-        "search_git_history" | "search_git_diff" | "search_git_authors" | "search_git_activity" | "search_git_blame" => {
+        "search_git_history" | "search_git_diff" | "search_git_authors" | "search_git_activity" | "search_git_blame" | "search_branch_status" | "search_git_pickaxe" => {
             git::dispatch_git_tool(ctx, tool_name, arguments)
         }
         _ => return ToolCallResult::error(format!("Unknown tool: {}", tool_name)),

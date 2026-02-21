@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::mcp::protocol::ToolCallResult;
 use crate::definitions::{DefinitionEntry, DefinitionKind, CodeStats};
 
-use super::utils::{inject_body_into_obj, best_match_tier};
+use super::utils::{inject_body_into_obj, inject_branch_warning, best_match_tier};
 use super::HandlerContext;
 
 /// Returns 0 for type-level definitions (class, interface, enum, struct, record),
@@ -202,6 +202,7 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
         if include_body {
             summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
         }
+        inject_branch_warning(&mut summary, ctx);
         let output = json!({
             "containingDefinitions": containing_defs,
             "query": {
@@ -517,6 +518,7 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
     if include_code_stats && index.code_stats.is_empty() {
         summary["codeStatsAvailable"] = json!(false);
     }
+    inject_branch_warning(&mut summary, ctx);
     let output = json!({
         "definitions": defs_json,
         "summary": summary,

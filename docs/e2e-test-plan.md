@@ -417,9 +417,54 @@ cargo run -- info
 
 - Exit code: 0
 - stderr: `Index directory: ...`
-- stdout: list of `[FILE]` and `[CONTENT]` entries with age, size, staleness
+- stdout: list of `[FILE]`, `[CONTENT]`, and `[GIT]` entries with age, size, staleness
+- `[GIT]` entries show: branch, commit count, file count, author count, HEAD hash (first 8 chars), size, age
 
-**Validates:** Index discovery, deserialization of all index types.
+**Validates:** Index discovery, deserialization of all index types including git-history cache.
+
+---
+
+### T19f: `info` — Git history cache displayed
+
+**Command:**
+
+```powershell
+cargo run -- info
+```
+
+**Prerequisites:** A `.git-history` file must exist in the index directory (built automatically by the MCP server when started in a git repository).
+
+**Expected:**
+
+- Exit code: 0
+- stdout: includes a `[GIT]` entry with format:
+  `[GIT] branch=main, N commits, M files, K authors, HEAD=abcdef12, X.X MB, Y.Yh ago (filename.git-history)`
+- `N` (commits) > 0
+- `M` (files) > 0
+- `K` (authors) > 0
+- HEAD hash is truncated to first 8 characters
+- Size is in MB
+- Age is in hours
+
+**MCP equivalent (search_info JSON response):**
+
+```json
+{
+  "type": "git-history",
+  "commits": 1234,
+  "files": 5678,
+  "authors": 42,
+  "headHash": "aabbccddee00112233445566778899aabbccddee",
+  "branch": "main",
+  "sizeMb": 1.2,
+  "ageHours": 3.4,
+  "filename": "project_12345678.git-history"
+}
+```
+
+**Validates:** Git history cache file is discovered and deserialized by both CLI `info` and MCP `search_info`. All key cache metadata (commits, files, authors, branch, HEAD hash) is displayed.
+
+**Unit tests:** `test_info_json_includes_git_history`, `test_info_json_empty_dir_no_git_history`, `test_info_json_nonexistent_dir`, `test_info_json_git_history_corrupt_file_skipped`
 
 ---
 
@@ -701,7 +746,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 **Expected:**
 
-- stdout: JSON-RPC response with 14 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_reindex_definitions`, `search_definitions`, `search_callers`, `search_help`, `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`
+- stdout: JSON-RPC response with 16 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_reindex_definitions`, `search_definitions`, `search_callers`, `search_help`, `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`, `search_branch_status`, `search_git_pickaxe`
 - Each tool has `name`, `description`, `inputSchema`
 - `search_definitions` inputSchema includes `includeBody` (boolean), `maxBodyLines` (integer), and `maxTotalBodyLines` (integer) parameters
 - Git tools have `repo` (required) and date filter parameters
@@ -4802,13 +4847,13 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 **Expected:**
 
-- `tools` array contains 14 entries (9 original + 5 git)
-- Git tools present: `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`
+- `tools` array contains 16 entries (9 original + 7 git)
+- Git tools present: `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`, `search_branch_status`, `search_git_pickaxe`
 - No `--git` flag needed
 
 **Validates:** Git tools are always available, no opt-in needed.
 
-**Status:** ✅ Covered by unit tests: `test_handle_tools_list` (14 tools), `test_tool_definitions_count` (14 tools)
+**Status:** ✅ Covered by unit tests: `test_handle_tools_list` (16 tools), `test_tool_definitions_count` (16 tools)
 
 ## Git History Cache — Unit Tests (PR 2a)
 
@@ -5016,6 +5061,48 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 with zero behavioral regression.
 
 **Status:** ✅ Covered by existing git handler tests (all run with `git_cache: None`) + T-GIT-01 through T-GIT-08.
+
+---
+
+### T-NOCACHE: `noCache` parameter bypasses git history cache
+
+**Scenario:** When `noCache: true` is passed to `search_git_history`, `search_git_authors`, or `search_git_activity`, the handler bypasses the in-memory cache and queries git CLI directly, even when the cache is populated and ready.
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":2,"noCache":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `commits` array (non-empty, from CLI path)
+- `summary.hint` does NOT contain `"(from cache)"` — cache was bypassed
+- Same response format as T-GIT-01 (CLI path)
+
+**Negative test — without `noCache`, cache is used when available:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":2}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- `summary.hint` contains `"(from cache)"` (when cache is populated)
+
+**Applies to:** `search_git_history`, `search_git_authors`, `search_git_activity`
+
+**Unit tests:** `test_git_history_no_cache_bypasses_cache`, `test_git_history_default_uses_cache`, `test_git_authors_no_cache_bypasses_cache`, `test_git_activity_no_cache_bypasses_cache`, `test_git_history_no_cache_false_uses_cache`
 
 ---
 
@@ -5613,3 +5700,320 @@ echo $msgs | search serve --dir . --ext rs
 - No need to explicitly pass `showLines: true` when `contextLines > 0`
 
 **Unit test:** [`test_search_grep_context_lines_auto_enables_show_lines`](../src/mcp/handlers/handlers_tests.rs)
+
+### T-WARMUP: Trigram pre-warming eliminates cold-start penalty
+
+**Tool:** `search_grep` (substring mode)
+
+**Background:** After deserializing the content index from disk, the first 1-2 substring queries
+take ~3.4 seconds due to OS page faults on memory that hasn't been touched yet. The `warm_up()`
+method on `ContentIndex` forces all trigram index pages into resident memory at server startup,
+eliminating this cold-start penalty.
+
+**Scenario:** Start the MCP server and verify warm-up completes in the background.
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokeniz","substring":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT 2>stderr.txt
+Get-Content stderr.txt | Select-String "warmup"
+```
+
+**Expected stderr output (filtered by `[warmup]`):**
+
+```
+[warmup] Starting trigram pre-warm...
+[warmup] Trigram pre-warm completed in X.Xms (N trigrams, M tokens)
+```
+
+**Assertions:**
+
+- stderr contains `[warmup] Starting trigram pre-warm...`
+- stderr contains `[warmup] Trigram pre-warm completed in` with timing and counts
+- First substring query completes in < 100ms (not ~3.4s cold-start)
+- `warm_up()` runs in a background thread and does not delay server startup
+
+**Validates:** Trigram index pre-warming eliminates cold-start penalty for substring queries.
+The `warm_up()` method touches all trigram posting lists, token strings, and inverted index
+HashMap bucket pages to force OS page faults before the first real query.
+
+**Unit tests:** `test_warm_up_empty_index`, `test_warm_up_with_data`, `test_warm_up_is_idempotent`, `test_warm_up_then_search_works`
+
+**Status:** ✅ Implemented
+
+---
+
+### T-SUBSTRING-TRACE: Substring search emits timing traces to stderr
+
+**Tool:** `search_grep` (substring mode)
+
+**Background:** Substring search (`search_grep` with `substring: true`, which is the default) now
+emits `[substring-trace]` timing instrumentation to stderr at each major processing stage. This
+helps diagnose slow cold-start queries (first 1-2 queries take ~3.4s instead of expected
+milliseconds). The tracing is always-on and outputs to stderr, which doesn't interfere with the
+MCP protocol on stdout.
+
+**Scenario:** Run a substring search and verify timing traces appear in stderr.
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokeniz","substring":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT 2>stderr.txt
+Get-Content stderr.txt | Select-String "substring-trace"
+```
+
+**Expected stderr output (filtered by `[substring-trace]`):**
+
+```
+[substring-trace] Trigram dirty check: clean in 0.001ms
+[substring-trace] Terms parsed: ["tokeniz"] in 0.001ms
+[substring-trace] Trigram index: 1234 tokens, 5678 trigrams
+[substring-trace] Token verification for 'tokeniz': 3 verified from candidates in 0.010ms
+[substring-trace] Trigram intersection for 'tokeniz': 3 candidates in 0.050ms
+[substring-trace] Main index lookup for 'tokeniz': 3 tokens, 150 postings checked, 12 files passed in 0.200ms
+[substring-trace] Response JSON: 0.100ms
+[substring-trace] Total: 0.500ms (12 files, 3 tokens matched)
+```
+
+**Assertions:**
+
+- stderr contains at least one line with `[substring-trace]`
+- stderr contains `Terms parsed:` with the search term(s)
+- stderr contains `Trigram intersection` with candidate count and timing
+- stderr contains `Main index lookup` with postings checked and files passed
+- stderr contains `Total:` with overall elapsed time
+- stdout (JSON-RPC response) is NOT affected — no trace lines in stdout
+- When trigram index needs rebuild, stderr also contains `[substring-trace] Trigram rebuild:` with timing
+
+**Validates:** Timing instrumentation in `handle_substring_search()` for diagnosing slow cold-start
+substring queries. Traces cover: terms parsing, trigram dirty check + rebuild, trigram intersection
+(per term), token verification, main index lookups, file filter checks, response JSON building,
+and total elapsed time.
+
+**Status:** ✅ Implemented. Existing tests pass with tracing enabled (628 tests, 0 failures).
+
+---
+
+
+### T-BRANCH-WARNING: `serve` — `branchWarning` in index-based tool responses
+
+**Background:** When the MCP server is started on a non-main/non-master branch, all index-based tool responses (`search_grep`, `search_definitions`, `search_callers`, `search_fast`) include a `branchWarning` field in the `summary` object. This alerts the AI agent that results may differ from production because the index is built on a feature branch.
+
+**Setup:** Check out a feature branch before starting the server:
+
+```powershell
+git checkout -b feature/test-branch-warning
+```
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokenize"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- `summary.branchWarning` contains `"Index is built on branch 'feature/test-branch-warning', not on main/master. Results may differ from production."`
+- The warning appears in ALL index-based tools: `search_grep`, `search_definitions`, `search_callers`, `search_fast`
+- The warning does NOT appear in git tools (`search_git_history`, `search_git_diff`, etc.) since they work directly with the git repo
+
+**Negative test — on main branch:**
+
+```powershell
+git checkout main
+```
+
+Then repeat the command above.
+
+**Expected:**
+
+- `summary.branchWarning` is ABSENT (no warning on main/master)
+
+**Negative test — on master branch:**
+
+Same expectation — no warning when on `master`.
+
+**Validates:** `branchWarning` field in `HandlerContext` is populated at server startup via `git rev-parse --abbrev-ref HEAD`, and injected into summary objects by `inject_branch_warning()` in `utils.rs`.
+
+**Unit tests:** `test_branch_warning_feature_branch`, `test_branch_warning_main_branch`, `test_branch_warning_master_branch`, `test_branch_warning_none_branch`, `test_inject_branch_warning_adds_field`, `test_inject_branch_warning_skips_main`, `test_inject_branch_warning_skips_none`
+
+---
+
+### T-BRANCH-STATUS: `serve` — `search_branch_status` shows branch info
+
+**Tool:** `search_branch_status`
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_branch_status","arguments":{"repo":"."}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response containing:
+  - `currentBranch` — non-empty string (current git branch name)
+  - `isMainBranch` — boolean (true iff branch is `main` or `master`)
+  - `mainBranch` — `"main"` or `"master"` (whichever exists in the repo)
+  - `behindMain` — integer or null (commits behind `origin/<mainBranch>`)
+  - `aheadOfMain` — integer or null (commits ahead of `origin/<mainBranch>`)
+  - `dirtyFiles` — array of modified file paths
+  - `dirtyFileCount` — integer matching `dirtyFiles` array length
+  - `lastFetchTime` — ISO timestamp string or null
+  - `fetchAge` — human-readable age string (e.g., "3 hours ago") or null
+  - `fetchWarning` — null if fetch is fresh (< 1 hour), escalating warnings for stale fetch
+  - `warning` — null if on main/master and up-to-date; human-readable warning if on feature branch or behind remote
+  - `summary.tool` = `"search_branch_status"`
+  - `summary.elapsedMs` — positive number
+
+**Error cases:**
+
+- Missing `repo` parameter → `isError: true`, `"Missing required parameter: repo"`
+- Non-existent repo path → `isError: true`, error from git
+
+**Validates:** `search_branch_status` tool returns comprehensive branch status for production bug investigation context.
+
+**Unit tests:** `test_branch_status_returns_current_branch`, `test_branch_status_detects_main_branch`, `test_branch_status_dirty_files`, `test_branch_status_missing_repo`, `test_branch_status_bad_repo`, `test_branch_status_has_summary`, `test_is_main_branch`, `test_format_age`, `test_compute_fetch_warning_thresholds`, `test_build_warning_on_main_up_to_date`, `test_build_warning_on_main_behind`, `test_build_warning_on_feature_branch`, `test_build_warning_on_feature_branch_no_behind`, `test_build_warning_on_feature_branch_no_remote`
+
+---
+
+### T-GIT-PICKAXE-01: `serve` — search_git_pickaxe finds commits where text was added
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_pickaxe","arguments":{"repo":".","text":"search_git_pickaxe","maxResults":5}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `commits` array (non-empty if the text exists in git history)
+- Each commit has `hash` (8 chars), `date`, `author`, `email`, `message`, and optionally `patch`
+- `summary.tool` = `"search_git_pickaxe"`
+- `summary.mode` = `"exact"`
+- `summary.searchText` = `"search_git_pickaxe"`
+- `summary.totalCommits` ≥ 1
+
+**Validates:** `search_git_pickaxe` tool with exact text mode (`git log -S`).
+
+**Status:** ✅ Covered by unit tests: `test_pickaxe_exact_mode_returns_commits`, `test_pickaxe_with_file_filter`, `test_pickaxe_max_results_limits_output`, `test_pickaxe_with_date_filters`, `test_pickaxe_no_results_narrow_date`
+
+---
+
+### T-GIT-PICKAXE-02: `serve` — search_git_pickaxe with regex mode
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_pickaxe","arguments":{"repo":".","text":"fn\\s+main","regex":true,"maxResults":3}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `commits` array
+- `summary.mode` = `"regex"`
+- Uses `git log -G` (regex mode) instead of `-S` (exact mode)
+
+**Validates:** `search_git_pickaxe` tool with regex mode (`git log -G`).
+
+**Status:** ✅ Covered by unit test: `test_pickaxe_regex_mode`
+
+---
+
+### T-GIT-PICKAXE-03: `serve` — search_git_pickaxe error handling
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_pickaxe","arguments":{"repo":"."}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `isError: true`
+- Error message: "Missing required parameter: text"
+
+**Validates:** Required parameter validation for `search_git_pickaxe`.
+
+**Status:** ✅ Covered by unit tests: `test_pickaxe_missing_repo`, `test_pickaxe_missing_text`, `test_pickaxe_empty_text`, `test_pickaxe_bad_repo`
+
+---
+
+### T70: `serve` — `search_git_history` empty results validation (file not in git)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"nonexistent_file_xyz_abc_123.rs"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `"totalCommits": 0` and `"commits": []`
+- Response JSON contains a `"warning"` field: `"File not found in git: nonexistent_file_xyz_abc_123.rs. Check the path."`
+
+**Validates:** When `search_git_history` returns 0 commits and the file is not tracked by git, the response includes a warning to help the user identify typos in the file path.
+
+---
+
+### T70b: `serve` — `search_git_history` empty results validation (file exists, no commits in range)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","from":"1970-01-01","to":"1970-01-02"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `"totalCommits": 0` and `"commits": []`
+- Response JSON does **NOT** contain a `"warning"` field — the file exists in git, it just has no commits in the specified date range
+
+**Validates:** No false positive warnings when the file is tracked by git but has no commits in the queried date range.
+
+---

@@ -25,6 +25,7 @@ pub fn run_server(
     def_ready: Arc<AtomicBool>,
     git_cache: Arc<RwLock<Option<GitHistoryCache>>>,
     git_cache_ready: Arc<AtomicBool>,
+    current_branch: Option<String>,
 ) {
     let ctx = HandlerContext {
         index,
@@ -38,6 +39,7 @@ pub fn run_server(
         def_ready,
         git_cache,
         git_cache_ready,
+        current_branch,
     };
 
     let stdin = io::stdin();
@@ -272,6 +274,7 @@ mod tests {
             def_ready: Arc::new(AtomicBool::new(true)),
             git_cache: Arc::new(RwLock::new(None)),
             git_cache_ready: Arc::new(AtomicBool::new(false)),
+            current_branch: None,
         }
     }
 
@@ -292,7 +295,7 @@ mod tests {
         assert_eq!(result["jsonrpc"], "2.0");
         assert_eq!(result["id"], 2);
         let tools = result["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 14);
+        assert_eq!(tools.len(), 16);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"search_grep"));
         assert!(names.contains(&"search_find"));

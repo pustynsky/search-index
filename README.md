@@ -64,8 +64,9 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **File watcher** — incremental index updates on file changes (<1s per file)
 - **Substring search** — trigram-indexed substring matching within tokens (~0.07ms vs ~44ms for regex)
 - **LZ4 index compression** — all index files compressed on disk with backward-compatible loading
+- **Branch awareness** — automatic `branchWarning` in search responses when working on non-main branches
 - **Graceful shutdown** — handles Ctrl+C (SIGTERM/SIGINT) by saving indexes to disk before exit, preserving incremental watcher updates
-- **Git history cache** — background-built compact in-memory cache (~7.6 MB for 50K commits) for sub-millisecond `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, and `search_git_blame` queries. Saved to disk (LZ4 compressed) for instant restart (~100 ms load vs ~59 sec rebuild). Auto-detects HEAD changes for cache invalidation. Supports `author` and `message` filters on history/diff/activity/authors tools. `search_git_authors` accepts file paths, directory paths, or no path (entire repo). `search_git_blame` provides line-level attribution via `git blame`
+- **Git history cache** — background-built compact in-memory cache (~7.6 MB for 50K commits) for sub-millisecond `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, and `search_git_blame` queries. Saved to disk (LZ4 compressed) for instant restart (~100 ms load vs ~59 sec rebuild). Auto-detects HEAD changes for cache invalidation. Supports `author` and `message` filters on history/diff/activity/authors tools. Use `noCache: true` to bypass the cache and query git CLI directly when cache may be stale. `search_git_authors` accepts file paths, directory paths, or no path (entire repo). `search_git_blame` provides line-level attribution via `git blame`
 
 ## Quick Start
 
@@ -115,7 +116,7 @@ The engine uses three independent index types plus a git history cache:
 | File name | `.file-list` | `search index` | `search fast` | File paths, sizes, timestamps |
 | Content | `.word-search` | `search content-index` | `search grep` | Token → (file, line numbers) map |
 | Definitions | `.code-structure` | `search def-index` | `search_definitions` / `search_callers` | AST-extracted classes, methods, call sites |
-| Git history | `.git-history` | Background (auto) | `search_git_history` / `search_git_diff` / `search_git_authors` / `search_git_activity` / `search_git_blame` | Commit metadata, file-to-commit mapping |
+| Git history | `.git-history` | Background (auto) | `search_git_history` / `search_git_diff` / `search_git_authors` / `search_git_activity` / `search_git_blame` / `search_branch_status` / `search_git_pickaxe` | Commit metadata, file-to-commit mapping, branch status |
 
 Indexes are stored in `%LOCALAPPDATA%\search-index\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX) for definitions. The git history cache builds automatically in the background when a `.git` directory is present. See [Architecture](docs/architecture.md) for details.
 

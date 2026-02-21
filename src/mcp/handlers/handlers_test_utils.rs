@@ -152,5 +152,6 @@ pub(crate) fn make_ctx_with_defs() -> HandlerContext {
         def_ready: Arc::new(AtomicBool::new(true)),
         git_cache: Arc::new(RwLock::new(None)),
         git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     }
 }

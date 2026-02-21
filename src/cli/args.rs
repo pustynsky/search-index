@@ -200,6 +200,11 @@ AVAILABLE TOOLS (exposed via MCP):
   search_git_diff    -- Commit history with full diff/patch for a file
   search_git_authors -- Top authors for a file ranked by commit count
   search_git_activity-- Repo-wide activity (all changed files) for a date range
+  search_git_blame   -- Line-by-line git blame for a file or line range
+  search_git_pickaxe -- Find commits where specific text was added or removed (git log -S/-G)
+  search_branch_status-- Show current git branch status, behind/ahead counts, dirty files
+  search_help        -- Show tips and best practices for effective search tool usage
+  search_reindex_definitions -- Re-index code definitions (tree-sitter). Requires --definitions
 
 HOW IT WORKS:
   1. On startup: loads (or builds) content index into RAM (~0.7-1.6s one-time)

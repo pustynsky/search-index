@@ -9,7 +9,7 @@ use tracing::info;
 use crate::mcp::protocol::ToolCallResult;
 
 use super::HandlerContext;
-use super::utils::best_match_tier;
+use super::utils::{best_match_tier, inject_branch_warning};
 
 pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
@@ -139,13 +139,15 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
 
     let elapsed = start.elapsed();
 
+    let mut summary = json!({
+        "totalMatches": match_count,
+        "totalIndexed": index.entries.len(),
+        "searchTimeMs": elapsed.as_secs_f64() * 1000.0,
+    });
+    inject_branch_warning(&mut summary, ctx);
     let output = json!({
         "files": results,
-        "summary": {
-            "totalMatches": match_count,
-            "totalIndexed": index.entries.len(),
-            "searchTimeMs": elapsed.as_secs_f64() * 1000.0,
-        }
+        "summary": summary
     });
 
     ToolCallResult::success(serde_json::to_string(&output).unwrap())

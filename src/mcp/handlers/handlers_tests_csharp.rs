@@ -40,7 +40,7 @@ fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     path_to_id.insert(file0_path, 0); path_to_id.insert(file1_path, 1);
     let def_index = DefinitionIndex { root: tmp_dir.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![file0_str.clone(), file1_str.clone()], definitions, name_index, kind_index, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index, path_to_id, method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new() };
     let content_index = ContentIndex { root: tmp_dir.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600, files: vec![file0_str, file1_str], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0, 0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: Some(Arc::new(RwLock::new(def_index))), server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)) };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: Some(Arc::new(RwLock::new(def_index))), server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
     (ctx, tmp_dir)
 }
 
@@ -222,6 +222,7 @@ fn test_search_callers_field_prefix_m_underscore() {
         metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     let result = dispatch_tool(&ctx, "search_callers", &json!({
@@ -326,6 +327,7 @@ fn test_search_callers_field_prefix_underscore() {
         metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     let result = dispatch_tool(&ctx, "search_callers", &json!({
@@ -366,6 +368,7 @@ fn test_search_callers_multi_ext_filter() {
         index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     let result = dispatch_tool(&multi_ext_ctx, "search_callers", &json!({
@@ -603,6 +606,7 @@ fn test_search_callers_down_class_filter() {
         metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     let result = dispatch_tool(&ctx, "search_callers", &json!({ "method": "SearchInternalAsync", "class": "IndexSearchService", "direction": "down", "depth": 1 }));
@@ -710,6 +714,7 @@ fn test_search_callers_ambiguity_warning_truncated() {
         max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     let result = dispatch_tool(&ctx, "search_callers", &json!({ "method": "OnInit" }));
@@ -803,6 +808,7 @@ fn test_search_callers_ambiguity_warning_few_classes() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // No `class` param → should produce a warning listing all 3 classes
@@ -903,6 +909,7 @@ fn test_search_callers_no_ambiguity_warning_with_class_param() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // WITH `class` param → should NOT produce a warning
@@ -1036,6 +1043,7 @@ fn test_search_callers_exclude_dir_and_file() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // Test excludeDir: exclude "tests" directory
@@ -1161,6 +1169,7 @@ fn test_search_callers_cycle_detection_down() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // direction=down with depth=5 — cycle should be stopped by visited set
@@ -1325,6 +1334,7 @@ fn test_search_definitions_exclude_dir() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // Exclude "tests" directory
@@ -1454,6 +1464,7 @@ fn test_search_definitions_struct_kind() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     let result = dispatch_tool(&ctx, "search_definitions", &json!({
@@ -1549,6 +1560,7 @@ fn test_search_definitions_base_type_filter() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // Filter by baseType=ControllerBase — should return UserController and AdminController
@@ -1664,6 +1676,7 @@ fn test_search_definitions_enum_member_kind() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // Filter by kind=enumMember
@@ -1765,7 +1778,7 @@ fn test_search_definitions_enum_member_kind() {
     for (i, def) in definitions.iter().enumerate() { ni.entry(def.name.to_lowercase()).or_default().push(i as u32); ki.entry(def.kind).or_default().push(i as u32); fi.entry(def.file_id).or_default().push(i as u32); }
     let di = DefinitionIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![fs.clone()], definitions, name_index: ni, kind_index: ki, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index: fi, path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new() };
     let ci = ContentIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600, files: vec![fs], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)) };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
     let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "StaleClass", "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["definitions"].as_array().unwrap()[0].get("bodyWarning").is_some());
@@ -1779,7 +1792,7 @@ fn test_search_definitions_enum_member_kind() {
     let ne = "C:\\nonexistent\\path\\Ghost.cs".to_string();
     let di = DefinitionIndex { root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![ne.clone()], definitions, name_index: ni, kind_index: ki, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index: fi, path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new() };
     let ci = ContentIndex { root: ".".to_string(), created_at: 0, max_age_secs: 3600, files: vec![ne], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)) };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
     let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "GhostClass", "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["definitions"].as_array().unwrap()[0]["bodyError"], "failed to read file");
@@ -1837,6 +1850,7 @@ fn test_reindex_definitions_success() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     let result = dispatch_tool(&ctx, "search_reindex_definitions", &json!({}));
@@ -1929,6 +1943,7 @@ fn make_ctx_with_backslash_paths() -> HandlerContext {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     }
 }
 
@@ -2152,6 +2167,7 @@ fn test_search_callers_cycle_detection() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // direction=up (default) with depth=5 — cycle should be stopped by visited set
@@ -2310,6 +2326,7 @@ fn test_search_callers_ext_filter_comma_split() {
         metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // ── Case 1: ext="cs" → only .cs callers ──────────────────────────
@@ -2465,6 +2482,7 @@ fn test_search_callers_overloads_not_collapsed_up() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     let result = dispatch_tool(&ctx, "search_callers", &json!({
@@ -2590,6 +2608,7 @@ fn test_search_callers_overloads_not_collapsed_down() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     let result = dispatch_tool(&ctx, "search_callers", &json!({
@@ -2810,6 +2829,7 @@ fn test_search_callers_same_name_different_receiver_interface_resolution() {
         def_ready: Arc::new(AtomicBool::new(true)),
     git_cache: Arc::new(RwLock::new(None)),
     git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
     };
 
     // ── Test 1: callers of ServiceA.Execute() should NOT find Consumer.DoWork()

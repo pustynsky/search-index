@@ -131,6 +131,21 @@ pub fn tips() -> Vec<Tip> {
             why: "Each search call adds latency and LLM context. Use multi-term queries, includeBody, and combined filters to minimize round-trips. Most architecture questions can be answered in 1-3 calls.",
             example: "Step 1: search_definitions name='OrderService,IOrderService' includeBody=true (map + read). Step 2: search_callers method='ProcessOrder' class='OrderService' (call chain). Done in 2 calls.",
         },
+        Tip {
+            rule: "Check branch status before investigating production bugs",
+            why: "Call search_branch_status first to verify you're on the right branch and your data is up-to-date. Avoids wasted investigation on stale or wrong-branch data.",
+            example: "MCP: search_branch_status repo='.' -> shows branch, behind/ahead counts, fetch age, dirty files",
+        },
+        Tip {
+            rule: "Use search_git_pickaxe to trace when code was introduced or removed",
+            why: "Faster than search_git_history for finding the exact commit that added/deleted a specific string. Uses git log -S (exact) or -G (regex).",
+            example: "MCP: search_git_pickaxe repo='.', text='ErrorMessage', file='src/Service.cs'",
+        },
+        Tip {
+            rule: "Use noCache=true when git results seem stale",
+            why: "search_git_history/authors/activity use an in-memory cache for speed. If results seem outdated after recent commits, use noCache=true to bypass cache and query git CLI directly.",
+            example: "MCP: search_git_history repo='.', file='src/main.rs', noCache=true",
+        },
     ]
 }
 
@@ -174,6 +189,20 @@ pub fn strategies() -> Vec<Strategy> {
             anti_patterns: &[
                 "Don't use read_file to manually scan for the method -- containsLine finds it instantly with proper class context",
                 "Don't guess the method name from the stack trace -- use containsLine for precise AST-based lookup",
+            ],
+        },
+        Strategy {
+            name: "Code History Investigation",
+            when: "User asks 'when was this bug introduced', 'who changed this file', or 'trace the origin of this code'",
+            steps: &[
+                "Step 1 - Verify branch (1 call): search_branch_status repo='.' -> confirm you're on main and data is fresh",
+                "Step 2 - Find introduction commit (1 call): search_git_pickaxe repo='.', text='<error text or code snippet>' -> exact commit that added/removed the text",
+                "Step 3 (optional) - Full history (1 call): search_git_history repo='.', file='<file from step 2>' -> all commits for context",
+                "Step 4 (optional) - File ownership (1 call): search_git_authors repo='.', path='<file>' -> who maintains this file",
+            ],
+            anti_patterns: &[
+                "Don't skip search_branch_status -- investigating on the wrong branch wastes time",
+                "Don't use search_git_history when you only need to find WHEN a specific string appeared -- search_git_pickaxe is more precise",
             ],
         },
         Strategy {
@@ -225,6 +254,7 @@ pub fn tool_priority() -> Vec<ToolPriority> {
         ToolPriority { rank: 3, tool: "search_grep", description: "content: exact/OR/AND, substring, phrase, regex (any language)" },
         ToolPriority { rank: 4, tool: "search_fast", description: "file name lookup (~35ms, any file)" },
         ToolPriority { rank: 5, tool: "search_find", description: "live walk (~3s, last resort)" },
+        ToolPriority { rank: 6, tool: "search_branch_status", description: "call first when investigating production bugs" },
     ]
 }
 
@@ -355,6 +385,9 @@ pub fn render_instructions() -> String {
         // Use ASCII -- for CLI compatibility instead of em-dash
         out.push_str(&format!("  {}. {} -- {}\n", tp.rank, tp.tool, tp.description));
     }
+
+    // --- Git tools (brief mention) ---
+    out.push_str("\nGit tools: search_git_history, search_git_authors, search_git_activity, search_git_blame, search_git_pickaxe, search_branch_status -- use for code history/blame/authorship investigations. Call search_help for details.\n");
 
     // --- Soft reference to search_help (Phase 4: no urgency) ---
     out.push_str("\nCall search_help for detailed best practices with examples.\n");

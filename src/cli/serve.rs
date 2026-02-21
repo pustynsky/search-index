@@ -84,6 +84,18 @@ pub fn cmd_serve(args: ServeArgs) {
         };
         *index.write().unwrap_or_else(|e| e.into_inner()) = idx;
         content_ready.store(true, Ordering::Release);
+
+        // Pre-warm trigram index in background to eliminate cold-start penalty
+        let warmup_index = Arc::clone(&index);
+        std::thread::spawn(move || {
+            eprintln!("[warmup] Starting trigram pre-warm...");
+            let start = Instant::now();
+            let (trigrams, tokens) = warmup_index.read()
+                .unwrap_or_else(|e| e.into_inner())
+                .warm_up();
+            eprintln!("[warmup] Trigram pre-warm completed in {:.1}ms ({} trigrams, {} tokens)",
+                start.elapsed().as_secs_f64() * 1000.0, trigrams, tokens);
+        });
     } else {
         // Build in background — don't block the event loop
         let bg_index: Arc<RwLock<ContentIndex>> = Arc::clone(&index);
@@ -139,6 +151,15 @@ pub fn cmd_serve(args: ServeArgs) {
             );
             *bg_index.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
             bg_ready.store(true, Ordering::Release);
+
+            // Pre-warm trigram index after background build
+            eprintln!("[warmup] Starting trigram pre-warm...");
+            let warmup_start = Instant::now();
+            let (trigrams, tokens) = bg_index.read()
+                .unwrap_or_else(|e| e.into_inner())
+                .warm_up();
+            eprintln!("[warmup] Trigram pre-warm completed in {:.1}ms ({} trigrams, {} tokens)",
+                warmup_start.elapsed().as_secs_f64() * 1000.0, trigrams, tokens);
         });
     }
 
@@ -398,11 +419,26 @@ pub fn cmd_serve(args: ServeArgs) {
         });
     }
 
+    // ─── Detect current branch ───
+    let current_branch = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&dir_str)
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() {
+            String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
+        } else { None });
+
+    if let Some(ref branch) = current_branch {
+        info!(branch = %branch, "Detected current branch");
+    }
+
     let max_response_bytes = if args.max_response_kb == 0 { 0 } else { args.max_response_kb * 1024 };
     mcp::server::run_server(
         index, def_index, dir_str, exts_for_load,
         args.metrics, idx_base, max_response_bytes,
         content_ready, def_ready,
         git_cache, git_cache_ready,
+        current_branch,
     );
 }
