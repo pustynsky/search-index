@@ -8,6 +8,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-21
 
+### Bug Fixes
+
+- **Generic method call-site indexing in C# parser** — Call sites for generic method invocations like `client.SearchAsync<T>(args)` were stored with `method_name = "SearchAsync<T>"` (including type arguments) instead of `"SearchAsync"`. This caused `verify_call_site_target()` to fail matching when `class` filter was used in `search_callers`, producing 0 callers for any generic method. The fix adds `extract_method_name_from_name_node()` that strips type arguments from `generic_name` AST nodes in both `extract_member_access_call()` and `extract_conditional_access_call()`. Also fixes `direction=down` callee resolution for generic methods. TypeScript parser was NOT affected (different AST structure). 6 new unit tests.
+
 ### Internal
 
 - **Independent audit test suite for code stats and call chains** — Added `src/definitions/audit_tests.rs` with 22 golden fixture tests that independently verify the accuracy of tree-sitter-based code complexity metrics and call chain analysis. Each fixture is hand-crafted code where every metric (cyclomatic complexity, cognitive complexity, nesting depth, param count, return count, call count, lambda count) is manually computed line-by-line. The audit covers: C# code stats (7 tests), TypeScript code stats (5 tests), call site accuracy with receiver type verification (2 tests), multi-class call graph completeness (2 tests), edge cases (4 tests), and statistical consistency checks including axiomatic invariants and cross-language parity (3 tests). Documents known tree-sitter grammar differences between C# and TypeScript (else-if handling, try nesting).
@@ -224,7 +228,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 | Bug Fixes | 10 |
 | Performance | 3 |
 | Internal | 5 |
-| Unit tests (latest) | 704+ |
+| Unit tests (latest) | 710+ |
 | E2E tests (latest) | 48+ |
 | Binary size reduction | 20.4 MB → 9.8 MB (−52%) |
 | Index size reduction | 566 MB → 327 MB (−42%, LZ4) |

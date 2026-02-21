@@ -1094,3 +1094,170 @@ fn test_code_stats_param_count() {
     let s3 = stats.iter().find(|(i, _)| *i == m3).map(|(_, s)| s).unwrap();
     assert_eq!(s3.param_count, 3, "Method3: 3 params");
 }
+
+// ─── Generic Method Call Site Extraction Tests ──────────────────────
+
+#[test]
+fn test_generic_method_call_via_member_access() {
+    // Bug: `client.SearchAsync<T>(args)` was stored as method_name="SearchAsync<T>"
+    // instead of "SearchAsync", causing verify_call_site_target to fail.
+    let source = r#"
+public class SearchClient {
+    private readonly ISearchService _searchService;
+    public SearchClient(ISearchService searchService) { _searchService = searchService; }
+    public void RunSearch() {
+        var results = _searchService.SearchAsync<Document>("query");
+        _searchService.FindAllAsync<Record>(42);
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let ri = defs.iter().position(|d| d.name == "RunSearch").unwrap();
+    let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
+    assert!(!rc.is_empty(), "Expected call sites for 'RunSearch'");
+
+    // Verify method_name is stripped of generic type arguments
+    let search = rc[0].1.iter().find(|c| c.method_name == "SearchAsync");
+    assert!(search.is_some(),
+        "Expected call to 'SearchAsync' (without <T>), got: {:?}",
+        rc[0].1.iter().map(|c| &c.method_name).collect::<Vec<_>>());
+    assert_eq!(search.unwrap().receiver_type.as_deref(), Some("ISearchService"),
+        "Receiver type should be resolved to field type");
+
+    let find_all = rc[0].1.iter().find(|c| c.method_name == "FindAllAsync");
+    assert!(find_all.is_some(),
+        "Expected call to 'FindAllAsync' (without <Record>), got: {:?}",
+        rc[0].1.iter().map(|c| &c.method_name).collect::<Vec<_>>());
+    assert_eq!(find_all.unwrap().receiver_type.as_deref(), Some("ISearchService"));
+}
+
+#[test]
+fn test_generic_method_call_with_multiple_type_args() {
+    // Test with multiple type parameters: Method<TKey, TValue>()
+    let source = r#"
+public class DataMapper {
+    private readonly IMapper _mapper;
+    public DataMapper(IMapper mapper) { _mapper = mapper; }
+    public void MapData() {
+        _mapper.Convert<string, int>("42");
+        _mapper.Transform<InputModel, OutputModel, Config>(input);
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let mi = defs.iter().position(|d| d.name == "MapData").unwrap();
+    let mc: Vec<_> = cs.iter().filter(|(i, _)| *i == mi).collect();
+    assert!(!mc.is_empty(), "Expected call sites for 'MapData'");
+
+    let convert = mc[0].1.iter().find(|c| c.method_name == "Convert");
+    assert!(convert.is_some(),
+        "Expected call to 'Convert' (without <string, int>), got: {:?}",
+        mc[0].1.iter().map(|c| &c.method_name).collect::<Vec<_>>());
+
+    let transform = mc[0].1.iter().find(|c| c.method_name == "Transform");
+    assert!(transform.is_some(),
+        "Expected call to 'Transform' (without <InputModel, OutputModel, Config>)");
+}
+
+#[test]
+fn test_generic_method_call_via_this() {
+    // Test generic method on this: this.Process<T>()
+    let source = r#"
+public class BaseProcessor {
+    public void Run() {
+        this.Process<DataItem>();
+        Process<string>();
+    }
+    public void Process<T>() { }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let ri = defs.iter().position(|d| d.name == "Run").unwrap();
+    let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
+    assert!(!rc.is_empty(), "Expected call sites for 'Run'");
+
+    let names: Vec<&str> = rc[0].1.iter().map(|c| c.method_name.as_str()).collect();
+    assert!(names.contains(&"Process"),
+        "Expected call to 'Process' (without <DataItem>/<string>), got: {:?}", names);
+
+    // this.Process<T>() should have receiver_type = "BaseProcessor"
+    let this_call = rc[0].1.iter().find(|c| c.method_name == "Process" && c.receiver_type.as_deref() == Some("BaseProcessor"));
+    assert!(this_call.is_some(),
+        "this.Process<DataItem>() should have receiver_type = BaseProcessor");
+}
+
+#[test]
+fn test_generic_and_nongeneric_calls_coexist() {
+    // Mix of generic and non-generic calls in the same method
+    let source = r#"
+public class MixedService {
+    private readonly IService _svc;
+    public MixedService(IService svc) { _svc = svc; }
+    public void Execute() {
+        _svc.SimpleCall();
+        _svc.GenericCall<int>();
+        _svc.AnotherSimple("test");
+        _svc.GenericCall<string>();
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let ei = defs.iter().position(|d| d.name == "Execute").unwrap();
+    let ec: Vec<_> = cs.iter().filter(|(i, _)| *i == ei).collect();
+    assert!(!ec.is_empty(), "Expected call sites for 'Execute'");
+
+    let names: Vec<&str> = ec[0].1.iter().map(|c| c.method_name.as_str()).collect();
+    assert!(names.contains(&"SimpleCall"), "Expected SimpleCall");
+    assert!(names.contains(&"GenericCall"), "Expected GenericCall (stripped of <int>/<string>)");
+    assert!(names.contains(&"AnotherSimple"), "Expected AnotherSimple");
+
+    // All should have receiver_type = IService
+    for call in &ec[0].1 {
+        assert_eq!(call.receiver_type.as_deref(), Some("IService"),
+            "All calls should have receiver_type = IService, but '{}' has {:?}",
+            call.method_name, call.receiver_type);
+    }
+}
+
+#[test]
+fn test_generic_static_method_call() {
+    // Static generic call: Serializer.Deserialize<Config>(json)
+    let source = r#"
+public class ConfigLoader {
+    public void Load() {
+        var config = Serializer.Deserialize<Config>(jsonString);
+        var items = Parser.ParseAll<Item>(data);
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let li = defs.iter().position(|d| d.name == "Load").unwrap();
+    let lc: Vec<_> = cs.iter().filter(|(i, _)| *i == li).collect();
+    assert!(!lc.is_empty(), "Expected call sites for 'Load'");
+
+    let deser = lc[0].1.iter().find(|c| c.method_name == "Deserialize");
+    assert!(deser.is_some(),
+        "Expected 'Deserialize' (without <Config>), got: {:?}",
+        lc[0].1.iter().map(|c| &c.method_name).collect::<Vec<_>>());
+    assert_eq!(deser.unwrap().receiver_type.as_deref(), Some("Serializer"),
+        "Static receiver should be 'Serializer'");
+
+    let parse_all = lc[0].1.iter().find(|c| c.method_name == "ParseAll");
+    assert!(parse_all.is_some(), "Expected 'ParseAll' (without <Item>)");
+    assert_eq!(parse_all.unwrap().receiver_type.as_deref(), Some("Parser"));
+}

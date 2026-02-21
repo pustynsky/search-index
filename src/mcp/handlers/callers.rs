@@ -2141,6 +2141,39 @@ mod tests {
         assert!(impls.contains(&"anotherservice".to_string()));
     }
 
+    // ─── Test 24: Generic method call site — verify_call_site_target matches stripped name ──
+
+    #[test]
+    fn test_verify_call_site_target_generic_method_call() {
+        // Bug: call sites for generic methods like SearchAsync<T>() were stored
+        // with method_name = "SearchAsync<T>" (including type args), causing
+        // verify_call_site_target to fail because it compared against "SearchAsync".
+        // After the fix, method_name is stored as "SearchAsync" (stripped).
+        let definitions = vec![
+            class_def(0, "Controller", vec![]),                          // idx 0
+            method_def(0, "Handle", "Controller", 10, 30),              // idx 1
+            class_def(1, "SearchService", vec!["ISearchService"]),       // idx 2
+            method_def(1, "SearchAsync", "SearchService", 5, 20),       // idx 3
+        ];
+
+        let mut method_calls = HashMap::new();
+        // After fix: method_name is "SearchAsync" (not "SearchAsync<T>")
+        method_calls.insert(1u32, vec![
+            CallSite {
+                method_name: "SearchAsync".to_string(),
+                receiver_type: Some("ISearchService".to_string()),
+                line: 20,
+                receiver_is_generic: false,
+            },
+        ]);
+
+        let def_idx = make_def_index(definitions, method_calls);
+
+        // This should match: receiver ISearchService, target SearchService
+        assert!(verify_call_site_target(&def_idx, 1, 20, "SearchAsync", Some("SearchService")),
+            "Generic method call SearchAsync should match when method_name is properly stripped of type args");
+    }
+
     // ─── Test 23: resolve_call_site resolves via base_types (existing behavior preserved) ──
 
     #[test]
