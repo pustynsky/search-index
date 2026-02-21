@@ -9,8 +9,16 @@ proptest-regressions/
 *.file-list
 *.word-search
 *.code-structure
+# Git history cache
+*.git-history
 # Legacy extensions (pre-rename, kept for safety)
 *.idx
 *.cidx
 *.didx
 .vscode/settings.json
+
+# Project-specific content (may contain internal names/links)
+user-stories/
+
+# Temp artifacts
+docs/pr-description.md
