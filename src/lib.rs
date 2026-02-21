@@ -169,16 +169,63 @@ pub fn extract_semantic_prefix(canonical: &std::path::Path) -> String {
     }
 }
 
-/// Read a file as a String, using lossy UTF-8 conversion for non-UTF8 files.
+/// Read a file as a String, handling BOM-detected encodings and lossy UTF-8 fallback.
+///
+/// Encoding detection order:
+/// 1. UTF-16LE BOM (`FF FE`) → decode as UTF-16LE (strips BOM)
+/// 2. UTF-16BE BOM (`FE FF`) → decode as UTF-16BE (strips BOM)
+/// 3. UTF-8 BOM (`EF BB BF`) → strip BOM, decode as UTF-8
+/// 4. No BOM → decode as UTF-8, with lossy fallback for invalid bytes
+///
 /// Returns `(content, was_lossy)` where `was_lossy` is true if replacement characters
-/// were inserted. This is critical for codebases with files containing Windows-1252
-/// encoded characters (e.g., smart quotes in comments).
+/// were inserted during lossy UTF-8 conversion. Files successfully decoded via BOM
+/// (UTF-16LE/BE/UTF-8 BOM) return `was_lossy = false`.
 pub fn read_file_lossy(path: &std::path::Path) -> std::io::Result<(String, bool)> {
     let raw = std::fs::read(path)?;
-    match String::from_utf8(raw) {
-        Ok(s) => Ok((s, false)),
-        Err(e) => Ok((String::from_utf8_lossy(e.as_bytes()).into_owned(), true)),
+
+    // UTF-16LE BOM: FF FE
+    if raw.len() >= 2 && raw[0] == 0xFF && raw[1] == 0xFE {
+        return Ok((decode_utf16le(&raw[2..]), false));
     }
+
+    // UTF-16BE BOM: FE FF
+    if raw.len() >= 2 && raw[0] == 0xFE && raw[1] == 0xFF {
+        return Ok((decode_utf16be(&raw[2..]), false));
+    }
+
+    // UTF-8 BOM: EF BB BF — strip BOM, then decode as UTF-8
+    let utf8_bytes = if raw.len() >= 3 && raw[0] == 0xEF && raw[1] == 0xBB && raw[2] == 0xBF {
+        &raw[3..]
+    } else {
+        &raw
+    };
+
+    match std::str::from_utf8(utf8_bytes) {
+        Ok(s) => Ok((s.to_string(), false)),
+        Err(_) => Ok((String::from_utf8_lossy(utf8_bytes).into_owned(), true)),
+    }
+}
+
+/// Decode UTF-16LE bytes (after BOM) into a String.
+/// Uses `char::decode_utf16` for proper surrogate pair handling.
+/// Invalid surrogate pairs are replaced with U+FFFD.
+fn decode_utf16le(bytes: &[u8]) -> String {
+    let u16_iter = bytes.chunks_exact(2)
+        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
+    char::decode_utf16(u16_iter)
+        .map(|r| r.unwrap_or('\u{FFFD}'))
+        .collect()
+}
+
+/// Decode UTF-16BE bytes (after BOM) into a String.
+/// Uses `char::decode_utf16` for proper surrogate pair handling.
+/// Invalid surrogate pairs are replaced with U+FFFD.
+fn decode_utf16be(bytes: &[u8]) -> String {
+    let u16_iter = bytes.chunks_exact(2)
+        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
+    char::decode_utf16(u16_iter)
+        .map(|r| r.unwrap_or('\u{FFFD}'))
+        .collect()
 }
 
 // ─── File index types ────────────────────────────────────────────────
@@ -909,6 +956,190 @@ mod trigram_tests {
         assert_eq!(ci.trigram.trigram_map.len(), ci2.trigram.trigram_map.len());
     }
 }
+
+    // ─── read_file_lossy / BOM detection tests ───────────────────
+
+    /// Helper: encode a string as UTF-16LE with BOM prefix
+    fn encode_utf16le_with_bom(s: &str) -> Vec<u8> {
+        let mut bytes = vec![0xFF, 0xFE]; // UTF-16LE BOM
+        for code_unit in s.encode_utf16() {
+            bytes.extend_from_slice(&code_unit.to_le_bytes());
+        }
+        bytes
+    }
+
+    /// Helper: encode a string as UTF-16BE with BOM prefix
+    fn encode_utf16be_with_bom(s: &str) -> Vec<u8> {
+        let mut bytes = vec![0xFE, 0xFF]; // UTF-16BE BOM
+        for code_unit in s.encode_utf16() {
+            bytes.extend_from_slice(&code_unit.to_be_bytes());
+        }
+        bytes
+    }
+
+    #[test]
+    fn test_read_file_lossy_utf16le_bom() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test_utf16le.cs");
+        let content = "// Hello World\nclass Foo { }";
+        std::fs::write(&path, encode_utf16le_with_bom(content)).unwrap();
+
+        let (result, was_lossy) = read_file_lossy(&path).unwrap();
+        assert!(!was_lossy, "UTF-16LE with BOM should not be lossy");
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_read_file_lossy_utf16be_bom() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test_utf16be.cs");
+        let content = "// Hello World\nclass Bar { }";
+        std::fs::write(&path, encode_utf16be_with_bom(content)).unwrap();
+
+        let (result, was_lossy) = read_file_lossy(&path).unwrap();
+        assert!(!was_lossy, "UTF-16BE with BOM should not be lossy");
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_read_file_lossy_utf8_bom() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test_utf8bom.cs");
+        let content = "// UTF-8 with BOM\nclass Baz { }";
+        let mut bytes = vec![0xEF, 0xBB, 0xBF]; // UTF-8 BOM
+        bytes.extend_from_slice(content.as_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let (result, was_lossy) = read_file_lossy(&path).unwrap();
+        assert!(!was_lossy, "UTF-8 with BOM should not be lossy");
+        assert_eq!(result, content, "BOM should be stripped from content");
+    }
+
+    #[test]
+    fn test_read_file_lossy_plain_utf8() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test_plain.cs");
+        let content = "// Plain UTF-8\nclass Plain { }";
+        std::fs::write(&path, content.as_bytes()).unwrap();
+
+        let (result, was_lossy) = read_file_lossy(&path).unwrap();
+        assert!(!was_lossy);
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_read_file_lossy_invalid_utf8_still_lossy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test_invalid.cs");
+        // Windows-1252 smart quote (0x93) — not valid UTF-8, not a BOM
+        let bytes = vec![0x2F, 0x2F, 0x20, 0x93, 0x68, 0x65, 0x6C, 0x6C, 0x6F, 0x93];
+        std::fs::write(&path, &bytes).unwrap();
+
+        let (result, was_lossy) = read_file_lossy(&path).unwrap();
+        assert!(was_lossy, "Invalid UTF-8 should produce lossy result");
+        assert!(result.contains("hello"), "Content should still be partially readable");
+    }
+
+    #[test]
+    fn test_read_file_lossy_utf16le_csharp_code() {
+        // Simulate a real C# file encoded in UTF-16LE (like HtmlLexer.cs)
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("HtmlLexer.cs");
+        let content = "using System;\n\nnamespace Parser\n{\n    internal sealed class HtmlLexer\n    {\n        public void Parse() { }\n    }\n}";
+        std::fs::write(&path, encode_utf16le_with_bom(content)).unwrap();
+
+        let (result, was_lossy) = read_file_lossy(&path).unwrap();
+        assert!(!was_lossy);
+        assert!(result.contains("class HtmlLexer"), "Should contain class name");
+        assert!(result.contains("using System"), "Should contain using directive");
+        assert!(result.contains("Parse()"), "Should contain method name");
+    }
+
+    #[test]
+    fn test_read_file_lossy_utf16le_unicode_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test_unicode.cs");
+        let content = "// Ünïcödé: « résumé » — naïve";
+        std::fs::write(&path, encode_utf16le_with_bom(content)).unwrap();
+
+        let (result, was_lossy) = read_file_lossy(&path).unwrap();
+        assert!(!was_lossy);
+        assert_eq!(result, content);
+    }
+
+    #[test]
+    fn test_read_file_lossy_empty_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("empty.cs");
+        std::fs::write(&path, b"").unwrap();
+
+        let (result, was_lossy) = read_file_lossy(&path).unwrap();
+        assert!(!was_lossy);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_read_file_lossy_utf16le_bom_only() {
+        // File with just a UTF-16LE BOM and no content
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("bom_only.cs");
+        std::fs::write(&path, &[0xFF, 0xFE]).unwrap();
+
+        let (result, was_lossy) = read_file_lossy(&path).unwrap();
+        assert!(!was_lossy);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_read_file_lossy_single_byte_file() {
+        // File too short for BOM detection
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("single.cs");
+        std::fs::write(&path, &[0x41]).unwrap(); // 'A'
+
+        let (result, was_lossy) = read_file_lossy(&path).unwrap();
+        assert!(!was_lossy);
+        assert_eq!(result, "A");
+    }
+
+    #[test]
+    fn test_decode_utf16le_basic() {
+        let input = "Hello, World!";
+        let encoded: Vec<u8> = input.encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        assert_eq!(decode_utf16le(&encoded), input);
+    }
+
+    #[test]
+    fn test_decode_utf16be_basic() {
+        let input = "Hello, World!";
+        let encoded: Vec<u8> = input.encode_utf16()
+            .flat_map(|u| u.to_be_bytes())
+            .collect();
+        assert_eq!(decode_utf16be(&encoded), input);
+    }
+
+    #[test]
+    fn test_decode_utf16le_odd_byte_ignored() {
+        // Odd trailing byte should be silently ignored (chunks_exact behavior)
+        let input = "AB";
+        let mut encoded: Vec<u8> = input.encode_utf16()
+            .flat_map(|u| u.to_le_bytes())
+            .collect();
+        encoded.push(0x99); // trailing odd byte
+        assert_eq!(decode_utf16le(&encoded), input);
+    }
+
+    #[test]
+    fn test_decode_utf16le_empty() {
+        assert_eq!(decode_utf16le(&[]), "");
+    }
+
+    #[test]
+    fn test_decode_utf16be_empty() {
+        assert_eq!(decode_utf16be(&[]), "");
+    }
 }
 
 // ─── Property-based tests (proptest) ─────────────────────────────────

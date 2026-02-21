@@ -2321,6 +2321,61 @@ $msgs | cargo run -- serve -d . -e rs 2>$null
 
 ---
 
+### T-UTF16: UTF-16 BOM detection in `read_file_lossy()`
+
+**Background:** Files encoded in UTF-16LE or UTF-16BE (with BOM) were read as lossy UTF-8, producing garbled content. Tree-sitter received garbage instead of valid source code, resulting in 0 definitions for affected files. The fix adds BOM detection to `read_file_lossy()`.
+
+**Setup:**
+
+```powershell
+# Create a temp directory with a UTF-16LE encoded .cs file
+$testDir = "$env:TEMP\search_e2e_utf16"
+New-Item -ItemType Directory -Force -Path $testDir | Out-Null
+$content = @"
+using System;
+namespace TestApp
+{
+    public class HtmlLexer
+    {
+        public void Parse() { }
+    }
+}
+"@
+# Write as UTF-16LE (PowerShell's Unicode encoding = UTF-16LE with BOM)
+[System.IO.File]::WriteAllText("$testDir\HtmlLexer.cs", $content, [System.Text.Encoding]::Unicode)
+```
+
+**Command:**
+
+```powershell
+cargo run -- def-index --dir $testDir --ext cs
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr contains: `extracted` with a non-zero definition count (≥ 2: class + method)
+- stderr does NOT contain: `WARNING: file contains non-UTF8 bytes` (file is successfully decoded via BOM, not lossy)
+- stderr: `0 lossy-utf8` (UTF-16 files are no longer lossy)
+
+**Verify definitions are indexed:**
+
+```powershell
+echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | cargo run -- serve --dir $testDir --ext cs --definitions 2>$null
+```
+
+Then send `search_definitions` with `name: "HtmlLexer"` — should return the class definition.
+
+**Cleanup:**
+
+```powershell
+Remove-Item -Recurse -Force $testDir
+```
+
+**Unit tests:** `test_read_file_lossy_utf16le_bom`, `test_read_file_lossy_utf16be_bom`, `test_read_file_lossy_utf8_bom`, `test_read_file_lossy_utf16le_csharp_code`, `test_read_file_lossy_utf16le_unicode_content`, `test_read_file_lossy_empty_file`, `test_read_file_lossy_utf16le_bom_only`, `test_read_file_lossy_single_byte_file`, `test_decode_utf16le_basic`, `test_decode_utf16be_basic`, `test_decode_utf16le_odd_byte_ignored`, `test_decode_utf16le_empty`, `test_decode_utf16be_empty`, `test_read_file_lossy_plain_utf8`, `test_read_file_lossy_invalid_utf8_still_lossy`
+
+---
+
 ### T-LOSSY: Non-UTF8 file indexing (lossy UTF-8 conversion)
 
 **Background:** Files with Windows-1252 encoded characters (e.g., smart quotes `'` = byte `0x92` in comments) were previously silently skipped during definition indexing because `std::fs::read_to_string()` requires valid UTF-8. This test verifies that such files are now indexed via lossy UTF-8 conversion.

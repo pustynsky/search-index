@@ -8,6 +8,9 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-21
 
+### Bug Fixes
+
+- **UTF-16 BOM detection in `read_file_lossy()`** — Files encoded in UTF-16LE or UTF-16BE (with BOM) were previously read as lossy UTF-8, producing garbled content (`��/ / - - - -`). Tree-sitter received garbage instead of valid source code, resulting in 0 definitions for affected files. The fix adds BOM detection to `read_file_lossy()`: UTF-16LE BOM (`FF FE`) → decode as UTF-16LE, UTF-16BE BOM (`FE FF`) → decode as UTF-16BE, UTF-8 BOM (`EF BB BF`) → strip BOM. All three indexes (content, definitions, callers) benefit from this single-function fix. Affects ~44 files previously reported as `lossyUtf8Files` in audit. 15 new unit tests.
 ### Performance
 
 - **Optimized MCP tool descriptions for LLM token budget** — Shortened parameter descriptions across all 14 MCP tools (~100 parameters total), reducing the system prompt token footprint by ~30% (~2,000 tokens). Concrete examples moved from inline parameter descriptions to a new `parameterExamples` section in `search_help` (on-demand via 1 extra call). Critical usage hints preserved (e.g., `class` in `search_callers`). Tool-level descriptions unchanged. Semantic purpose of each parameter preserved (8-15 words). Added `test_tool_definitions_token_budget` test to prevent description bloat from re-accumulating. Added `test_render_json_has_parameter_examples` test to verify examples are accessible via `search_help`.
