@@ -41,58 +41,58 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "terms": {
                         "type": "string",
-                        "description": "Search terms. Comma-separated for multi-term search. Single token: 'HttpClient'. Multi-term OR/AND: 'HttpClient,ILogger,Task' (finds files with ANY term when mode='or', or ALL terms when mode='and'). Phrase (use with phrase=true): 'new HttpClient'. Regex (use with regex=true): 'I.*Cache'"
+                        "description": "Search terms. Comma-separated for multi-term OR/AND."
                     },
                     "dir": {
                         "type": "string",
-                        "description": "Directory to search. Can be the server's --dir or any subdirectory of it to narrow results. (default: server's --dir)"
+                        "description": "Directory to search (default: server's --dir)"
                     },
                     "ext": {
                         "type": "string",
-                        "description": "File extension filter. Supports comma-separated for multiple extensions, e.g. 'cs', 'cs,sql', 'xml,config' (default: no filter — searches all indexed extensions)"
+                        "description": "File extension filter, comma-separated (default: all indexed)"
                     },
                     "mode": {
                         "type": "string",
                         "enum": ["or", "and"],
-                        "description": "For multi-term search: 'or' = files containing ANY of the comma-separated terms (default), 'and' = files containing ALL terms."
+                        "description": "Multi-term mode: 'or' = ANY term (default), 'and' = ALL terms."
                     },
                     "regex": {
                         "type": "boolean",
-                        "description": "Treat terms as regex pattern (default: false)"
+                        "description": "Treat as regex pattern (default: false)"
                     },
                     "phrase": {
                         "type": "boolean",
-                        "description": "Treat input as exact phrase to find (default: false)"
+                        "description": "Exact phrase match (default: false)"
                     },
                     "showLines": {
                         "type": "boolean",
-                        "description": "Include source code from matching files. Returns groups of consecutive lines, each with startLine (1-based), lines (string array), and matchIndices (0-based indices of matching lines within the group). Groups are separated when there are gaps in line numbers. (default: false)"
+                        "description": "Include matching source lines in results (default: false)"
                     },
                     "contextLines": {
                         "type": "integer",
-                        "description": "Number of context lines to show before AND after each matching line (requires showLines=true). Works like grep -C. Example: contextLines=5 shows 5 lines before and 5 lines after each match, giving you enough surrounding code to understand the usage. (default: 0)"
+                        "description": "Context lines before/after each match, requires showLines (default: 0)"
                     },
                     "maxResults": {
                         "type": "integer",
-                        "description": "Maximum number of results to return (0 = unlimited, default: 50)"
+                        "description": "Max results (0=unlimited, default: 50)"
                     },
                     "excludeDir": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Directory names to exclude from results, e.g. ['test', 'E2E']"
+                        "description": "Directory names to exclude"
                     },
                     "exclude": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "File path substring patterns to exclude, e.g. ['Mock', 'Test']"
+                        "description": "File path substrings to exclude"
                     },
                     "countOnly": {
                         "type": "boolean",
-                        "description": "Return only file count and occurrence count (default: false)"
+                        "description": "Return counts only (default: false)"
                     },
                     "substring": {
                         "type": "boolean",
-                        "description": "Treat each term as a substring to match within tokens (default: true). Set to false for exact-token-only matching. Auto-disabled when regex or phrase is used."
+                        "description": "Match within tokens (default: true). Auto-disabled for regex/phrase."
                     }
                 },
                 "required": ["terms"]
@@ -131,13 +131,10 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string", "description": "File name pattern. Comma-separated for multi-term OR search: 'ClassA,ClassB,ClassC' finds files matching ANY term. Single term: 'UserService' finds files containing 'UserService'." },
-                    "dir": {
-                        "type": "string",
-                        "description": "Directory whose index to search"
-                    },
+                    "pattern": { "type": "string", "description": "File name pattern. Comma-separated for multi-term OR." },
+                    "dir": { "type": "string", "description": "Directory to search" },
                     "ext": { "type": "string", "description": "Filter by extension" },
-                    "regex": { "type": "boolean", "description": "Treat pattern as regex" },
+                    "regex": { "type": "boolean", "description": "Treat as regex" },
                     "ignoreCase": { "type": "boolean", "description": "Case-insensitive" },
                     "dirsOnly": { "type": "boolean", "description": "Show only directories" },
                     "filesOnly": { "type": "boolean", "description": "Show only files" },
@@ -193,98 +190,98 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Definition name to search for. Supports substring match. Comma-separated for multi-term OR search -- find ALL related types in ONE call instead of separate queries. Examples: 'UserService' (single), 'UserService,IUserService,UserController' (finds ALL three in one query), 'Order,IOrder,OrderFactory' (all naming variants at once)"
+                        "description": "Name to search (substring). Comma-separated for multi-term OR."
                     },
                     "kind": {
                         "type": "string",
                         "enum": ["class", "interface", "method", "property", "field", "enum", "struct", "record", "constructor", "delegate", "event", "enumMember", "function", "typeAlias", "variable", "storedProcedure", "table", "view", "sqlFunction", "userDefinedType", "column", "sqlIndex"],
-                        "description": "Filter by definition kind. C# kinds: class, interface, method, property, field, enum, struct, record, constructor, delegate, event. TypeScript kinds: function, typeAlias, variable (plus shared: class, interface, method, property, field, enum, constructor, enumMember). SQL kinds: storedProcedure, table, view, sqlFunction, userDefinedType."
+                        "description": "Filter by definition kind (see enum for valid values)."
                     },
                     "attribute": {
                         "type": "string",
-                        "description": "Filter by C# attribute name. Example: 'ApiController', 'Authorize', 'ServiceProvider'"
+                        "description": "Filter by C# attribute name."
                     },
                     "baseType": {
                         "type": "string",
-                        "description": "Filter by base type or implemented interface. Example: 'ControllerBase', 'IUserService'"
+                        "description": "Filter by base type or implemented interface."
                     },
                     "file": {
                         "type": "string",
-                        "description": "Filter by file path substring. Example: 'Controllers', 'Services'"
+                        "description": "Filter by file path substring."
                     },
                     "parent": {
                         "type": "string",
-                        "description": "Filter by parent/containing class name. Example: 'UserService' to find all members of that class."
+                        "description": "Filter by parent/containing class name."
                     },
                     "containsLine": {
                         "type": "integer",
-                        "description": "Find the definition(s) that contain this line number. Returns the innermost method/property and its parent class. Must be used with 'file' parameter. Example: file='UserService.cs', containsLine=42 -> returns GetUserAsync (lines 35-50), parent: UserService"
+                        "description": "Find definition(s) containing this line number. Returns innermost method + parent class. Requires 'file' parameter."
                     },
                     "regex": {
                         "type": "boolean",
-                        "description": "Treat name as regex pattern (default: false). Example: name='I.*Cache' with regex=true"
+                        "description": "Treat name as regex pattern (default: false)."
                     },
                     "maxResults": {
                         "type": "integer",
-                        "description": "Max results to return (default: 100, 0 = unlimited)"
+                        "description": "Max results (default: 100, 0=unlimited)"
                     },
                     "excludeDir": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Directory names to exclude from results"
+                        "description": "Directory names to exclude"
                     },
                     "includeBody": {
                         "type": "boolean",
-                        "description": "Include source code body of each definition in the results. Reads the actual file and returns lines from line_start to line_end for each definition. Combine with maxBodyLines to control output size. (default: false)"
+                        "description": "Include source code body in results. Use maxBodyLines to control size. (default: false)"
                     },
                     "maxBodyLines": {
                         "type": "integer",
-                        "description": "Maximum number of source code lines to include per definition when includeBody=true. If a definition has more lines than this limit, only the first maxBodyLines lines are returned, with a 'truncated' flag. (default: 100, 0 = unlimited)"
+                        "description": "Max source lines per definition when includeBody=true (default: 100, 0=unlimited)"
                     },
                     "maxTotalBodyLines": {
                         "type": "integer",
-                        "description": "Maximum total lines of body content across ALL returned definitions. When budget is exhausted, remaining definitions are returned without body (with 'bodyOmitted' marker). Prevents output explosion when many definitions match. (default: 500, 0 = unlimited)"
+                        "description": "Max total body lines across all results (default: 500, 0=unlimited)"
                     },
                     "audit": {
                         "type": "boolean",
-                        "description": "Return index coverage report instead of search results. Shows: total files, files with/without definitions, read errors, lossy UTF-8 files, and suspicious files (files >500 bytes with 0 definitions — possible parse failures). Use auditMinBytes to adjust the threshold. (default: false)"
+                        "description": "Return index coverage report instead of search results. (default: false)"
                     },
                     "auditMinBytes": {
                         "type": "integer",
-                        "description": "Minimum file size in bytes to flag as suspicious when audit=true. Files with 0 definitions but more than this many bytes are reported as potentially failed parses. (default: 500)"
+                        "description": "Min file size to flag as suspicious in audit (default: 500)"
                     },
                     "includeCodeStats": {
                         "type": "boolean",
-                        "description": "Include code complexity metrics in the response. Only applies to methods, constructors, and functions (classes, fields, enum members have no codeStats). Each qualifying definition gets a 'codeStats' object with: lines, cyclomaticComplexity, cognitiveComplexity, maxNestingDepth, paramCount, returnCount, callCount, lambdaCount. Metrics are always computed during indexing — this flag just controls whether they appear in the response. For old indexes without metrics, returns results normally with summary.codeStatsAvailable=false (run search_reindex_definitions to compute). (default: false)"
+                        "description": "Include complexity metrics (cyclomatic, cognitive, nesting, params, returns, calls, lambdas). Auto-enabled by sortBy/min*. (default: false)"
                     },
                     "sortBy": {
                         "type": "string",
                         "enum": ["cyclomaticComplexity", "cognitiveComplexity", "maxNestingDepth", "paramCount", "returnCount", "callCount", "lambdaCount", "lines"],
-                        "description": "Sort results by metric (descending — worst first). Automatically enables includeCodeStats=true. Only definitions with code stats (methods/functions/constructors) are returned when sorting by a metric. 'lines' sorts by definition length and works without code stats. Overrides relevance ranking. Example: sortBy='cognitiveComplexity' maxResults=20 returns the 20 most complex methods."
+                        "description": "Sort by metric descending (worst first). Auto-enables includeCodeStats."
                     },
                     "minComplexity": {
                         "type": "integer",
-                        "description": "Filter: minimum cyclomatic complexity. Only methods/functions/constructors with complexity >= this value are returned. Automatically enables includeCodeStats=true. Multiple min* filters combine with AND logic."
+                        "description": "Min cyclomatic complexity. Auto-enables includeCodeStats. Multiple min* combine with AND."
                     },
                     "minCognitive": {
                         "type": "integer",
-                        "description": "Filter: minimum cognitive complexity (SonarSource). Only methods with cognitive complexity >= this value are returned. Automatically enables includeCodeStats=true."
+                        "description": "Min cognitive complexity. Auto-enables includeCodeStats."
                     },
                     "minNesting": {
                         "type": "integer",
-                        "description": "Filter: minimum nesting depth. Only methods with max nesting >= this value are returned. Automatically enables includeCodeStats=true."
+                        "description": "Min nesting depth. Auto-enables includeCodeStats."
                     },
                     "minParams": {
                         "type": "integer",
-                        "description": "Filter: minimum parameter count. Only methods with params >= this value are returned. Automatically enables includeCodeStats=true."
+                        "description": "Min parameter count. Auto-enables includeCodeStats."
                     },
                     "minReturns": {
                         "type": "integer",
-                        "description": "Filter: minimum return/throw count. Only methods with returns >= this value are returned. Automatically enables includeCodeStats=true."
+                        "description": "Min return/throw count. Auto-enables includeCodeStats."
                     },
                     "minCalls": {
                         "type": "integer",
-                        "description": "Filter: minimum call count (fan-out). Only methods with calls >= this value are returned. Automatically enables includeCodeStats=true."
+                        "description": "Min call count (fan-out). Auto-enables includeCodeStats."
                     }
                 },
                 "required": []
@@ -298,46 +295,46 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "method": {
                         "type": "string",
-                        "description": "Method name to find callers/callees for. Example: 'GetUserAsync'"
+                        "description": "Method name to find callers/callees for."
                     },
                     "class": {
                         "type": "string",
-                        "description": "STRONGLY RECOMMENDED: Parent class name to scope the search. Without this, callers of ALL methods with this name across the entire codebase are found, which may mix results from unrelated classes and produce misleading call trees. Always specify when you know the containing class. DI-aware: automatically includes callers that use the interface (e.g., class='UserService' also finds callers using IUserService). Example: 'UserService'"
+                        "description": "STRONGLY RECOMMENDED: Parent class name to scope the search. Without this, callers of ALL methods with this name across the entire codebase are found, which may mix results from unrelated classes and produce misleading call trees. Always specify when you know the containing class. DI-aware: automatically includes callers that use the interface (e.g., class='UserService' also finds callers using IUserService)."
                     },
                     "depth": {
                         "type": "integer",
-                        "description": "Maximum recursion depth for the call tree (default: 3, max: 10). Each level finds callers of the callers."
+                        "description": "Max recursion depth (default: 3, max: 10)"
                     },
                     "direction": {
                         "type": "string",
                         "enum": ["up", "down"],
-                        "description": "Direction to trace: 'up' = find who calls this method (callers, default), 'down' = find what this method calls (callees). 'up' is most common for tracing entry points."
+                        "description": "'up' = callers (default), 'down' = callees."
                     },
                     "ext": {
                         "type": "string",
-                        "description": "File extension filter (default: server's --ext). Example: 'cs'"
+                        "description": "File extension filter (default: server's --ext)"
                     },
                     "excludeDir": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Directory names to exclude from results, e.g. ['test', 'E2E', 'Mock']"
+                        "description": "Directory names to exclude"
                     },
                     "excludeFile": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "File path substrings to exclude, e.g. ['Test', 'Mock']"
+                        "description": "File path substrings to exclude"
                     },
                     "maxCallersPerLevel": {
                         "type": "integer",
-                        "description": "Maximum number of callers to return per tree node (default: 10). Prevents explosion when a method is called from 100+ places."
+                        "description": "Max callers per tree node (default: 10)"
                     },
                     "maxTotalNodes": {
                         "type": "integer",
-                        "description": "Maximum total nodes in the call tree (default: 200). Prevents massive output for heavily-used methods."
+                        "description": "Max total nodes in call tree (default: 200)"
                     },
                     "resolveInterfaces": {
                         "type": "boolean",
-                        "description": "Auto-resolve interface methods to implementation classes. When tracing callers of IFoo.Bar(), also finds callers of FooImpl.Bar() where FooImpl implements IFoo. (default: true)"
+                        "description": "Auto-resolve interface methods to implementations (default: true)"
                     }
                 },
                 "required": ["method"]

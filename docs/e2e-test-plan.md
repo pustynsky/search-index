@@ -6072,3 +6072,26 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 **Validates:** No false positive warnings when the file is tracked by git but has no commits in the queried date range.
 
 ---
+
+
+### T-TOKEN-BUDGET: Tool definitions stay within token budget
+
+**Tool:** All 16 tools via `tools/list`
+
+**Background:** MCP tool definitions (names, descriptions, parameter schemas) are injected into the LLM system prompt on every turn. To prevent token budget bloat, parameter descriptions are kept concise (semantic purpose + defaults, no concrete examples). Examples are available on-demand via `search_help` → `parameterExamples`.
+
+**Scenario:** Verify that the total token footprint of all tool definitions stays under the budget.
+
+**Expected:**
+
+- Total word count of serialized tool definitions < 4,125 words (~5,500 tokens at 0.75 words/token ratio)
+- `search_help` response contains `parameterExamples` object with examples for key tools: `search_definitions`, `search_grep`, `search_callers`, `search_fast`
+- `search_callers.class` parameter retains its full "STRONGLY RECOMMENDED" warning (critical hint)
+- All parameter descriptions retain semantic purpose (8+ words for non-obvious params)
+- No concrete examples in parameter descriptions (moved to `parameterExamples`)
+
+**Unit tests:** `test_tool_definitions_token_budget`, `test_render_json_has_parameter_examples`
+
+**Status:** ✅ Implemented
+
+---
