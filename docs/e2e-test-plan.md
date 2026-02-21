@@ -5482,6 +5482,23 @@ echo $msgs | search serve --dir . --ext rs
 
 ---
 
+### T-VAL-07: `search_grep` — `matchedTokens` filtered by dir/ext/exclude (BUG-7)
+
+**Tool:** `search_grep`
+
+**Scenario:** In substring search mode, `matchedTokens` should only contain tokens from files that passed all filters (dir, ext, exclude). Previously, `matchedTokens` was populated from the global trigram index before filtering, leaking token names from outside the requested scope.
+
+**Expected:**
+
+- When `dir` restricts search to a subdirectory, `matchedTokens` only contains tokens from files in that subdirectory
+- When `ext` filters by extension, `matchedTokens` only contains tokens from files with that extension
+- When `exclude` filters out files, `matchedTokens` does not contain tokens exclusively in excluded files
+- When no files match, `matchedTokens` is empty (not populated from the global index)
+
+**Unit tests:** [`test_substring_matched_tokens_filtered_by_dir`](../src/mcp/handlers/handlers_tests.rs), [`test_substring_matched_tokens_filtered_by_ext`](../src/mcp/handlers/handlers_tests.rs), [`test_substring_matched_tokens_filtered_by_exclude`](../src/mcp/handlers/handlers_tests.rs), [`test_substring_matched_tokens_empty_when_no_files_match`](../src/mcp/handlers/handlers_tests.rs)
+
+---
+
 ### T-VAL-06: `search_grep` — `contextLines` auto-enables `showLines` (BUG-6)
 
 **Tool:** `search_grep`

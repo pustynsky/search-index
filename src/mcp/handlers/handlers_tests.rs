@@ -2710,6 +2710,158 @@ fn test_search_grep_context_lines_auto_enables_show_lines() {
     cleanup_tmp(&tmp);
 }
 
+/// BUG-7: search_grep substring matchedTokens should be filtered by dir/ext/exclude.
+#[test]
+fn test_substring_matched_tokens_filtered_by_dir() {
+    // Two files in different directories, each with a unique token containing "service"
+    let ctx = make_substring_ctx(
+        vec![
+            ("userservice", 0, vec![10]),       // in dir_a
+            ("servicehelper", 1, vec![20]),      // in dir_b
+            ("orderservice", 0, vec![30]),       // in dir_a
+        ],
+        vec![
+            "C:\\project\\dir_a\\FileA.cs",
+            "C:\\project\\dir_b\\FileB.cs",
+        ],
+    );
+    // Override server_dir to match the file paths
+    let ctx = HandlerContext {
+        server_dir: "C:\\project".to_string(),
+        ..ctx
+    };
+
+    // Search with dir filter restricting to dir_a only
+    let result = handle_search_grep(&ctx, &json!({
+        "terms": "service",
+        "substring": true,
+        "dir": "C:\\project\\dir_a"
+    }));
+    assert!(!result.is_error, "Grep should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Should find files only in dir_a
+    assert_eq!(output["summary"]["totalFiles"], 1,
+        "Should find 1 file in dir_a, got: {}", output["summary"]["totalFiles"]);
+
+    // matchedTokens should NOT contain "servicehelper" (only in dir_b)
+    let matched_tokens = output["summary"]["matchedTokens"].as_array().unwrap();
+    let token_names: Vec<&str> = matched_tokens.iter()
+        .filter_map(|t| t.as_str())
+        .collect();
+
+    assert!(token_names.contains(&"userservice"),
+        "matchedTokens should contain 'userservice' (in dir_a). Got: {:?}", token_names);
+    assert!(token_names.contains(&"orderservice"),
+        "matchedTokens should contain 'orderservice' (in dir_a). Got: {:?}", token_names);
+    assert!(!token_names.contains(&"servicehelper"),
+        "BUG-7: matchedTokens should NOT contain 'servicehelper' (only in dir_b). Got: {:?}", token_names);
+}
+
+/// BUG-7: matchedTokens filtered by ext filter.
+#[test]
+fn test_substring_matched_tokens_filtered_by_ext() {
+    let ctx = make_substring_ctx(
+        vec![
+            ("userservice", 0, vec![10]),       // .cs file
+            ("serviceconfig", 1, vec![20]),     // .xml file
+        ],
+        vec![
+            "C:\\project\\Service.cs",
+            "C:\\project\\Config.xml",
+        ],
+    );
+
+    // Search with ext filter restricting to .cs only
+    let result = handle_search_grep(&ctx, &json!({
+        "terms": "service",
+        "substring": true,
+        "ext": "cs"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(output["summary"]["totalFiles"], 1);
+
+    let matched_tokens = output["summary"]["matchedTokens"].as_array().unwrap();
+    let token_names: Vec<&str> = matched_tokens.iter()
+        .filter_map(|t| t.as_str())
+        .collect();
+
+    assert!(token_names.contains(&"userservice"),
+        "matchedTokens should contain 'userservice' (.cs file). Got: {:?}", token_names);
+    assert!(!token_names.contains(&"serviceconfig"),
+        "BUG-7: matchedTokens should NOT contain 'serviceconfig' (.xml file). Got: {:?}", token_names);
+}
+
+/// BUG-7: matchedTokens filtered by exclude filter.
+#[test]
+fn test_substring_matched_tokens_filtered_by_exclude() {
+    let ctx = make_substring_ctx(
+        vec![
+            ("userservice", 0, vec![10]),       // production file
+            ("servicemock", 1, vec![20]),        // mock file
+        ],
+        vec![
+            "C:\\project\\Service.cs",
+            "C:\\project\\ServiceMock.cs",
+        ],
+    );
+
+    // Search with exclude filter removing mock files
+    let result = handle_search_grep(&ctx, &json!({
+        "terms": "service",
+        "substring": true,
+        "exclude": ["Mock"]
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(output["summary"]["totalFiles"], 1);
+
+    let matched_tokens = output["summary"]["matchedTokens"].as_array().unwrap();
+    let token_names: Vec<&str> = matched_tokens.iter()
+        .filter_map(|t| t.as_str())
+        .collect();
+
+    assert!(token_names.contains(&"userservice"),
+        "matchedTokens should contain 'userservice'. Got: {:?}", token_names);
+    assert!(!token_names.contains(&"servicemock"),
+        "BUG-7: matchedTokens should NOT contain 'servicemock' (excluded). Got: {:?}", token_names);
+}
+
+/// BUG-7: matchedTokens empty when no files match (countOnly mode).
+#[test]
+fn test_substring_matched_tokens_empty_when_no_files_match() {
+    let ctx = make_substring_ctx(
+        vec![
+            ("servicehelper", 0, vec![10]),
+        ],
+        vec![
+            "C:\\project\\dir_b\\FileB.cs",
+        ],
+    );
+    let ctx = HandlerContext {
+        server_dir: "C:\\project".to_string(),
+        ..ctx
+    };
+
+    // Search in dir_a (no files there)
+    let result = handle_search_grep(&ctx, &json!({
+        "terms": "service",
+        "substring": true,
+        "dir": "C:\\project\\dir_a",
+        "countOnly": true
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(output["summary"]["totalFiles"], 0);
+    let matched_tokens = output["summary"]["matchedTokens"].as_array().unwrap();
+    assert!(matched_tokens.is_empty(),
+        "BUG-7: matchedTokens should be empty when 0 files match dir filter. Got: {:?}", matched_tokens);
+}
+
 /// BUG-4: search_git_history with reversed date range should return error (cache path).
 #[test]
 fn test_git_history_cached_reversed_dates_returns_error() {
