@@ -436,7 +436,7 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
     // Build output JSON
     let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
-    let defs_json: Vec<Value> = results.iter().map(|(def_idx, def)| {
+    let defs_json: Vec<Value> = results.iter().map(|(def_idx_value, def)| {
         let file_path = index.files.get(def.file_id as usize)
             .map(|s| s.as_str())
             .unwrap_or("");
@@ -463,6 +463,17 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
         if let Some(ref parent) = def.parent {
             obj["parent"] = json!(parent);
         }
+        // Add Angular template metadata
+        if let Some(children) = index.template_children.get(&(*def_idx_value as u32)) {
+            obj["templateChildren"] = json!(children);
+        }
+        for (selector, sel_indices) in &index.selector_index {
+            if sel_indices.contains(&(*def_idx_value as u32)) {
+                obj["selector"] = json!(selector);
+                break;
+            }
+        }
+
         if include_body {
             inject_body_into_obj(
                 &mut obj, file_path, def.line_start, def.line_end,
@@ -473,7 +484,7 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
 
         // Inject codeStats if requested
         if include_code_stats {
-            if let Some(stats) = index.code_stats.get(def_idx) {
+            if let Some(stats) = index.code_stats.get(def_idx_value) {
                 let lines = def.line_end.saturating_sub(def.line_start) + 1;
                 obj["codeStats"] = json!({
                     "lines": lines,

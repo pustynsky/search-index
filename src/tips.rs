@@ -73,7 +73,7 @@ pub fn tips() -> Vec<Tip> {
         },
         Tip {
             rule: "Call chain tracing: search_callers (up and down)",
-            why: "Single sub-millisecond request replaces 7+ sequential grep + read_file calls. direction='up' (callers) or 'down' (callees).",
+            why: "Single sub-millisecond request replaces 7+ sequential grep + read_file calls. direction='up' (callers) or 'down' (callees). For Angular: direction='down' with class shows template children, direction='up' with selector finds parent components.",
             example: "MCP: search_callers method='GetUserAsync', class='UserService', depth=2, direction='up'",
         },
         Tip {
@@ -202,6 +202,18 @@ pub fn strategies() -> Vec<Strategy> {
             ],
         },
         Strategy {
+            name: "Angular Component Hierarchy (TypeScript only)",
+            when: "User asks 'who uses <component>', 'where is it embedded', or 'show parent components' (TypeScript/Angular projects only)",
+            steps: &[
+                "Step 1 (1 call): search_callers method='<selector>' direction='up' -> finds parent components via templateChildren (<1ms)",
+                "Step 2 (optional): search_callers method='<parent-selector>' direction='up' -> traces further up the component tree",
+            ],
+            anti_patterns: &[
+                "Don't use search_grep to find component selectors in HTML -- search_callers resolves template relationships from the AST index in <1ms",
+                "Don't forget to use the component selector (e.g. 'app-header'), not the class name, when searching direction='up'",
+            ],
+        },
+        Strategy {
             name: "Code Health Scan",
             when: "User asks 'find complex methods', 'code quality', 'refactoring candidates', or 'technical debt'",
             steps: &[
@@ -273,7 +285,8 @@ pub fn parameter_examples() -> Value {
             "regex": "name='I.*Cache' with regex=true -> all types matching pattern",
             "kind": "C# kinds: class, interface, method, property, field, enum, struct, record, constructor, delegate, event. TypeScript kinds: function, typeAlias, variable (plus shared: class, interface, method, property, enum, constructor, enumMember). SQL kinds: storedProcedure, table, view, sqlFunction, userDefinedType",
             "includeCodeStats": "Each method gets: lines, cyclomaticComplexity, cognitiveComplexity, maxNestingDepth, paramCount, returnCount, callCount, lambdaCount",
-            "audit": "Shows: total files, files with/without definitions, read errors, lossy UTF-8, suspicious files (large files with 0 definitions)"
+            "audit": "Shows: total files, files with/without definitions, read errors, lossy UTF-8, suspicious files (large files with 0 definitions)",
+            "angular": "Angular @Component classes include 'selector' and 'templateChildren' in output, showing which child components are used in the template"
         },
         "search_grep": {
             "terms": "Token: 'HttpClient'. Multi-term OR: 'HttpClient,ILogger,Task'. Multi-term AND (mode='and'): 'ServiceProvider,IUserService'. Phrase (phrase=true): 'new HttpClient'. Regex (regex=true): 'I.*Cache'",
@@ -284,9 +297,10 @@ pub fn parameter_examples() -> Value {
         },
         "search_callers": {
             "class": "'UserService' -> DI-aware: also finds callers using IUserService. Without class, results mix callers from ALL classes with same method name",
-            "method": "'GetUserAsync'",
-            "direction": "'up' = who calls this (callers, default). 'down' = what this calls (callees)",
-            "resolveInterfaces": "When tracing callers of IFoo.Bar(), also finds callers of FooImpl.Bar() where FooImpl implements IFoo"
+            "method": "'GetUserAsync'. Angular/TS only: pass a selector (e.g. 'app-header') as method with direction='up' to find parent components that embed it via templateChildren. Returns templateUsage: true for template-based relationships",
+            "direction": "'up' = who calls this (callers, default). 'down' = what this calls (callees). Angular/TS only: 'down' with class name shows child components from HTML template (recursive with depth). 'up' with selector (e.g. 'app-header') finds parent components that use it in their templates",
+            "resolveInterfaces": "When tracing callers of IFoo.Bar(), also finds callers of FooImpl.Bar() where FooImpl implements IFoo",
+            "angular": "TypeScript/Angular only: method='app-header' direction='up' -> finds parent components embedding <app-header> via templateChildren (templateUsage: true). method='processOrder' class='OrderFormComponent' direction='down' -> shows child components used in template"
         },
         "search_fast": {
             "pattern": "Single: 'UserService'. Multi-term OR: 'UserService,OrderProcessor' finds files matching ANY term"

@@ -208,6 +208,8 @@ pub fn cmd_serve(args: ServeArgs) {
             lossy_file_count: 0,
             empty_file_ids: Vec::new(),
             extension_methods: HashMap::new(),
+            selector_index: HashMap::new(),
+            template_children: HashMap::new(),
         };
         let def_arc = Arc::new(RwLock::new(empty_def));
 

@@ -398,6 +398,12 @@ const DEF_INDEX_BUILDING_MSG: &str =
 const ALREADY_BUILDING_MSG: &str =
     "Index is already being built in the background. Please wait for it to finish.";
 
+/// Minimum response budget for search_help (20KB).
+/// search_help returns reference content (best practices, strategies, parameter examples)
+/// that exceeds the default 16KB search-result budget (~17KB as of 21 tips).
+/// 20KB gives ~18% headroom for adding a few more tips before hitting the limit.
+const SEARCH_HELP_MIN_RESPONSE_BYTES: usize = 20_480;
+
 /// Returns true when a tool requires the content index to be ready.
 fn requires_content_index(tool_name: &str) -> bool {
     matches!(tool_name, "search_grep" | "search_fast" | "search_reindex")
@@ -452,12 +458,25 @@ pub fn dispatch_tool(
         return result;
     }
 
+    // search_help is reference content (best practices, strategies, examples).
+    // Use a larger response budget (32KB) to avoid truncating static help text.
+    let effective_max = if tool_name == "search_help" {
+        ctx.max_response_bytes.max(SEARCH_HELP_MIN_RESPONSE_BYTES)
+    } else {
+        ctx.max_response_bytes
+    };
+
     if ctx.metrics {
-        // inject_metrics also calls truncate_large_response internally
-        utils::inject_metrics(result, ctx, dispatch_start)
+        // inject_metrics uses ctx.max_response_bytes internally — override for search_help
+        if tool_name == "search_help" {
+            // search_help is static content, no need for metrics injection
+            utils::truncate_response_if_needed(result, effective_max)
+        } else {
+            utils::inject_metrics(result, ctx, dispatch_start)
+        }
     } else {
         // Even without metrics, apply response size truncation
-        utils::truncate_response_if_needed(result, ctx.max_response_bytes)
+        utils::truncate_response_if_needed(result, effective_max)
     }
 }
 
@@ -465,7 +484,7 @@ pub fn dispatch_tool(
 
 fn handle_search_help() -> ToolCallResult {
     let help = crate::tips::render_json();
-    ToolCallResult::success(serde_json::to_string_pretty(&help).unwrap())
+    ToolCallResult::success(serde_json::to_string(&help).unwrap())
 }
 
 /// Build search_info response from in-memory indexes only.

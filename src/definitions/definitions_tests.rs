@@ -90,7 +90,7 @@ fn test_definition_index_serialization() {
         kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0]); m },
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m },
-        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
+        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
     };
 
     let encoded = bincode::serialize(&index).unwrap();

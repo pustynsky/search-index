@@ -324,19 +324,68 @@ fn extract_ts_modifiers(node: tree_sitter::Node, source: &str) -> Vec<String> {
 }
 
 /// Extract decorators from a TypeScript node (equivalent to C# attributes).
+/// Also checks the parent `export_statement` for decorators, because tree-sitter-typescript
+/// places decorators as siblings of the class_declaration inside export_statement:
+///   export_statement → [decorator, class_declaration]
 fn extract_ts_decorators(node: tree_sitter::Node, source: &str) -> Vec<String> {
     let mut decorators = Vec::new();
+    // Check direct children of this node
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
             if child.kind() == "decorator" {
-                // Get full decorator text minus the leading '@'
                 let text = node_text(child, source);
                 let trimmed = text.strip_prefix('@').unwrap_or(text).to_string();
                 decorators.push(trimmed);
             }
         }
     }
+    // If no decorators found and parent is export_statement, check parent's children
+    // (tree-sitter-typescript places decorators as siblings inside export_statement)
+    if decorators.is_empty() {
+        if let Some(parent) = node.parent() {
+            if parent.kind() == "export_statement" {
+                for i in 0..parent.child_count() {
+                    if let Some(child) = parent.child(i) {
+                        if child.kind() == "decorator" {
+                            let text = node_text(child, source);
+                            let trimmed = text.strip_prefix('@').unwrap_or(text).to_string();
+                            decorators.push(trimmed);
+                        }
+                    }
+                }
+            }
+        }
+    }
     decorators
+}
+
+/// Extract Angular @Component metadata from decorator text.
+/// Input — decorator text without `@`:
+///   "Component({selector: 'datahub-embed', templateUrl: './file.html'})"
+/// Returns (selector, templateUrl) if found.
+pub(crate) fn extract_component_metadata(decorator_text: &str) -> Option<(String, Option<String>)> {
+    if !decorator_text.starts_with("Component(") {
+        return None;
+    }
+    let selector = extract_decorator_string_property(decorator_text, "selector")?;
+    let template_url = extract_decorator_string_property(decorator_text, "templateUrl");
+    Some((selector, template_url))
+}
+
+/// Extract a string property value from decorator text.
+/// Looks for: propertyName: 'value' or propertyName: "value"
+fn extract_decorator_string_property(text: &str, property: &str) -> Option<String> {
+    let search = format!("{}:", property);
+    let pos = text.find(&search)?;
+    let after_colon = &text[pos + search.len()..];
+    let trimmed = after_colon.trim_start();
+    let quote_char = trimmed.chars().next()?;
+    if quote_char != '\'' && quote_char != '"' { return None; }
+    let inner = &trimmed[1..];
+    let end = inner.find(quote_char)?;
+    let value = &inner[..end];
+    if value.is_empty() { return None; }
+    Some(value.to_string())
 }
 
 /// Extract base types / heritage (extends/implements) from a class or interface.

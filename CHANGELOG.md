@@ -8,6 +8,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-22
 
+### Features
+
+- **Angular Template Metadata** — Enriched Angular `@Component` definitions with template metadata. `search_definitions` now returns `selector` and `templateChildren` for Angular components. `search_callers` supports component tree navigation — `direction='down'` shows child components from HTML templates (recursive), `direction='up'` with a selector finds parent components. Custom elements (tags with hyphens) are extracted from external `.html` templates.
+
 ### Breaking Changes
 
 - **Removed `search_git_pickaxe` MCP tool** — The `search_git_pickaxe` tool has been removed. Its use cases (finding when code was introduced) are better served by the `search_grep` → `search_git_blame` workflow, which is 780x faster (~200ms vs 156 seconds) and handles file renames correctly. The only unique pickaxe capability (finding deleted code) was rare and can be done via `git log -S` directly if needed. Tool count: 16 → 15. Also removed: `next_day_public()`, `run_git_public()`, `FIELD_SEP_STR/CHAR`, `RECORD_SEP_STR/CHAR` (all were pickaxe-only). Updated "Code History Investigation" strategy recipe to use grep+blame workflow. Removed 14 pickaxe unit tests + 3 helper tests.

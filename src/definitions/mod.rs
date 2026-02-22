@@ -21,6 +21,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 
 use crate::{clean_path, read_file_lossy};
+use parser_typescript::extract_component_metadata;
 
 // ─── Index Build ─────────────────────────────────────────────────────
 
@@ -264,6 +265,56 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         }
     }
 
+    // ─── Angular template enrichment ──────────────────────────────────────
+    let template_start = Instant::now();
+    let mut selector_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut template_children: HashMap<u32, Vec<String>> = HashMap::new();
+    let mut templates_processed = 0usize;
+    let mut templates_failed = 0usize;
+
+    for (def_idx, def) in definitions.iter().enumerate() {
+        if def.kind != DefinitionKind::Class { continue; }
+        let component_attr = match def.attributes.iter().find(|a| a.starts_with("Component(")) {
+            Some(a) => a,
+            None => continue,
+        };
+        let (selector, template_url) = match extract_component_metadata(component_attr) {
+            Some(meta) => meta,
+            None => continue,
+        };
+        // Add selector to name_index for discoverability
+        let sel_lower = selector.to_lowercase();
+        name_index.entry(sel_lower).or_default().push(def_idx as u32);
+
+        selector_index.entry(selector).or_default().push(def_idx as u32);
+
+        if let Some(ref tpl_url) = template_url {
+            let ts_file_path = match files.get(def.file_id as usize) {
+                Some(p) => p,
+                None => continue,
+            };
+            let html_path = match std::path::Path::new(ts_file_path).parent() {
+                Some(dir) => dir.join(tpl_url.strip_prefix("./").unwrap_or(tpl_url)),
+                None => std::path::PathBuf::from(tpl_url),
+            };
+            match std::fs::read_to_string(&html_path) {
+                Ok(html_content) => {
+                    let children = extract_custom_elements(&html_content);
+                    if !children.is_empty() {
+                        template_children.insert(def_idx as u32, children);
+                        templates_processed += 1;
+                    }
+                }
+                Err(_) => { templates_failed += 1; }
+            }
+        }
+    }
+
+    if templates_processed > 0 || templates_failed > 0 {
+        eprintln!("[def-index] Angular templates: {} enriched, {} read errors ({:.1}ms)",
+            templates_processed, templates_failed, template_start.elapsed().as_secs_f64() * 1000.0);
+    }
+
     // Report suspicious files (>500 bytes but 0 definitions)
     let suspicious_threshold = 500u64;
     let suspicious: Vec<_> = empty_file_ids.iter()
@@ -318,7 +369,42 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         empty_file_ids,
         code_stats,
         extension_methods,
+        selector_index,
+        template_children,
     }
+}
+
+/// Extract custom element tag names from HTML content.
+/// Custom elements are identified by a hyphen in the tag name (HTML spec, web components).
+/// Excludes Angular built-ins: ng-container, ng-content, ng-template.
+/// Returns a deduplicated, sorted list in lowercase.
+pub(crate) fn extract_custom_elements(html_content: &str) -> Vec<String> {
+    let mut elements: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let bytes = html_content.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+    while i < len {
+        if bytes[i] == b'<' && i + 1 < len && bytes[i + 1].is_ascii_alphabetic() {
+            let start = i + 1;
+            let mut end = start;
+            while end < len && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'-') {
+                end += 1;
+            }
+            let tag_name = &html_content[start..end];
+            if tag_name.contains('-') {
+                let tag_lower = tag_name.to_lowercase();
+                if !tag_lower.starts_with("ng-") && seen.insert(tag_lower.clone()) {
+                    elements.push(tag_lower);
+                }
+            }
+            i = end;
+        } else {
+            i += 1;
+        }
+    }
+    elements.sort();
+    elements
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────

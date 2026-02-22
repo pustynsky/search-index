@@ -2166,13 +2166,13 @@ The E2E test script (`e2e-test.ps1`) uses **`Start-Job`** to run independent MCP
 |-------|-------|---------------|--------|
 | **Sequential CLI** | T01-T22, T24, T42/T42b, T49, T54, T61-T64, T65(fast), T76, T80, T82 | ❌ No | Share index files in `%LOCALAPPDATA%/search-index/` for current directory |
 | **Sequential state** | T-EXT-CHECK, T-DEF-AUDIT, T-SHUTDOWN | ❌ No | T-EXT-CHECK depends on T20; T-SHUTDOWN modifies global state |
-| **MCP callers** | T65-66, T67, T68, T69, T-FIX3-EXPR-BODY, T-FIX3-VERIFY, T-FIX3-LAMBDA, T-OVERLOAD-DEDUP-UP, T-SAME-NAME-IFACE | ✅ Yes | Each creates isolated temp directory with own indexes |
+| **MCP callers** | T65-66, T67, T68, T69, T-FIX3-EXPR-BODY, T-FIX3-VERIFY, T-FIX3-LAMBDA, T-OVERLOAD-DEDUP-UP, T-SAME-NAME-IFACE, T-ANGULAR | ✅ Yes | Each creates isolated temp directory with own indexes |
 | **Git MCP** | T-BRANCH-STATUS, T-GIT-FILE-NOT-FOUND, T-GIT-NOCACHE, T-GIT-TOTALCOMMITS, T-GIT-CACHE | ✅ Yes | Read-only queries against current repo |
 | **Serve help** | T-SERVE-HELP-TOOLS | ✅ Yes | Read-only, no index state |
 
 ### Implementation
 
-- **15 parallel tests** launched via `Start-Job` (PowerShell 5.1+)
+- **16 parallel tests** launched via `Start-Job` (PowerShell 5.1+)
 - Each job receives: absolute binary path, absolute project directory, file extension
 - Each job returns: `@{ Name; Passed; Output }` hashtable
 - **120-second timeout** per batch (individual tests typically complete in 3-5 seconds)
@@ -6367,4 +6367,116 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 **Status:** ✅ Implemented
 
+
+## Angular Template Metadata Tests
+
+### T-ANGULAR-01: `def-index` — Angular component selector and template metadata indexed
+
+**Command:**
+
+```powershell
+cargo run -- def-index -d $TEST_DIR -e ts
+```
+
+**Prerequisites:** Directory contains TypeScript files with `@Component({ selector: '...', templateUrl: '...' })` decorators and paired `.html` template files.
+
+**Expected:**
+
+- Exit code: 0
+- `.code-structure` file created
+- The index contains `selector_index` entries mapping selectors (e.g., `"app-root"`, `"child-widget"`) to their component definition indices
+- The index contains `template_children` entries listing custom element tags found in each component's HTML template
+
+**Validates:** Angular `@Component` decorator parsing extracts `selector` and `templateUrl`, reads the paired HTML file, and indexes custom elements (tags containing hyphens) as template children.
+
+---
+
+### T-ANGULAR-02: `serve` — `search_definitions` returns Angular template metadata
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"AppComponent"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definition results
+- Each Angular component definition includes `selector` field (e.g., `"app-root"`)
+- Each Angular component definition includes `templateChildren` array listing child component selectors found in its HTML template (e.g., `["child-widget", "loading-spinner"]`)
+
+**Validates:** `search_definitions` exposes Angular template metadata (selector, templateChildren) in the response for component definitions.
+
+---
+
+### T-ANGULAR-03: `serve` — `search_callers` direction=down shows template children
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"AppComponent","class":"AppComponent","direction":"down"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with call tree
+- `callTree` includes child components from the HTML template with `templateUsage: true`
+- Child entries correspond to selectors found in the component's `.html` file (e.g., `child-widget`, `loading-spinner`)
+
+**Validates:** `search_callers` direction=down includes Angular template children in the call tree, enabling component hierarchy traversal through HTML templates.
+
+---
+
+### T-ANGULAR-04: `serve` — `search_callers` direction=up shows parent components
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"child-widget","direction":"up"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with call tree
+- `callTree` includes parent components that use `<child-widget>` in their HTML templates with `templateUsage: true`
+- Parent entries correspond to components whose `templateChildren` contain `child-widget`
+
+**Validates:** `search_callers` direction=up resolves selectors to parent components via the `selector_index`, enabling reverse template dependency lookup.
+
+---
+
+### T-ANGULAR-05: `def-index` — Graceful handling of missing HTML template
+
+**Command:**
+
+```powershell
+cargo run -- def-index -d $TEST_DIR -e ts
+```
+
+**Prerequisites:** Directory contains a TypeScript file with `@Component({ templateUrl: './nonexistent.html' })` pointing to a file that does not exist.
+
+**Expected:**
+
+- Exit code: 0 (no crash)
+- Component is indexed normally but has no `templateChildren` entries
+- stderr does NOT contain errors about missing HTML file (handled gracefully)
+
+**Validates:** `def-index` completes without error when a component's `templateUrl` points to a non-existent file. The component is still indexed for its selector but without template children.
+
+---
 ---

@@ -205,6 +205,14 @@ pub struct DefinitionIndex {
     /// Populated during C# parsing by detecting static classes with `this` parameter methods.
     #[serde(default)]
     pub extension_methods: HashMap<String, Vec<String>>,
+    /// Angular component selector → def_idx of the @Component class.
+    /// Example: "datahub-compact-view" → [idx of DatahubCompactViewComponent]
+    #[serde(default)]
+    pub selector_index: HashMap<String, Vec<u32>>,
+    /// def_idx of component → child selectors from HTML template.
+    /// Example: idx of DatahubEmbedComponent → ["datahub-compact-view", "pbi-spinner"]
+    #[serde(default)]
+    pub template_children: HashMap<u32, Vec<String>>,
 }
 
 impl Default for DefinitionIndex {
@@ -227,6 +235,8 @@ impl Default for DefinitionIndex {
             lossy_file_count: 0,
             empty_file_ids: Vec::new(),
             extension_methods: HashMap::new(),
+            selector_index: HashMap::new(),
+            template_children: HashMap::new(),
         }
     }
 }

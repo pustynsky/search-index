@@ -621,6 +621,131 @@ $testBlocks += , {
     } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
 }
 
+# T-ANGULAR: Angular template metadata (def-index + .code-structure verification)
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-ANGULAR angular-template-metadata"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_angular_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+        # Create TypeScript fixture with @Component decorators
+        $tsContent = @"
+import { Component } from '@angular/core';
+
+@Component({
+    selector: 'app-root',
+    templateUrl: './app.component.html',
+})
+export class AppComponent {
+    title = 'test-app';
+}
+
+@Component({
+    selector: 'child-widget',
+    templateUrl: './child-widget.component.html',
+})
+export class ChildWidgetComponent {
+    data = [];
+}
+"@
+        Set-Content -Path (Join-Path $tmpDir "app.component.ts") -Value $tsContent
+
+        # Create HTML template for AppComponent
+        $htmlApp = @"
+<div class="container">
+    <child-widget [data]="items"></child-widget>
+    <pbi-spinner *ngIf="loading"></pbi-spinner>
+</div>
+"@
+        Set-Content -Path (Join-Path $tmpDir "app.component.html") -Value $htmlApp
+
+        # Create HTML template for ChildWidgetComponent
+        $htmlChild = @"
+<div>
+    <data-grid [config]="gridConfig"></data-grid>
+</div>
+"@
+        Set-Content -Path (Join-Path $tmpDir "child-widget.component.html") -Value $htmlChild
+
+        # Run def-index
+        & $Bin def-index -d $tmpDir -e ts 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+            Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+            return @{ Name = $name; Passed = $false; Output = "FAILED (def-index exit code: $LASTEXITCODE)" }
+        }
+
+        # Find and read the .code-structure file
+        $idxDir = Join-Path $env:LOCALAPPDATA "search-index"
+        $codeStructFiles = Get-ChildItem -Path $idxDir -Filter "*.code-structure" -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending
+        if (-not $codeStructFiles) {
+            & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+            Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+            return @{ Name = $name; Passed = $false; Output = "FAILED (no .code-structure file found)" }
+        }
+
+        # Use search_definitions via MCP to check for selector and templateChildren
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"AppComponent"}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext ts --definitions 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*4' } | Select-Object -Last 1
+
+        $errors = @()
+
+        # Check that the response contains selector info
+        if (-not $jsonLine) {
+            $errors += "no JSON-RPC response for search_definitions"
+        } else {
+            if ($jsonLine -notmatch 'app-root') {
+                $errors += "selector 'app-root' not found in response"
+            }
+            if ($jsonLine -notmatch 'child-widget') {
+                $errors += "'child-widget' not found in templateChildren"
+            }
+            if ($jsonLine -notmatch 'pbi-spinner') {
+                $errors += "'pbi-spinner' not found in templateChildren"
+            }
+        }
+
+        # Also check ChildWidgetComponent for data-grid
+        $msgs2 = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"ChildWidgetComponent"}}}'
+        ) -join "`n"
+        $output2 = ($msgs2 | & $Bin serve --dir $tmpDir --ext ts --definitions 2>$null) | Out-String
+        $jsonLine2 = $output2 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*4' } | Select-Object -Last 1
+
+        if (-not $jsonLine2) {
+            $errors += "no JSON-RPC response for ChildWidgetComponent"
+        } else {
+            if ($jsonLine2 -notmatch 'child-widget') {
+                $errors += "selector 'child-widget' not found in ChildWidgetComponent"
+            }
+            if ($jsonLine2 -notmatch 'data-grid') {
+                $errors += "'data-grid' not found in ChildWidgetComponent templateChildren"
+            }
+        }
+
+        & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+
+        if ($errors.Count -gt 0) {
+            return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" }
+        }
+        return @{ Name = $name; Passed = $true; Output = "OK" }
+    } catch {
+        if (Test-Path $tmpDir) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
 # --- Launch all parallel jobs ---
 $parallelJobs = @()
 foreach ($block in $testBlocks) {
