@@ -59,9 +59,8 @@ fn test_definition_kind_roundtrip_all_variants() {
 
 #[test]
 fn test_definition_index_build_and_search() {
-    let dir = std::env::temp_dir().join("search_defindex_test");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     std::fs::write(dir.join("test.cs"), "public class TestClass : BaseClass { public void TestMethod() {} }").unwrap();
     std::fs::write(dir.join("test.sql"), "CREATE TABLE TestTable (Id INT NOT NULL)").unwrap();
 
@@ -74,8 +73,6 @@ fn test_definition_index_build_and_search() {
     assert!(index.name_index.contains_key("testmethod"));
     assert!(index.kind_index.contains_key(&DefinitionKind::Class));
     assert!(index.kind_index.contains_key(&DefinitionKind::Method));
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -107,22 +104,20 @@ fn test_definition_index_serialization() {
 
 #[test]
 fn test_read_file_lossy_with_valid_utf8() {
-    let dir = std::env::temp_dir().join("search_test_lossy_valid");
-    let _ = std::fs::create_dir_all(&dir);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     let file_path = dir.join("valid.cs");
     std::fs::write(&file_path, "public class ValidService {}").unwrap();
 
     let (content, was_lossy) = search::read_file_lossy(&file_path).unwrap();
     assert!(!was_lossy, "Valid UTF-8 file should not be lossy");
     assert!(content.contains("ValidService"));
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn test_read_file_lossy_with_non_utf8_byte() {
-    let dir = std::env::temp_dir().join("search_test_lossy_invalid");
-    let _ = std::fs::create_dir_all(&dir);
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     let file_path = dir.join("invalid.cs");
 
     // Write a file with 0x92 byte (Windows-1252 right single quote)
@@ -134,8 +129,6 @@ fn test_read_file_lossy_with_non_utf8_byte() {
     assert!(was_lossy, "Non-UTF8 file should be lossy");
     assert!(result.contains("TestService"), "Should still read the file content");
     assert!(result.contains('\u{FFFD}'), "Should contain replacement character");
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 
@@ -144,9 +137,8 @@ fn test_read_file_lossy_with_non_utf8_byte() {
 #[test]
 fn test_build_def_index_cs_only_no_ts_parsers() {
     // When ext="cs" only, TS/TSX parsers should NOT be eagerly created
-    let dir = std::env::temp_dir().join("search_def_cs_only");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
 
     // Create a .cs file and a .ts file
     std::fs::write(dir.join("Service.cs"), "public class UserService { public void Process() {} }").unwrap();
@@ -162,16 +154,13 @@ fn test_build_def_index_cs_only_no_ts_parsers() {
     assert!(idx.name_index.contains_key("userservice"), "Should find C# class");
     assert!(idx.name_index.contains_key("process"), "Should find C# method");
     assert!(!idx.name_index.contains_key("helper"), "Should NOT find TS function when ext=cs");
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn test_build_def_index_cs_and_ts() {
     // When ext="cs,ts", both C# and TS files should be parsed
-    let dir = std::env::temp_dir().join("search_def_cs_ts");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
 
     std::fs::write(dir.join("Service.cs"), "public class UserService { }").unwrap();
     std::fs::write(dir.join("util.ts"), "export function helper(): void {}").unwrap();
@@ -184,16 +173,13 @@ fn test_build_def_index_cs_and_ts() {
 
     assert!(idx.name_index.contains_key("userservice"), "Should find C# class");
     assert!(idx.name_index.contains_key("helper"), "Should find TS function when ext=cs,ts");
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn test_build_def_index_ts_only() {
     // When ext="ts,tsx", only TS/TSX files should be parsed
-    let dir = std::env::temp_dir().join("search_def_ts_only");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
 
     std::fs::write(dir.join("Service.cs"), "public class UserService { }").unwrap();
     std::fs::write(dir.join("app.ts"), "export class AppController { run(): void {} }").unwrap();
@@ -207,6 +193,4 @@ fn test_build_def_index_ts_only() {
     assert!(!idx.name_index.contains_key("userservice"), "Should NOT find C# class when ext=ts");
     assert!(idx.name_index.contains_key("appcontroller"), "Should find TS class");
     assert!(idx.name_index.contains_key("run"), "Should find TS method");
-
-    let _ = std::fs::remove_dir_all(&dir);
 }

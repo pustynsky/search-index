@@ -253,9 +253,8 @@ fn test_parse_tsx_file() {
 
 #[test]
 fn test_ts_incremental_update() {
-    let dir = std::env::temp_dir().join("search_def_ts_incr");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
 
     // Step 1: Create a .ts file and add it to the index
     let test_file = dir.join("service.ts");
@@ -299,8 +298,6 @@ fn test_ts_incremental_update() {
     assert!(!index.name_index.contains_key("updatedservice"));
     assert!(!index.name_index.contains_key("execute"));
     assert!(!index.name_index.contains_key("validate"));
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 
