@@ -137,11 +137,6 @@ pub fn tips() -> Vec<Tip> {
             example: "MCP: search_branch_status repo='.' -> shows branch, behind/ahead counts, fetch age, dirty files",
         },
         Tip {
-            rule: "Use search_git_pickaxe to trace when code was introduced or removed",
-            why: "Faster than search_git_history for finding the exact commit that added/deleted a specific string. Uses git log -S (exact) or -G (regex).",
-            example: "MCP: search_git_pickaxe repo='.', text='ErrorMessage', file='src/Service.cs'",
-        },
-        Tip {
             rule: "Use noCache=true when git results seem stale",
             why: "search_git_history/authors/activity use an in-memory cache for speed. If results seem outdated after recent commits, use noCache=true to bypass cache and query git CLI directly.",
             example: "MCP: search_git_history repo='.', file='src/main.rs', noCache=true",
@@ -196,13 +191,14 @@ pub fn strategies() -> Vec<Strategy> {
             when: "User asks 'when was this bug introduced', 'who changed this file', or 'trace the origin of this code'",
             steps: &[
                 "Step 1 - Verify branch (1 call): search_branch_status repo='.' -> confirm you're on main and data is fresh",
-                "Step 2 - Find introduction commit (1 call): search_git_pickaxe repo='.', text='<error text or code snippet>' -> exact commit that added/removed the text",
-                "Step 3 (optional) - Full history (1 call): search_git_history repo='.', file='<file from step 2>' -> all commits for context",
-                "Step 4 (optional) - File ownership (1 call): search_git_authors repo='.', path='<file>' -> who maintains this file",
+                "Step 2 - Find where code lives (1 call): search_grep terms='<error text>' ext='cs' -> find file and line number",
+                "Step 3 - Find who introduced it (1 call): search_git_blame repo='.', file='<file from step 2>', startLine=<line> -> exact commit, author, date",
+                "Step 4 (optional) - Full history (1 call): search_git_history repo='.', file='<file from step 2>' -> all commits for context",
+                "Step 5 (optional) - File ownership (1 call): search_git_authors repo='.', path='<file>' -> who maintains this file",
             ],
             anti_patterns: &[
                 "Don't skip search_branch_status -- investigating on the wrong branch wastes time",
-                "Don't use search_git_history when you only need to find WHEN a specific string appeared -- search_git_pickaxe is more precise",
+                "Don't use search_git_history to find WHEN a specific string appeared -- use search_grep + search_git_blame instead (faster and more precise)",
             ],
         },
         Strategy {
@@ -294,10 +290,6 @@ pub fn parameter_examples() -> Value {
         },
         "search_fast": {
             "pattern": "Single: 'UserService'. Multi-term OR: 'UserService,OrderProcessor' finds files matching ANY term"
-        },
-        "search_git_pickaxe": {
-            "text": "'ErrorMessage' -> finds commits that added/removed this text",
-            "regex": "true + text='Error\\w+' -> uses git -G for regex matching"
         },
         "search_git_history": {
             "author": "'john', 'john@example.com'",
@@ -436,7 +428,7 @@ pub fn render_instructions() -> String {
     }
 
     // --- Git tools (brief mention) ---
-    out.push_str("\nGit tools: search_git_history, search_git_authors, search_git_activity, search_git_blame, search_git_pickaxe, search_branch_status -- use for code history/blame/authorship investigations. Call search_help for details.\n");
+    out.push_str("\nGit tools: search_git_history, search_git_authors, search_git_activity, search_git_blame, search_branch_status -- use for code history/blame/authorship investigations. Call search_help for details.\n");
 
     // --- Soft reference to search_help (Phase 4: no urgency) ---
     out.push_str("\nCall search_help for detailed best practices with examples.\n");

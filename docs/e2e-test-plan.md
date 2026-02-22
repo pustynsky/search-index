@@ -746,7 +746,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 **Expected:**
 
-- stdout: JSON-RPC response with 16 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_reindex_definitions`, `search_definitions`, `search_callers`, `search_help`, `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`, `search_branch_status`, `search_git_pickaxe`
+- stdout: JSON-RPC response with 15 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_reindex_definitions`, `search_definitions`, `search_callers`, `search_help`, `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`, `search_branch_status`
 - Each tool has `name`, `description`, `inputSchema`
 - `search_definitions` inputSchema includes `includeBody` (boolean), `maxBodyLines` (integer), and `maxTotalBodyLines` (integer) parameters
 - Git tools have `repo` (required) and date filter parameters
@@ -5048,13 +5048,13 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 **Expected:**
 
-- `tools` array contains 16 entries (9 original + 7 git)
-- Git tools present: `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`, `search_branch_status`, `search_git_pickaxe`
+- `tools` array contains 15 entries (9 original + 6 git)
+- Git tools present: `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`, `search_branch_status`
 - No `--git` flag needed
 
 **Validates:** Git tools are always available, no opt-in needed.
 
-**Status:** ✅ Covered by unit tests: `test_handle_tools_list` (16 tools), `test_tool_definitions_count` (16 tools)
+**Status:** ✅ Covered by unit tests: `test_handle_tools_list` (15 tools), `test_tool_definitions_count` (15 tools)
 
 ## Git History Cache — Unit Tests (PR 2a)
 
@@ -6098,7 +6098,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
-### T-GIT-PICKAXE-01: `serve` — search_git_pickaxe finds commits where text was added
+> **Note:** `search_git_pickaxe` was removed in 2026-02-22. Use `search_grep` → `search_git_blame` workflow instead. See CHANGELOG for details.
 
 **Command:**
 
@@ -6314,7 +6314,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ### T-TOKEN-BUDGET: Tool definitions stay within token budget
 
-**Tool:** All 16 tools via `tools/list`
+**Tool:** All 15 tools via `tools/list`
 
 **Background:** MCP tool definitions (names, descriptions, parameter schemas) are injected into the LLM system prompt on every turn. To prevent token budget bloat, parameter descriptions are kept concise (semantic purpose + defaults, no concrete examples). Examples are available on-demand via `search_help` → `parameterExamples`.
 

@@ -116,7 +116,7 @@ The engine uses three independent index types plus a git history cache:
 | File name | `.file-list` | `search index` | `search fast` | File paths, sizes, timestamps |
 | Content | `.word-search` | `search content-index` | `search grep` | Token → (file, line numbers) map |
 | Definitions | `.code-structure` | `search def-index` | `search_definitions` / `search_callers` | AST-extracted classes, methods, call sites |
-| Git history | `.git-history` | Background (auto) | `search_git_history` / `search_git_diff` / `search_git_authors` / `search_git_activity` / `search_git_blame` / `search_branch_status` / `search_git_pickaxe` | Commit metadata, file-to-commit mapping, branch status |
+| Git history | `.git-history` | Background (auto) | `search_git_history` / `search_git_diff` / `search_git_authors` / `search_git_activity` / `search_git_blame` / `search_branch_status` | Commit metadata, file-to-commit mapping, branch status |
 
 Indexes are stored in `%LOCALAPPDATA%\search-index\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX) for definitions. The git history cache builds automatically in the background when a `.git` directory is present. See [Architecture](docs/architecture.md) for details.
 
