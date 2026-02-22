@@ -42,6 +42,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 | [Concurrency](docs/concurrency.md) | Thread model, lock strategy, watcher design |
 | [Trade-offs](docs/tradeoffs.md) | Design decisions with alternatives considered |
 | [Benchmarks](docs/benchmarks.md) | Performance data, scaling estimates, industry comparison |
+| [2026-02-21 Feature Release](docs/llm-testing-guide.md) | Design & implementation summary: git tools, branch awareness, call graph fixes, code metrics, performance |
 | [E2E Test Plan](docs/e2e-test-plan.md) | 40+ end-to-end test cases (24 CLI + 16 MCP) with automation script |
 | [Git History Cache Design](user-stories/git-history-cache-design.md) | Cache architecture, data structures, lifecycle, invalidation strategy |
 | [Changelog](CHANGELOG.md) | All notable changes organized by category (features, fixes, performance) |

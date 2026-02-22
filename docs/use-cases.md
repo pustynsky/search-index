@@ -246,21 +246,25 @@ Total: <3 milliseconds
 {"repo": "."}
 → branch=main, behindMain=0, fetchAge="2 hours ago" ✓
 
-// Step 2: Find the exact commit that introduced the text (~1.5s)
-{"repo": ".", "text": "Entry not found for tenant", "maxResults": 3}
-→ commit abc123de by Alice on 2025-01-10: "Add tenant validation to EntryService"
+// Step 2: Find which files contain the text (~1ms)
+{"terms": "Entry not found for tenant", "phrase": true, "showLines": true}
+→ src/Services/EntryService.cs, line 87
 
-// Step 3: See who maintains the file (< 1ms from cache)
+// Step 3: Blame the exact lines to find who introduced it (~200ms)
+{"repo": ".", "file": "src/Services/EntryService.cs", "startLine": 85, "endLine": 90}
+→ line 87: commit abc123de by Alice on 2025-01-10
+
+// Step 4: See who maintains the file (< 1ms from cache)
 {"repo": ".", "path": "src/Services/EntryService.cs", "top": 3}
 → Alice (42 commits), Bob (17 commits), Carol (5 commits)
 
-// Step 4: Get full commit context (~2s)
+// Step 5: Get full commit context (~2s)
 {"repo": ".", "file": "src/Services/EntryService.cs", "from": "2025-01-09", "to": "2025-01-11"}
 → full diff showing the exact lines added
 ```
 
-**Tools used:** `search_branch_status` → `search_git_pickaxe` → `search_git_authors` → `search_git_diff`
-**Total time:** ~4 seconds. Without search-index: ~10 minutes of `git log`, `git blame`, manual searching.
+**Tools used:** `search_branch_status` → `search_grep` → `search_git_blame` → `search_git_authors` → `search_git_diff`
+**Total time:** ~3 seconds. Without search-index: ~10 minutes of `git log`, `git blame`, manual searching.
 
 ---
 

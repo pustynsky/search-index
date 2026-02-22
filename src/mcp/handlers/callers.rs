@@ -155,7 +155,8 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
     } else {
         // For up direction, if method contains '-' it might be a selector
         if method_name.contains('-') {
-            find_template_parents(&method_name, &def_idx)
+            let mut visited = HashSet::new();
+            find_template_parents(&method_name, max_depth, 0, &def_idx, &mut visited)
         } else {
             Vec::new()
         }
@@ -960,8 +961,22 @@ fn build_template_callee_tree(
 }
 
 /// Find parent components that reference a given selector in their templates
-/// (direction = "up" for Angular template navigation).
-fn find_template_parents(selector: &str, def_idx: &DefinitionIndex) -> Vec<Value> {
+/// (direction = "up" for Angular template navigation). Recursive — follows
+/// selector → parent class → parent's selector → grandparent class → ...
+fn find_template_parents(
+    selector: &str,
+    max_depth: usize,
+    current_depth: usize,
+    def_idx: &DefinitionIndex,
+    visited: &mut HashSet<String>,
+) -> Vec<Value> {
+    if current_depth >= max_depth {
+        return Vec::new();
+    }
+    if !visited.insert(selector.to_string()) {
+        return Vec::new();
+    }
+
     let mut parents: Vec<Value> = Vec::new();
     for (parent_di, children) in &def_idx.template_children {
         if children.iter().any(|c| c == selector) {
@@ -978,10 +993,26 @@ fn find_template_parents(selector: &str, def_idx: &DefinitionIndex) -> Vec<Value
                         node["file"] = json!(fname);
                     }
                 }
+                // Resolve this parent's own selector for recursion
+                let mut parent_selector: Option<String> = None;
                 for (sel, indices) in &def_idx.selector_index {
                     if indices.contains(parent_di) {
                         node["selector"] = json!(sel);
+                        parent_selector = Some(sel.clone());
                         break;
+                    }
+                }
+                // Recurse upward: find grandparents that use this parent's selector
+                if let Some(ref ps) = parent_selector {
+                    let grandparents = find_template_parents(
+                        ps,
+                        max_depth,
+                        current_depth + 1,
+                        def_idx,
+                        visited,
+                    );
+                    if !grandparents.is_empty() {
+                        node["parents"] = json!(grandparents);
                     }
                 }
                 parents.push(node);
@@ -2523,7 +2554,8 @@ mod tests {
             idx
         };
 
-        let result = find_template_parents("child-comp", &def_idx);
+        let mut visited = HashSet::new();
+        let result = find_template_parents("child-comp", 3, 0, &def_idx, &mut visited);
         assert_eq!(result.len(), 1, "Should find 1 parent");
         assert_eq!(result[0]["class"].as_str().unwrap(), "ParentComp");
     }
@@ -2543,11 +2575,104 @@ mod tests {
             idx
         };
 
-        let result = find_template_parents("shared-child", &def_idx);
+        let mut visited = HashSet::new();
+        let result = find_template_parents("shared-child", 3, 0, &def_idx, &mut visited);
         assert_eq!(result.len(), 2, "Should find 2 parents using the selector");
         let parent_names: Vec<&str> = result.iter().filter_map(|n| n["class"].as_str()).collect();
         assert!(parent_names.contains(&"ParentA"));
         assert!(parent_names.contains(&"ParentB"));
+    }
+
+    #[test]
+    fn test_find_template_parents_recursive_depth() {
+        // grandchild → child → parent
+        // Searching UP from "grand-child" with depth=3 should find:
+        //   level 1: ChildComp (direct parent)
+        //   level 2: GrandParent (parent of ChildComp, nested in "parents")
+        let definitions = vec![
+            class_def(0, "GrandParent", vec![]),   // idx 0
+            class_def(0, "ChildComp", vec![]),      // idx 1
+            class_def(0, "GrandChild", vec![]),     // idx 2
+        ];
+        let def_idx = {
+            let mut idx = make_def_index(definitions, HashMap::new());
+            // GrandParent uses child-comp in its template
+            idx.template_children.insert(0, vec!["child-comp".to_string()]);
+            // ChildComp uses grand-child in its template
+            idx.template_children.insert(1, vec!["grand-child".to_string()]);
+            // Register selectors
+            idx.selector_index.insert("grand-parent".to_string(), vec![0]);
+            idx.selector_index.insert("child-comp".to_string(), vec![1]);
+            idx.selector_index.insert("grand-child".to_string(), vec![2]);
+            idx
+        };
+
+        // Search UP from "grand-child" with depth=3
+        let mut visited = HashSet::new();
+        let result = find_template_parents("grand-child", 3, 0, &def_idx, &mut visited);
+
+        // Level 1: ChildComp is a direct parent (its template contains "grand-child")
+        assert!(result.iter().any(|n| n["class"].as_str() == Some("ChildComp")),
+            "Should find ChildComp as direct parent, got {:?}", result);
+
+        // Level 2: GrandParent is a grandparent, nested in ChildComp's "parents" field
+        let child_node = result.iter().find(|n| n["class"].as_str() == Some("ChildComp")).unwrap();
+        let grandparents = child_node["parents"].as_array()
+            .expect("ChildComp should have 'parents' field with grandparents");
+        assert!(grandparents.iter().any(|p| p["class"].as_str() == Some("GrandParent")),
+            "Should find GrandParent as grandparent (depth 2). Got parents: {:?}", grandparents);
+    }
+
+    #[test]
+    fn test_find_template_parents_respects_max_depth() {
+        // Same 3-level hierarchy, but depth=1 should only return direct parent
+        let definitions = vec![
+            class_def(0, "GrandParent", vec![]),   // idx 0
+            class_def(0, "ChildComp", vec![]),      // idx 1
+            class_def(0, "GrandChild", vec![]),     // idx 2
+        ];
+        let def_idx = {
+            let mut idx = make_def_index(definitions, HashMap::new());
+            idx.template_children.insert(0, vec!["child-comp".to_string()]);
+            idx.template_children.insert(1, vec!["grand-child".to_string()]);
+            idx.selector_index.insert("grand-parent".to_string(), vec![0]);
+            idx.selector_index.insert("child-comp".to_string(), vec![1]);
+            idx.selector_index.insert("grand-child".to_string(), vec![2]);
+            idx
+        };
+
+        let mut visited = HashSet::new();
+        let result = find_template_parents("grand-child", 1, 0, &def_idx, &mut visited);
+
+        // depth=1: only direct parent, no recursion
+        assert_eq!(result.len(), 1, "Should find exactly 1 parent with depth=1");
+        assert_eq!(result[0]["class"].as_str().unwrap(), "ChildComp");
+        assert!(result[0].get("parents").is_none(),
+            "With depth=1, should NOT recurse to find grandparents");
+    }
+
+    #[test]
+    fn test_find_template_parents_cyclic() {
+        // CompA uses comp-b, CompB uses comp-a — upward should not infinite loop
+        let definitions = vec![
+            class_def(0, "CompA", vec![]),  // idx 0
+            class_def(0, "CompB", vec![]),  // idx 1
+        ];
+        let def_idx = {
+            let mut idx = make_def_index(definitions, HashMap::new());
+            idx.template_children.insert(0, vec!["comp-b".to_string()]);
+            idx.template_children.insert(1, vec!["comp-a".to_string()]);
+            idx.selector_index.insert("comp-a".to_string(), vec![0]);
+            idx.selector_index.insert("comp-b".to_string(), vec![1]);
+            idx
+        };
+
+        let mut visited = HashSet::new();
+        let result = find_template_parents("comp-a", 10, 0, &def_idx, &mut visited);
+        // Should find CompB as parent (uses comp-a), then CompB's selector is comp-b,
+        // searching for comp-b finds CompA as parent, but comp-a is already visited → stops
+        assert!(!result.is_empty(), "Should find at least CompB as parent");
+        // Should not panic or infinite loop
     }
 
     #[test]
@@ -2562,7 +2687,8 @@ mod tests {
             idx
         };
 
-        let result = find_template_parents("nonexistent-selector", &def_idx);
+        let mut visited = HashSet::new();
+        let result = find_template_parents("nonexistent-selector", 3, 0, &def_idx, &mut visited);
         assert!(result.is_empty(), "Non-existent selector should return empty");
     }
 

@@ -6460,6 +6460,32 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 
 ---
 
+### T-ANGULAR-04b: `serve` — `search_callers` direction=up recursive depth shows grandparents
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"grand-child","direction":"up","depth":3}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
+```
+
+**Prerequisites:** Directory contains a 3-level Angular component hierarchy: GrandParent uses `<child-comp>`, ChildComp uses `<grand-child>`.
+
+**Expected:**
+
+- stdout: JSON-RPC response with call tree
+- `callTree` includes ChildComp as direct parent (level 1) with `templateUsage: true`
+- ChildComp node has a `"parents"` field containing GrandParent (level 2)
+- `depth` parameter controls recursion depth (depth=1 returns only direct parent, no grandparents)
+
+**Validates:** `search_callers` direction=up recursively traces parent components beyond level 1, respecting the `depth` parameter. Grandparents are nested in the `"parents"` field of each parent node. Cycle detection prevents infinite loops for circular component references.
+
+---
+
 ### T-ANGULAR-05: `def-index` — Graceful handling of missing HTML template
 
 **Command:**

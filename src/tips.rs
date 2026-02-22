@@ -205,8 +205,8 @@ pub fn strategies() -> Vec<Strategy> {
             name: "Angular Component Hierarchy (TypeScript only)",
             when: "User asks 'who uses <component>', 'where is it embedded', or 'show parent components' (TypeScript/Angular projects only)",
             steps: &[
-                "Step 1 (1 call): search_callers method='<selector>' direction='up' -> finds parent components via templateChildren (<1ms)",
-                "Step 2 (optional): search_callers method='<parent-selector>' direction='up' -> traces further up the component tree",
+                "Step 1 (1 call): search_callers method='<selector>' direction='up' depth=3 -> finds parent AND grandparent components recursively via templateChildren (<1ms). Parents nested in 'parents' field.",
+                "Step 2 (optional): search_callers method='<class-name>' direction='down' depth=2 -> shows child components used in template (recursive)",
             ],
             anti_patterns: &[
                 "Don't use search_grep to find component selectors in HTML -- search_callers resolves template relationships from the AST index in <1ms",
@@ -298,7 +298,7 @@ pub fn parameter_examples() -> Value {
         "search_callers": {
             "class": "'UserService' -> DI-aware: also finds callers using IUserService. Without class, results mix callers from ALL classes with same method name",
             "method": "'GetUserAsync'. Angular/TS only: pass a selector (e.g. 'app-header') as method with direction='up' to find parent components that embed it via templateChildren. Returns templateUsage: true for template-based relationships",
-            "direction": "'up' = who calls this (callers, default). 'down' = what this calls (callees). Angular/TS only: 'down' with class name shows child components from HTML template (recursive with depth). 'up' with selector (e.g. 'app-header') finds parent components that use it in their templates",
+            "direction": "'up' = who calls this (callers, default). 'down' = what this calls (callees). Angular/TS only: 'down' with class name shows child components from HTML template (recursive with depth). 'up' with selector (e.g. 'app-header') finds parent components recursively — depth=3 traverses grandparents, great-grandparents etc. Parents nested in 'parents' field",
             "resolveInterfaces": "When tracing callers of IFoo.Bar(), also finds callers of FooImpl.Bar() where FooImpl implements IFoo",
             "angular": "TypeScript/Angular only: method='app-header' direction='up' -> finds parent components embedding <app-header> via templateChildren (templateUsage: true). method='processOrder' class='OrderFormComponent' direction='down' -> shows child components used in template"
         },
