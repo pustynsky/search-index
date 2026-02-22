@@ -2156,6 +2156,41 @@ if ($failed -gt 0) { exit 1 }
 
 ---
 
+## Test Parallelization
+
+The E2E test script (`e2e-test.ps1`) uses **`Start-Job`** to run independent MCP tests in parallel, reducing total execution time by ~50%.
+
+### Test Classification
+
+| Group | Tests | Parallelizable | Reason |
+|-------|-------|---------------|--------|
+| **Sequential CLI** | T01-T22, T24, T42/T42b, T49, T54, T61-T64, T65(fast), T76, T80, T82 | ❌ No | Share index files in `%LOCALAPPDATA%/search-index/` for current directory |
+| **Sequential state** | T-EXT-CHECK, T-DEF-AUDIT, T-SHUTDOWN | ❌ No | T-EXT-CHECK depends on T20; T-SHUTDOWN modifies global state |
+| **MCP callers** | T65-66, T67, T68, T69, T-FIX3-EXPR-BODY, T-FIX3-VERIFY, T-FIX3-LAMBDA, T-OVERLOAD-DEDUP-UP, T-SAME-NAME-IFACE | ✅ Yes | Each creates isolated temp directory with own indexes |
+| **Git MCP** | T-BRANCH-STATUS, T-GIT-FILE-NOT-FOUND, T-GIT-NOCACHE, T-GIT-TOTALCOMMITS, T-GIT-CACHE | ✅ Yes | Read-only queries against current repo |
+| **Serve help** | T-SERVE-HELP-TOOLS | ✅ Yes | Read-only, no index state |
+
+### Implementation
+
+- **15 parallel tests** launched via `Start-Job` (PowerShell 5.1+)
+- Each job receives: absolute binary path, absolute project directory, file extension
+- Each job returns: `@{ Name; Passed; Output }` hashtable
+- **120-second timeout** per batch (individual tests typically complete in 3-5 seconds)
+- Binary path resolved to absolute before job launch (jobs run in different working directory)
+- Git tests use absolute repo path (not `"."`) to avoid working directory issues in jobs
+
+### Estimated Speedup
+
+| Metric | Sequential | Parallel |
+|--------|-----------|----------|
+| MCP callers (9 tests × ~4s) | ~36s | ~5s |
+| Git MCP (5 tests × ~3s) | ~15s | ~4s |
+| Serve help (1 test) | ~1s | included |
+| **Parallel batch total** | **~52s** | **~6s** |
+| Total E2E (with sequential) | ~2 min | **~1 min** |
+
+---
+
 ## When to Run
 
 - ✅ After every major refactoring or structural change

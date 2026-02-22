@@ -20,6 +20,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 - **`search_info` memory spike fix — 1.8 GB temporary allocation eliminated** — `search_info` MCP handler was calling `cmd_info_json()` which fully deserialized ALL index files from `%LOCALAPPDATA%/search-index/` (including indexes for repos the server doesn't serve). For a multi-repo setup with multiple indexed directories, this loaded ~1.8 GB into memory temporarily. Since the main thread never exits, mimalloc never decommitted these freed segments back to the OS, causing Working Set to stay at ~4.4 GB instead of ~2.5 GB. **Fix:** Rewrote `handle_search_info()` to read all statistics from already-loaded in-memory structures (`ctx.index`, `ctx.def_index`, `ctx.git_cache`) via read locks — zero additional allocations. Disk file sizes obtained via `fs::metadata()` only. Removed the `cmd_info_json()` call entirely from the MCP path. Also removed the temporary `force_mimalloc_collect()` workaround from `dispatch_tool()` that was added during diagnosis. Memory log (`--memory-log`) confirms: `search_info` Δ WS went from +1,799 MB to ~0 MB.
 
+### Performance
+
+- **E2E test parallelization (~50% speedup)** — Parallelized 15 independent MCP tests (9 callers + 5 git + 1 help) using PowerShell `Start-Job`. Sequential CLI tests (shared index state) run first, then the parallel batch runs concurrently. Each parallel test uses isolated temp directories or read-only git queries, ensuring no race conditions. Parallel batch completes in ~6s instead of ~52s sequential. Total E2E time reduced from ~2 min to ~1 min. Compatible with PowerShell 5.1+ (uses `Start-Job`, not PS7-only `ForEach-Object -Parallel`).
+
 ### Internal
 
 - **6 new E2E tests for previously untested MCP features** — Added `T-SERVE-HELP-TOOLS` (verifies `serve --help` lists key tools), `T-BRANCH-STATUS` (smoke test for `search_branch_status` MCP tool), `T-GIT-FILE-NOT-FOUND` (nonexistent file returns warning, not error), `T-GIT-NOCACHE` (`noCache` parameter returns valid result), `T-GIT-TOTALCOMMITS` (totalCommits > returned regression test for BUG-2 fix). Total E2E tests: 48 → 55.
