@@ -127,7 +127,7 @@ fn test_parser_subject_with_field_sep() {
     let cache = parse_mock_log(log);
 
     assert_eq!(cache.commits.len(), 1);
-    let info = cache.query_file_history("file.rs", None, None, None, None, None);
+    let (info, _total) = cache.query_file_history("file.rs", None, None, None, None, None);
     assert_eq!(info.len(), 1);
     assert_eq!(info[0].subject, "Part A␞Part B", "Subject with ␞ should be rejoined");
 }
@@ -241,7 +241,7 @@ fn test_normalize_path_multiple_dot_slash() {
 fn test_query_file_history_basic() {
     let cache = parse_mock_log(multi_commit_log());
 
-    let history = cache.query_file_history("src/main.rs", None, None, None, None, None);
+    let (history, _total) = cache.query_file_history("src/main.rs", None, None, None, None, None);
     assert_eq!(history.len(), 3, "src/main.rs should have 3 commits");
 
     // Should be sorted by timestamp descending (newest first)
@@ -253,7 +253,7 @@ fn test_query_file_history_basic() {
 fn test_query_file_history_max_results() {
     let cache = parse_mock_log(multi_commit_log());
 
-    let history = cache.query_file_history("src/main.rs", Some(2), None, None, None, None);
+    let (history, _total) = cache.query_file_history("src/main.rs", Some(2), None, None, None, None);
     assert_eq!(history.len(), 2, "Should return at most 2 results");
 
     // Should be the 2 newest commits
@@ -266,7 +266,7 @@ fn test_query_file_history_from_date_filter() {
     let cache = parse_mock_log(multi_commit_log());
 
     // Only commits >= timestamp 1700001000
-    let history = cache.query_file_history("src/main.rs", None, Some(1700001000), None, None, None);
+    let (history, _total) = cache.query_file_history("src/main.rs", None, Some(1700001000), None, None, None);
     assert_eq!(history.len(), 2, "Should return 2 commits after from filter");
     assert!(history.iter().all(|c| c.timestamp >= 1700001000));
 }
@@ -276,7 +276,7 @@ fn test_query_file_history_to_date_filter() {
     let cache = parse_mock_log(multi_commit_log());
 
     // Only commits <= timestamp 1700001000
-    let history = cache.query_file_history("src/main.rs", None, None, Some(1700001000), None, None);
+    let (history, _total) = cache.query_file_history("src/main.rs", None, None, Some(1700001000), None, None);
     assert_eq!(history.len(), 2, "Should return 2 commits before to filter");
     assert!(history.iter().all(|c| c.timestamp <= 1700001000));
 }
@@ -286,7 +286,7 @@ fn test_query_file_history_from_to_filter() {
     let cache = parse_mock_log(multi_commit_log());
 
     // Only commits between 1700000500 and 1700001500
-    let history = cache.query_file_history("src/main.rs", None, Some(1700000500), Some(1700001500), None, None);
+    let (history, _total) = cache.query_file_history("src/main.rs", None, Some(1700000500), Some(1700001500), None, None);
     assert_eq!(history.len(), 1, "Should return 1 commit in range");
     assert_eq!(history[0].timestamp, 1700001000);
 }
@@ -295,7 +295,7 @@ fn test_query_file_history_from_to_filter() {
 fn test_query_file_history_nonexistent_file() {
     let cache = parse_mock_log(multi_commit_log());
 
-    let history = cache.query_file_history("nonexistent.rs", None, None, None, None, None);
+    let (history, _total) = cache.query_file_history("nonexistent.rs", None, None, None, None, None);
     assert!(history.is_empty(), "Nonexistent file should return empty vec");
 }
 
@@ -303,7 +303,7 @@ fn test_query_file_history_nonexistent_file() {
 fn test_query_file_history_commit_info_fields() {
     let cache = parse_mock_log(multi_commit_log());
 
-    let history = cache.query_file_history("Cargo.toml", None, None, None, None, None);
+    let (history, _total) = cache.query_file_history("Cargo.toml", None, None, None, None, None);
     assert_eq!(history.len(), 1);
 
     let commit = &history[0];
@@ -547,7 +547,7 @@ fn test_cache_serialization_roundtrip() {
     assert_eq!(decoded.file_commits.len(), cache.file_commits.len());
 
     // Verify query still works after deserialization
-    let history = decoded.query_file_history("src/main.rs", None, None, None, None, None);
+    let (history, _total) = decoded.query_file_history("src/main.rs", None, None, None, None, None);
     assert_eq!(history.len(), 3);
 }
 
@@ -569,7 +569,7 @@ fn test_cache_lz4_compressed_roundtrip() {
     assert_eq!(loaded.file_commits.len(), cache.file_commits.len());
 
     // Verify queries work on loaded cache
-    let history = loaded.query_file_history("src/main.rs", None, None, None, None, None);
+    let (history, _total) = loaded.query_file_history("src/main.rs", None, None, None, None, None);
     assert_eq!(history.len(), 3);
 }
 
@@ -596,7 +596,7 @@ fn test_query_with_backslash_path() {
     let cache = parse_mock_log(multi_commit_log());
 
     // Query with Windows-style path should still find the file
-    let history = cache.query_file_history("src\\main.rs", None, None, None, None, None);
+    let (history, _total) = cache.query_file_history("src\\main.rs", None, None, None, None, None);
     assert_eq!(history.len(), 3, "Backslash path should be normalized for lookup");
 }
 
@@ -604,7 +604,7 @@ fn test_query_with_backslash_path() {
 fn test_query_with_dot_slash_path() {
     let cache = parse_mock_log(multi_commit_log());
 
-    let history = cache.query_file_history("./src/main.rs", None, None, None, None, None);
+    let (history, _total) = cache.query_file_history("./src/main.rs", None, None, None, None, None);
     assert_eq!(history.len(), 3, "./prefix should be normalized for lookup");
 }
 
@@ -666,7 +666,7 @@ fn test_save_load_disk_roundtrip() {
     assert_eq!(loaded.file_commits.len(), cache.file_commits.len());
 
     // Verify queries work on loaded cache
-    let history = loaded.query_file_history("src/main.rs", None, None, None, None, None);
+    let (history, _total) = loaded.query_file_history("src/main.rs", None, None, None, None, None);
     assert_eq!(history.len(), 3);
 
     let authors = loaded.query_authors("src", None, None, None, None);
@@ -876,7 +876,7 @@ fn test_build_with_real_git_repo() {
     assert_eq!(file_b_commits.unwrap().len(), 1, "file_b.txt should have 1 commit ref");
 
     // 9. Verify queries work
-    let history = cache.query_file_history("file_a.txt", None, None, None, None, None);
+    let (history, _total) = cache.query_file_history("file_a.txt", None, None, None, None, None);
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].author_name, "Test");
 
@@ -916,7 +916,7 @@ fn test_parser_bad_timestamp_skipped() {
     );
 
     // Verify the good commit fields
-    let info = cache.query_file_history("file2.rs", None, None, None, None, None);
+    let (info, _total) = cache.query_file_history("file2.rs", None, None, None, None, None);
     assert_eq!(info.len(), 1);
     assert_eq!(info[0].author_name, "Good User");
     assert_eq!(info[0].timestamp, 1700000000);
@@ -1104,8 +1104,8 @@ fn test_build_save_load_roundtrip() {
     assert_eq!(loaded.subjects, cache.subjects);
 
     // Verify queries produce same results
-    let orig_history = cache.query_file_history("file_a.txt", None, None, None, None, None);
-    let loaded_history = loaded.query_file_history("file_a.txt", None, None, None, None, None);
+    let (orig_history, _total) = cache.query_file_history("file_a.txt", None, None, None, None, None);
+    let (loaded_history, _total) = loaded.query_file_history("file_a.txt", None, None, None, None, None);
     assert_eq!(orig_history.len(), loaded_history.len());
     for (o, l) in orig_history.iter().zip(loaded_history.iter()) {
         assert_eq!(o.hash, l.hash);
@@ -1261,7 +1261,7 @@ fn test_build_with_unicode_filenames() {
     }
 
     // Verify query works with unicode filename
-    let history = cache.query_file_history("файл.txt", None, None, None, None, None);
+    let (history, _total) = cache.query_file_history("файл.txt", None, None, None, None, None);
     assert_eq!(history.len(), 1, "файл.txt should have 1 commit");
     assert_eq!(history[0].author_name, "Unicode");
 
@@ -1392,7 +1392,7 @@ fn test_query_file_history_exact_date_boundary() {
     let from_ts = 1734307200i64;  // 2024-12-16 00:00:00 UTC
     let to_ts = 1734393599i64;    // 2024-12-16 23:59:59 UTC
 
-    let history = cache.query_file_history(
+    let (history, _total) = cache.query_file_history(
         "src/helpers/PartialRetryHelper.cs",
         None,
         Some(from_ts),
@@ -1418,7 +1418,7 @@ fn test_query_file_history_wrong_year_returns_empty() {
     let from_ts = 1765843200i64;  // 2025-12-16 00:00:00 UTC
     let to_ts = 1765929599i64;    // 2025-12-16 23:59:59 UTC
 
-    let history = cache.query_file_history(
+    let (history, _total) = cache.query_file_history(
         "src/helpers/PartialRetryHelper.cs",
         None,
         Some(from_ts),
@@ -1444,7 +1444,7 @@ fn test_query_activity_vs_file_history_consistency() {
     let to_ts = 1734393599i64;    // 2024-12-16 23:59:59 UTC
 
     // query_file_history for the specific file
-    let history = cache.query_file_history(
+    let (history, _total) = cache.query_file_history(
         "src/helpers/PartialRetryHelper.cs",
         None,
         Some(from_ts),
@@ -1472,11 +1472,11 @@ fn test_query_file_history_path_case_sensitivity() {
     let cache = parse_mock_log(log);
 
     // Exact path should work
-    let history = cache.query_file_history("src/Helpers/PartialRetryHelper.cs", None, None, None, None, None);
+    let (history, _total) = cache.query_file_history("src/Helpers/PartialRetryHelper.cs", None, None, None, None, None);
     assert_eq!(history.len(), 1, "Exact path should find the commit");
 
     // Different case should NOT work (HashMap is case-sensitive)
-    let history_wrong_case = cache.query_file_history("src/helpers/PartialRetryHelper.cs", None, None, None, None, None);
+    let (history_wrong_case, _total) = cache.query_file_history("src/helpers/PartialRetryHelper.cs", None, None, None, None, None);
     assert_eq!(
         history_wrong_case.len(), 0,
         "Case-mismatched path should NOT find the commit (HashMap is case-sensitive)"
@@ -1549,7 +1549,7 @@ fn test_query_authors_single_commit_timestamps_equal() {
 fn test_query_file_history_author_filter() {
     let cache = parse_mock_log(multi_commit_log());
     // Alice has 2 commits on src/main.rs, Bob has 1
-    let history = cache.query_file_history("src/main.rs", None, None, None, Some("Alice"), None);
+    let (history, _total) = cache.query_file_history("src/main.rs", None, None, None, Some("Alice"), None);
     assert_eq!(history.len(), 2, "Alice should have 2 commits on src/main.rs");
     assert!(history.iter().all(|c| c.author_name == "Alice"));
 }
@@ -1557,7 +1557,7 @@ fn test_query_file_history_author_filter() {
 #[test]
 fn test_query_file_history_author_filter_by_email() {
     let cache = parse_mock_log(multi_commit_log());
-    let history = cache.query_file_history("src/main.rs", None, None, None, Some("bob@"), None);
+    let (history, _total) = cache.query_file_history("src/main.rs", None, None, None, Some("bob@"), None);
     assert_eq!(history.len(), 1, "bob@ should match Bob's email");
     assert_eq!(history[0].author_name, "Bob");
 }
@@ -1565,21 +1565,21 @@ fn test_query_file_history_author_filter_by_email() {
 #[test]
 fn test_query_file_history_author_filter_case_insensitive() {
     let cache = parse_mock_log(multi_commit_log());
-    let history = cache.query_file_history("src/main.rs", None, None, None, Some("alice"), None);
+    let (history, _total) = cache.query_file_history("src/main.rs", None, None, None, Some("alice"), None);
     assert_eq!(history.len(), 2, "Case-insensitive 'alice' should match 'Alice'");
 }
 
 #[test]
 fn test_query_file_history_author_filter_no_match() {
     let cache = parse_mock_log(multi_commit_log());
-    let history = cache.query_file_history("src/main.rs", None, None, None, Some("nonexistent"), None);
+    let (history, _total) = cache.query_file_history("src/main.rs", None, None, None, Some("nonexistent"), None);
     assert!(history.is_empty(), "No author should match 'nonexistent'");
 }
 
 #[test]
 fn test_query_file_history_message_filter() {
     let cache = parse_mock_log(multi_commit_log());
-    let history = cache.query_file_history("src/main.rs", None, None, None, None, Some("bug"));
+    let (history, _total) = cache.query_file_history("src/main.rs", None, None, None, None, Some("bug"));
     assert_eq!(history.len(), 1, "Only 'Fix bug in main' should match 'bug'");
     assert!(history[0].subject.contains("bug"));
 }
@@ -1587,14 +1587,14 @@ fn test_query_file_history_message_filter() {
 #[test]
 fn test_query_file_history_message_filter_case_insensitive() {
     let cache = parse_mock_log(multi_commit_log());
-    let history = cache.query_file_history("src/main.rs", None, None, None, None, Some("FIX BUG"));
+    let (history, _total) = cache.query_file_history("src/main.rs", None, None, None, None, Some("FIX BUG"));
     assert_eq!(history.len(), 1, "Case-insensitive 'FIX BUG' should match");
 }
 
 #[test]
 fn test_query_file_history_message_filter_no_match() {
     let cache = parse_mock_log(multi_commit_log());
-    let history = cache.query_file_history("src/main.rs", None, None, None, None, Some("nonexistent"));
+    let (history, _total) = cache.query_file_history("src/main.rs", None, None, None, None, Some("nonexistent"));
     assert!(history.is_empty());
 }
 
@@ -1602,7 +1602,7 @@ fn test_query_file_history_message_filter_no_match() {
 fn test_query_file_history_author_and_message_combined() {
     let cache = parse_mock_log(multi_commit_log());
     // Alice + "bug" = only the "Fix bug in main" commit
-    let history = cache.query_file_history("src/main.rs", None, None, None, Some("Alice"), Some("bug"));
+    let (history, _total) = cache.query_file_history("src/main.rs", None, None, None, Some("Alice"), Some("bug"));
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].author_name, "Alice");
     assert!(history[0].subject.contains("bug"));
@@ -1612,7 +1612,7 @@ fn test_query_file_history_author_and_message_combined() {
 fn test_query_file_history_author_and_date_combined() {
     let cache = parse_mock_log(multi_commit_log());
     // Alice + timestamp range that only includes the first commit
-    let history = cache.query_file_history("src/main.rs", None, Some(1699999000), Some(1700000500), Some("Alice"), None);
+    let (history, _total) = cache.query_file_history("src/main.rs", None, Some(1699999000), Some(1700000500), Some("Alice"), None);
     assert_eq!(history.len(), 1);
     assert_eq!(history[0].subject, "Initial commit");
 }
@@ -1690,4 +1690,52 @@ fn test_query_authors_whole_repo() {
     // Bob: 1 unique commit (bbbb...)
     assert_eq!(alice.commit_count, 2);
     assert_eq!(bob.commit_count, 1);
+}
+
+// ─── Bug fix: query_file_history returns total count before truncation ──
+
+#[test]
+fn test_query_file_history_total_count_before_truncation() {
+    // BUG-2 fix: query_file_history should return total count BEFORE maxResults truncation.
+    // Previously, totalCommits equaled returned count (e.g. 2 instead of 3).
+    let cache = parse_mock_log(multi_commit_log());
+
+    // src/main.rs has 3 commits. Request maxResults=2.
+    let (history, total_count) = cache.query_file_history("src/main.rs", Some(2), None, None, None, None);
+
+    assert_eq!(history.len(), 2, "Should return 2 commits (maxResults=2)");
+    assert_eq!(total_count, 3, "Total count should be 3 (all commits), not 2 (truncated)");
+}
+
+#[test]
+fn test_query_file_history_total_count_no_truncation() {
+    // When maxResults is not limiting, total_count == returned count.
+    let cache = parse_mock_log(multi_commit_log());
+
+    let (history, total_count) = cache.query_file_history("src/main.rs", None, None, None, None, None);
+
+    assert_eq!(history.len(), 3);
+    assert_eq!(total_count, 3, "Total count should equal returned when no truncation");
+}
+
+#[test]
+fn test_query_file_history_total_count_with_filters() {
+    // Total count should reflect filtered results, not raw file commit count.
+    let cache = parse_mock_log(multi_commit_log());
+
+    // Alice has 2 commits on src/main.rs. Request maxResults=1.
+    let (history, total_count) = cache.query_file_history("src/main.rs", Some(1), None, None, Some("Alice"), None);
+
+    assert_eq!(history.len(), 1, "Should return 1 commit (maxResults=1)");
+    assert_eq!(total_count, 2, "Total should be 2 (Alice's commits), not 1 (truncated)");
+}
+
+#[test]
+fn test_query_file_history_total_count_nonexistent_file() {
+    let cache = parse_mock_log(multi_commit_log());
+
+    let (history, total_count) = cache.query_file_history("nonexistent.rs", Some(10), None, None, None, None);
+
+    assert!(history.is_empty());
+    assert_eq!(total_count, 0, "Nonexistent file should have 0 total");
 }

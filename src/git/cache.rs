@@ -561,6 +561,10 @@ impl GitHistoryCache {
     /// Query file history — returns commits touching this file.
     ///
     /// Order: filter by date/author/message → sort by timestamp descending → truncate to maxResults.
+    ///
+    /// Returns `(commits, total_count)` where `total_count` is the number of matching
+    /// commits BEFORE applying `max_results` truncation. This allows callers to know
+    /// the true total even when results are limited.
     pub fn query_file_history(
         &self,
         file: &str,
@@ -569,12 +573,12 @@ impl GitHistoryCache {
         to: Option<i64>,
         author_filter: Option<&str>,
         message_filter: Option<&str>,
-    ) -> Vec<CommitInfo> {
+    ) -> (Vec<CommitInfo>, usize) {
         let normalized = Self::normalize_path(file);
 
         let commit_ids = match self.file_commits.get(&normalized) {
             Some(ids) => ids,
-            None => return Vec::new(),
+            None => return (Vec::new(), 0),
         };
 
         // Pre-compute matching author indices for O(1) lookup
@@ -627,6 +631,9 @@ impl GitHistoryCache {
         // Sort by timestamp descending (newest first)
         commits.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
 
+        // Count total BEFORE truncation
+        let total_count = commits.len();
+
         // Truncate to maxResults
         if let Some(max) = max_results {
             if max > 0 {
@@ -634,7 +641,7 @@ impl GitHistoryCache {
             }
         }
 
-        commits
+        (commits, total_count)
     }
 
     /// Query authors — aggregate authors for a file or directory.
