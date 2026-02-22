@@ -267,8 +267,7 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                 };
 
                 let max = if max_results == 0 { None } else { Some(max_results) };
-                let commits = cache.query_file_history(&normalized, max, from_ts, to_ts, author_filter, message_filter);
-                let total_count = commits.len();
+                let (commits, total_count) = cache.query_file_history(&normalized, max, from_ts, to_ts, author_filter, message_filter);
                 let elapsed = start.elapsed();
 
                 let commits_json: Vec<Value> = commits.iter().map(|c| {
