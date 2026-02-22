@@ -72,6 +72,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     let files: Vec<String> = crate::index::recover_mutex(all_files, "def-index");
     let total_files = files.len();
     eprintln!("[def-index] Found {} files to parse", total_files);
+    crate::index::log_memory(&format!("def-build: after file walk ({} files)", total_files));
 
     // ─── Parallel parsing ─────────────────────────────────────
     let num_threads = if args.threads > 0 {
@@ -272,6 +273,8 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         eprintln!("[def-index] WARNING: {} files with >{}B but 0 definitions. Run 'search def-audit' to see full list.",
             suspicious.len(), suspicious_threshold);
     }
+
+    crate::index::log_memory(&format!("def-build: parsing complete ({} defs, {} calls)", definitions.len(), total_call_sites));
 
     let elapsed = start.elapsed();
     let files_with_defs = total_files - empty_file_ids.len() - parse_errors;

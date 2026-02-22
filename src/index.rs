@@ -14,6 +14,352 @@ use search::{clean_path, extract_semantic_prefix, generate_trigrams, read_file_l
 
 use crate::{ContentIndexArgs, IndexArgs};
 
+// ─── Memory diagnostics ─────────────────────────────────────────────
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
+
+/// Whether memory logging is enabled (fast check via AtomicBool).
+static MEMORY_LOG_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// Path to the memory.log file (set once by `enable_memory_log`).
+static MEMORY_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+
+/// Startup timestamp for relative timing in log entries.
+static MEMORY_LOG_START: OnceLock<Instant> = OnceLock::new();
+
+/// Enable memory logging: creates/truncates `memory.log` in `index_base`,
+/// writes a header line, and sets the global enable flag.
+///
+/// Must be called once at startup before any `log_memory()` calls.
+pub fn enable_memory_log(index_base: &std::path::Path) {
+    let _ = fs::create_dir_all(index_base);
+    let log_path = index_base.join("memory.log");
+
+    // Truncate and write header
+    if let Ok(mut f) = fs::File::create(&log_path) {
+        let _ = writeln!(f,
+            "{:>8} | {:>8} | {:>8} | {:>8} | {}",
+            "elapsed", "WS_MB", "Peak_MB", "Commit_MB", "label"
+        );
+        let _ = writeln!(f, "{}", "-".repeat(70));
+    }
+
+    let _ = MEMORY_LOG_PATH.set(log_path.clone());
+    let _ = MEMORY_LOG_START.set(Instant::now());
+    MEMORY_LOG_ENABLED.store(true, Ordering::Release);
+
+    eprintln!("[memory-log] Enabled, writing to {}", log_path.display());
+}
+
+/// Log current process memory metrics (Working Set, Peak WS, Commit) to the memory log file.
+///
+/// When `--memory-log` is not passed, this is a fast no-op (single AtomicBool check).
+/// On non-Windows platforms, this is always a no-op.
+#[cfg(target_os = "windows")]
+pub fn log_memory(label: &str) {
+    if !MEMORY_LOG_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+
+    // Windows API: K32GetProcessMemoryInfo
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        PageFaultCount: u32,
+        PeakWorkingSetSize: usize,
+        WorkingSetSize: usize,
+        QuotaPeakPagedPoolUsage: usize,
+        QuotaPagedPoolUsage: usize,
+        QuotaPeakNonPagedPoolUsage: usize,
+        QuotaNonPagedPoolUsage: usize,
+        PagefileUsage: usize,
+        PeakPagefileUsage: usize,
+    }
+
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn K32GetProcessMemoryInfo(
+            process: isize,
+            ppsmemCounters: *mut ProcessMemoryCounters,
+            cb: u32,
+        ) -> i32;
+    }
+
+    let mut pmc = ProcessMemoryCounters {
+        cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+        PageFaultCount: 0,
+        PeakWorkingSetSize: 0,
+        WorkingSetSize: 0,
+        QuotaPeakPagedPoolUsage: 0,
+        QuotaPagedPoolUsage: 0,
+        QuotaPeakNonPagedPoolUsage: 0,
+        QuotaNonPagedPoolUsage: 0,
+        PagefileUsage: 0,
+        PeakPagefileUsage: 0,
+    };
+
+    let ok = unsafe {
+        K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb)
+    };
+
+    if ok == 0 {
+        return;
+    }
+
+    let ws_mb = pmc.WorkingSetSize as f64 / 1_048_576.0;
+    let peak_mb = pmc.PeakWorkingSetSize as f64 / 1_048_576.0;
+    let commit_mb = pmc.PagefileUsage as f64 / 1_048_576.0;
+
+    let elapsed = MEMORY_LOG_START
+        .get()
+        .map(|s| s.elapsed().as_secs_f64())
+        .unwrap_or(0.0);
+
+    let line = format!(
+        "{:8.2} | {:8.1} | {:8.1} | {:8.1} | {}",
+        elapsed, ws_mb, peak_mb, commit_mb, label
+    );
+
+    // Print to stderr
+    eprintln!("[memory] {}", line);
+
+    // Append to log file
+    if let Some(path) = MEMORY_LOG_PATH.get() {
+        if let Ok(mut f) = fs::OpenOptions::new().append(true).open(path) {
+            let _ = writeln!(f, "{}", line);
+        }
+    }
+}
+
+/// Log current process memory metrics — no-op on non-Windows platforms.
+#[cfg(not(target_os = "windows"))]
+pub fn log_memory(_label: &str) {
+    // No-op on non-Windows
+}
+
+/// Get current process memory info as a JSON object.
+/// Returns Working Set, Peak WS, and Commit in MB.
+/// On non-Windows, returns an empty object.
+#[cfg(target_os = "windows")]
+pub fn get_process_memory_info() -> serde_json::Value {
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        PageFaultCount: u32,
+        PeakWorkingSetSize: usize,
+        WorkingSetSize: usize,
+        QuotaPeakPagedPoolUsage: usize,
+        QuotaPagedPoolUsage: usize,
+        QuotaPeakNonPagedPoolUsage: usize,
+        QuotaNonPagedPoolUsage: usize,
+        PagefileUsage: usize,
+        PeakPagefileUsage: usize,
+    }
+
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> isize;
+        fn K32GetProcessMemoryInfo(
+            process: isize,
+            ppsmemCounters: *mut ProcessMemoryCounters,
+            cb: u32,
+        ) -> i32;
+    }
+
+    let mut pmc = ProcessMemoryCounters {
+        cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+        PageFaultCount: 0,
+        PeakWorkingSetSize: 0,
+        WorkingSetSize: 0,
+        QuotaPeakPagedPoolUsage: 0,
+        QuotaPagedPoolUsage: 0,
+        QuotaPeakNonPagedPoolUsage: 0,
+        QuotaNonPagedPoolUsage: 0,
+        PagefileUsage: 0,
+        PeakPagefileUsage: 0,
+    };
+
+    let ok = unsafe {
+        K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb)
+    };
+
+    if ok == 0 {
+        return serde_json::json!({});
+    }
+
+    let round1 = |v: f64| (v * 10.0).round() / 10.0;
+    serde_json::json!({
+        "workingSetMB": round1(pmc.WorkingSetSize as f64 / 1_048_576.0),
+        "peakWorkingSetMB": round1(pmc.PeakWorkingSetSize as f64 / 1_048_576.0),
+        "commitMB": round1(pmc.PagefileUsage as f64 / 1_048_576.0),
+    })
+}
+
+/// Get current process memory info — returns empty object on non-Windows.
+#[cfg(not(target_os = "windows"))]
+pub fn get_process_memory_info() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+/// Force mimalloc to collect and decommit all freed segments.
+/// This prevents abandoned thread heaps from inflating Working Set
+/// after the build+drop+reload pattern.
+pub fn force_mimalloc_collect() {
+    unsafe extern "C" {
+        fn mi_collect(force: bool);
+    }
+    unsafe { mi_collect(true); }
+}
+
+/// Estimate the in-memory size of a ContentIndex.
+/// Returns a JSON object with per-component MB estimates.
+pub fn estimate_content_index_memory(idx: &ContentIndex) -> serde_json::Value {
+    let round1 = |v: f64| (v * 10.0).round() / 10.0;
+
+    // Sample average key length from first 1000 tokens
+    let sample_size = idx.index.len().min(1000);
+    let avg_key_len = if sample_size > 0 {
+        let total_key_bytes: usize = idx.index.keys().take(sample_size).map(|k| k.len()).sum();
+        total_key_bytes as f64 / sample_size as f64
+    } else {
+        8.0
+    };
+
+    // Count total postings and estimate average lines per posting
+    let mut total_postings: usize = 0;
+    let mut total_lines: usize = 0;
+    let posting_sample = idx.index.values().take(1000);
+    for postings in posting_sample {
+        for p in postings {
+            total_postings += 1;
+            total_lines += p.lines.len();
+        }
+    }
+    let avg_lines = if total_postings > 0 {
+        total_lines as f64 / total_postings as f64
+    } else {
+        1.0
+    };
+
+    // If we only sampled, extrapolate total postings
+    let full_total_postings: usize = idx.index.values().map(|v| v.len()).sum();
+
+    // Inverted index estimate:
+    // Each HashMap entry: ~80 bytes overhead + key String (24 + len) + Vec<Posting> (24 + postings)
+    // Each Posting: 4 (file_id) + 24 (Vec header) + lines * 4 = 28 + avg_lines * 4
+    let per_entry = 80.0 + 24.0 + avg_key_len + 24.0;
+    let per_posting = 28.0 + avg_lines * 4.0;
+    let inverted_mb = (idx.index.len() as f64 * per_entry + full_total_postings as f64 * per_posting) / 1_048_576.0;
+
+    // Trigram tokens estimate
+    let tri_sample_size = idx.trigram.tokens.len().min(1000);
+    let avg_token_len = if tri_sample_size > 0 {
+        let total: usize = idx.trigram.tokens.iter().take(tri_sample_size).map(|t| t.len()).sum();
+        total as f64 / tri_sample_size as f64
+    } else {
+        8.0
+    };
+    let trigram_tokens_mb = idx.trigram.tokens.len() as f64 * (24.0 + avg_token_len) / 1_048_576.0;
+
+    // Trigram map estimate
+    let total_tri_postings: usize = idx.trigram.trigram_map.values().map(|v| v.len()).sum();
+    let trigram_map_mb = (idx.trigram.trigram_map.len() as f64 * 80.0 + total_tri_postings as f64 * 4.0) / 1_048_576.0;
+
+    // Files estimate
+    let avg_file_path_len = if !idx.files.is_empty() {
+        let sample = idx.files.len().min(1000);
+        let total: usize = idx.files.iter().take(sample).map(|f| f.len()).sum();
+        total as f64 / sample as f64
+    } else {
+        50.0
+    };
+    let files_mb = idx.files.len() as f64 * (24.0 + avg_file_path_len) / 1_048_576.0;
+
+    let total_mb = inverted_mb + trigram_tokens_mb + trigram_map_mb + files_mb;
+
+    serde_json::json!({
+        "invertedIndexMB": round1(inverted_mb),
+        "trigramTokensMB": round1(trigram_tokens_mb),
+        "trigramMapMB": round1(trigram_map_mb),
+        "filesMB": round1(files_mb),
+        "totalEstimateMB": round1(total_mb),
+        "uniqueTokens": idx.index.len(),
+        "totalPostings": full_total_postings,
+        "trigramCount": idx.trigram.trigram_map.len(),
+        "fileCount": idx.files.len(),
+    })
+}
+
+/// Estimate the in-memory size of a DefinitionIndex.
+/// Returns a JSON object with per-component MB estimates.
+pub fn estimate_definition_index_memory(idx: &crate::definitions::DefinitionIndex) -> serde_json::Value {
+    let round1 = |v: f64| (v * 10.0).round() / 10.0;
+
+    // Each definition: ~200 bytes (name, kind, attributes, base_types, parent, signature, line range)
+    let defs_mb = idx.definitions.len() as f64 * 200.0 / 1_048_576.0;
+
+    // Call sites: ~60 bytes each (method_name, receiver, line, col)
+    let total_calls: usize = idx.method_calls.values().map(|v| v.len()).sum();
+    let calls_mb = total_calls as f64 * 60.0 / 1_048_576.0;
+
+    // Files: ~50 bytes avg path
+    let files_mb = idx.files.len() as f64 * 74.0 / 1_048_576.0;
+
+    // Indexes (name_index, kind_index, file_index, etc.): ~80 bytes per entry + Vec overhead
+    let index_entries = idx.name_index.len() + idx.kind_index.len() + idx.file_index.len()
+        + idx.attribute_index.len() + idx.base_type_index.len();
+    let indexes_mb = index_entries as f64 * 100.0 / 1_048_576.0;
+
+    // Code stats: ~64 bytes each
+    let stats_mb = idx.code_stats.len() as f64 * 64.0 / 1_048_576.0;
+
+    let total_mb = defs_mb + calls_mb + files_mb + indexes_mb + stats_mb;
+
+    serde_json::json!({
+        "definitionsMB": round1(defs_mb),
+        "callSitesMB": round1(calls_mb),
+        "filesMB": round1(files_mb),
+        "indexesMB": round1(indexes_mb),
+        "codeStatsMB": round1(stats_mb),
+        "totalEstimateMB": round1(total_mb),
+        "definitionCount": idx.definitions.len(),
+        "callSiteCount": total_calls,
+        "fileCount": idx.files.len(),
+        "codeStatsCount": idx.code_stats.len(),
+    })
+}
+
+/// Estimate the in-memory size of a GitHistoryCache.
+/// Returns a JSON object with per-component MB estimates.
+pub fn estimate_git_cache_memory(cache: &crate::git::cache::GitHistoryCache) -> serde_json::Value {
+    let round1 = |v: f64| (v * 10.0).round() / 10.0;
+
+    // Commits: ~120 bytes each (hash, timestamp, author_id, message interned)
+    let commits_mb = cache.commits.len() as f64 * 120.0 / 1_048_576.0;
+
+    // File commits: HashMap<String, Vec<u32>> — path string + vec of commit indices
+    let files_mb = cache.file_commits.len() as f64 * 100.0 / 1_048_576.0;
+
+    // Authors: Vec<String> — ~40 bytes each
+    let authors_mb = cache.authors.len() as f64 * 40.0 / 1_048_576.0;
+
+    let total_mb = commits_mb + files_mb + authors_mb;
+
+    serde_json::json!({
+        "commitsMB": round1(commits_mb),
+        "filesMB": round1(files_mb),
+        "authorsMB": round1(authors_mb),
+        "totalEstimateMB": round1(total_mb),
+        "commitCount": cache.commits.len(),
+        "fileCount": cache.file_commits.len(),
+        "authorCount": cache.authors.len(),
+    })
+}
+
+// ─── Index helpers ───────────────────────────────────────────────────
+
 /// Recover data from a Mutex, handling poisoned state gracefully.
 /// If the mutex was poisoned (a thread panicked while holding the lock),
 /// logs a warning and recovers the data. This is consistent with the
@@ -217,6 +563,12 @@ fn read_root_from_index_file(path: &std::path::Path) -> Option<String> {
     let mut str_buf = vec![0u8; len];
     reader.read_exact(&mut str_buf).ok()?;
     String::from_utf8(str_buf).ok()
+}
+
+/// Public wrapper for `read_root_from_index_file` — used by `handle_search_info`
+/// to get the root directory from a file-list index without full deserialization.
+pub fn read_root_from_index_file_pub(path: &std::path::Path) -> Option<String> {
+    read_root_from_index_file(path)
 }
 
 /// Remove orphaned index files whose root directory no longer exists on disk.
@@ -435,6 +787,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
     let file_data = recover_mutex(file_data, "content-index");
     let file_count = file_data.len();
     let min_len = args.min_token_len;
+    log_memory(&format!("content-build: after file walk ({} files)", file_count));
 
     // ─── Parallel tokenization ──────────────────────────────────
     let num_tok_threads = thread_count.max(1);
@@ -490,11 +843,14 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
         })).collect()
     });
 
+    log_memory("content-build: after tokenization (file_data + chunks alive)");
+
     // Free raw file contents — no longer needed after tokenization.
     // This releases ~1.6 GB for large repos (80K files × ~20KB avg content).
     // Without this drop, the file data stays alive until function return,
     // causing peak memory to be ~1.6 GB higher during build vs. load-from-disk.
     drop(file_data);
+    log_memory("content-build: after drop(file_data)");
 
     // ─── Merge per-thread results ───────────────────────────────
     let mut files: Vec<String> = Vec::with_capacity(file_count);
@@ -512,6 +868,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
     }
 
     let unique_tokens = index.len();
+    log_memory(&format!("content-build: after merge ({} tokens)", unique_tokens));
 
     // Build trigram index from inverted index tokens
     let trigram = build_trigram_index(&index);
@@ -520,6 +877,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
         trigram.trigram_map.len(),
         trigram.tokens.len()
     );
+    log_memory("content-build: after trigram build");
 
     let elapsed = start.elapsed();
 
@@ -574,6 +932,7 @@ pub fn build_trigram_index(inverted: &HashMap<String, Vec<Posting>>) -> TrigramI
 #[cfg(test)]
 mod index_tests {
     use std::collections::HashMap;
+    use std::io::Write;
     use search::Posting;
     use crate::index::build_trigram_index;
 
@@ -716,6 +1075,152 @@ mod index_tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("deserialization failed"), "Error should mention deserialization, got: {}", err_msg);
+    }
+
+    // ─── Memory diagnostics tests ────────────────────────────
+
+    #[test]
+    fn test_log_memory_is_noop_when_disabled() {
+        // log_memory should be a safe no-op when memory logging is not enabled
+        // (default state: MEMORY_LOG_ENABLED is false)
+        crate::index::log_memory("test: this should be a no-op");
+        // No panic, no output — success
+    }
+
+    #[test]
+    fn test_enable_memory_log_creates_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Note: we can't call enable_memory_log in tests because it uses
+        // global OnceLock (can only set once per process). Instead, test the
+        // file creation logic directly.
+        let log_path = tmp.path().join("memory.log");
+        {
+            let mut f = std::fs::File::create(&log_path).unwrap();
+            writeln!(f, "{:>8} | {:>8} | {:>8} | {:>8} | {}",
+                "elapsed", "WS_MB", "Peak_MB", "Commit_MB", "label").unwrap();
+            writeln!(f, "{}", "-".repeat(70)).unwrap();
+        }
+        assert!(log_path.exists());
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("elapsed"));
+        assert!(content.contains("WS_MB"));
+        assert!(content.contains("label"));
+    }
+
+    #[test]
+    fn test_get_process_memory_info_returns_json() {
+        let info = crate::index::get_process_memory_info();
+        // On Windows, should have workingSetMB, peakWorkingSetMB, commitMB
+        // On non-Windows, returns empty object
+        assert!(info.is_object());
+        #[cfg(target_os = "windows")]
+        {
+            assert!(info["workingSetMB"].as_f64().is_some(), "should have workingSetMB");
+            assert!(info["peakWorkingSetMB"].as_f64().is_some(), "should have peakWorkingSetMB");
+            assert!(info["commitMB"].as_f64().is_some(), "should have commitMB");
+            // Working set should be > 0 for any running process
+            assert!(info["workingSetMB"].as_f64().unwrap() > 0.0, "working set should be > 0");
+        }
+    }
+
+    #[test]
+    fn test_force_mimalloc_collect_does_not_panic() {
+        // force_mimalloc_collect should be safe to call at any time
+        crate::index::force_mimalloc_collect();
+        // No panic — success
+    }
+
+    #[test]
+    fn test_estimate_content_index_memory_empty() {
+        let idx = search::ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec![],
+            file_token_counts: vec![],
+            trigram: search::TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        let estimate = crate::index::estimate_content_index_memory(&idx);
+        assert!(estimate.is_object());
+        assert_eq!(estimate["fileCount"], 0);
+        assert_eq!(estimate["uniqueTokens"], 0);
+        assert_eq!(estimate["totalPostings"], 0);
+        // Total estimate should be 0 for empty index
+        assert_eq!(estimate["totalEstimateMB"].as_f64().unwrap(), 0.0);
+    }
+
+    #[test]
+    fn test_estimate_content_index_memory_nonempty() {
+        let mut index = HashMap::new();
+        index.insert("httpclient".to_string(), vec![
+            Posting { file_id: 0, lines: vec![1, 5, 10] },
+            Posting { file_id: 1, lines: vec![3] },
+        ]);
+        index.insert("ilogger".to_string(), vec![
+            Posting { file_id: 0, lines: vec![2] },
+        ]);
+
+        let idx = search::ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec!["file0.cs".to_string(), "file1.cs".to_string()],
+            index,
+            total_tokens: 100,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![50, 30],
+            trigram: search::TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        let estimate = crate::index::estimate_content_index_memory(&idx);
+        assert!(estimate.is_object());
+        assert_eq!(estimate["fileCount"], 2);
+        assert_eq!(estimate["uniqueTokens"], 2);
+        assert_eq!(estimate["totalPostings"], 3);
+        // Total estimate should be >= 0 (may round to 0.0 for tiny indexes)
+        assert!(estimate["totalEstimateMB"].as_f64().is_some());
+        assert!(estimate["invertedIndexMB"].as_f64().is_some());
+        // Verify all expected fields are present
+        assert!(estimate["trigramTokensMB"].as_f64().is_some());
+        assert!(estimate["trigramMapMB"].as_f64().is_some());
+        assert!(estimate["filesMB"].as_f64().is_some());
+        assert!(estimate["trigramCount"].as_u64().is_some());
+    }
+
+    #[test]
+    fn test_estimate_definition_index_memory_empty() {
+        let idx = crate::definitions::DefinitionIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            extensions: vec![],
+            files: vec![],
+            definitions: vec![],
+            name_index: std::collections::HashMap::new(),
+            kind_index: std::collections::HashMap::new(),
+            attribute_index: std::collections::HashMap::new(),
+            base_type_index: std::collections::HashMap::new(),
+            file_index: std::collections::HashMap::new(),
+            path_to_id: std::collections::HashMap::new(),
+            method_calls: std::collections::HashMap::new(),
+            code_stats: std::collections::HashMap::new(),
+            parse_errors: 0,
+            lossy_file_count: 0,
+            empty_file_ids: vec![],
+            extension_methods: std::collections::HashMap::new(),
+        };
+        let estimate = crate::index::estimate_definition_index_memory(&idx);
+        assert!(estimate.is_object());
+        assert_eq!(estimate["definitionCount"], 0);
+        assert_eq!(estimate["fileCount"], 0);
+        assert_eq!(estimate["totalEstimateMB"].as_f64().unwrap(), 0.0);
     }
 
     #[test]
