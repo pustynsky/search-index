@@ -969,17 +969,17 @@ catch {
         $ErrorActionPreference = "Stop"
         Remove-Item -Recurse -Force $lambdaDir -ErrorAction SilentlyContinue
     }
+}
 
-    # --- T-OVERLOAD-DEDUP-UP: Overloaded callers not collapsed (direction=up) ---
-    Write-Host -NoNewline "  T-OVERLOAD-DEDUP-UP callers-overloads-not-collapsed-up ... "
-    $total++
-    try {
-        $overloadUpDir = Join-Path $env:TEMP "search_e2e_overload_up_$PID"
-        if (Test-Path $overloadUpDir) { Remove-Item -Recurse -Force $overloadUpDir }
-        New-Item -ItemType Directory -Path $overloadUpDir | Out-Null
+# --- T-OVERLOAD-DEDUP-UP: Overloaded callers not collapsed (direction=up) ---
+Write-Host -NoNewline "  T-OVERLOAD-DEDUP-UP callers-overloads-not-collapsed-up ... "
+$total++
+try {
+    $overloadUpDir = Join-Path $env:TEMP "search_e2e_overload_up_$PID"
+    if (Test-Path $overloadUpDir) { Remove-Item -Recurse -Force $overloadUpDir }
+    New-Item -ItemType Directory -Path $overloadUpDir | Out-Null
 
-        # Create Validator class with Validate() method
-        $validatorCs = @"
+    $validatorCs = @"
 namespace TestApp
 {
     public class Validator
@@ -988,10 +988,9 @@ namespace TestApp
     }
 }
 "@
-        Set-Content -Path (Join-Path $overloadUpDir "Validator.cs") -Value $validatorCs
+    Set-Content -Path (Join-Path $overloadUpDir "Validator.cs") -Value $validatorCs
 
-        # Create Processor with two overloads of Process, both calling Validate()
-        $processorCs = @"
+    $processorCs = @"
 namespace TestApp
 {
     public class Processor
@@ -1008,73 +1007,67 @@ namespace TestApp
     }
 }
 "@
-        Set-Content -Path (Join-Path $overloadUpDir "Processor.cs") -Value $processorCs
+    Set-Content -Path (Join-Path $overloadUpDir "Processor.cs") -Value $processorCs
 
-        # Build content-index and def-index
-        $ErrorActionPreference = "Continue"
-        & $searchBin content-index -d $overloadUpDir -e cs 2>&1 | Out-Null
-        & $searchBin def-index -d $overloadUpDir -e cs 2>&1 | Out-Null
-        $ErrorActionPreference = "Stop"
+    $ErrorActionPreference = "Continue"
+    & $searchBin content-index -d $overloadUpDir -e cs 2>&1 | Out-Null
+    & $searchBin def-index -d $overloadUpDir -e cs 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
 
-        # Query search_callers direction=up for Validator.Validate
-        $msgs = @(
-            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
-            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Validate","class":"Validator","direction":"up","depth":1}}}'
-        ) -join "`n"
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Validate","class":"Validator","direction":"up","depth":1}}}'
+    ) -join "`n"
 
-        $ErrorActionPreference = "Continue"
-        $output = ($msgs | & $searchBin serve --dir $overloadUpDir --ext cs --definitions 2>$null) | Out-String
-        $ErrorActionPreference = "Stop"
+    $ErrorActionPreference = "Continue"
+    $output = ($msgs | & $searchBin serve --dir $overloadUpDir --ext cs --definitions 2>$null) | Out-String
+    $ErrorActionPreference = "Stop"
 
-        # Extract the JSON-RPC response (id=5)
-        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
-        if ($jsonLine) {
-            # Both Process overloads should appear (totalNodes=2)
-            $processMatches = [regex]::Matches($jsonLine, '"Process"')
-            if ($processMatches.Count -ge 2) {
-                Write-Host "OK" -ForegroundColor Green
-                $passed++
-            }
-            else {
-                Write-Host "FAILED (expected 2 Process overloads in callers, got $($processMatches.Count))" -ForegroundColor Red
-                Write-Host "    output: $jsonLine" -ForegroundColor Yellow
-                $failed++
-            }
+    $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+    if ($jsonLine) {
+        $processMatches = [regex]::Matches($jsonLine, '\\?"Process\\?"')
+        if ($processMatches.Count -ge 2) {
+            Write-Host "OK" -ForegroundColor Green
+            $passed++
         }
         else {
-            Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
-            Write-Host "    output: $output" -ForegroundColor Yellow
+            Write-Host "FAILED (expected 2 Process overloads in callers, got $($processMatches.Count))" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
             $failed++
         }
+    }
+    else {
+        Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
+        Write-Host "    output: $output" -ForegroundColor Yellow
+        $failed++
+    }
 
-        # Cleanup
+    $ErrorActionPreference = "Continue"
+    & $searchBin cleanup --dir $overloadUpDir 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $overloadUpDir -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+    if (Test-Path $overloadUpDir) {
         $ErrorActionPreference = "Continue"
         & $searchBin cleanup --dir $overloadUpDir 2>&1 | Out-Null
         $ErrorActionPreference = "Stop"
         Remove-Item -Recurse -Force $overloadUpDir -ErrorAction SilentlyContinue
     }
-    catch {
-        Write-Host "FAILED (exception: $_)" -ForegroundColor Red
-        $failed++
-        if (Test-Path $overloadUpDir) {
-            $ErrorActionPreference = "Continue"
-            & $searchBin cleanup --dir $overloadUpDir 2>&1 | Out-Null
-            $ErrorActionPreference = "Stop"
-            Remove-Item -Recurse -Force $overloadUpDir -ErrorAction SilentlyContinue
-        }
-    }
+}
 
-    # --- T-SAME-NAME-IFACE: Same method name on unrelated interfaces — no cross-contamination ---
-    Write-Host -NoNewline "  T-SAME-NAME-IFACE callers-same-name-unrelated-iface ... "
-    $total++
-    try {
-        $ifaceDir = Join-Path $env:TEMP "search_e2e_same_name_iface_$PID"
-        if (Test-Path $ifaceDir) { Remove-Item -Recurse -Force $ifaceDir }
-        New-Item -ItemType Directory -Path $ifaceDir | Out-Null
+# --- T-SAME-NAME-IFACE: Same method name on unrelated interfaces — no cross-contamination ---
+Write-Host -NoNewline "  T-SAME-NAME-IFACE callers-same-name-unrelated-iface ... "
+$total++
+try {
+    $ifaceDir = Join-Path $env:TEMP "search_e2e_same_name_iface_$PID"
+    if (Test-Path $ifaceDir) { Remove-Item -Recurse -Force $ifaceDir }
+    New-Item -ItemType Directory -Path $ifaceDir | Out-Null
 
-        # IServiceA interface with Execute()
-        $iServiceACs = @"
+    $iServiceACs = @"
 namespace TestApp
 {
     public interface IServiceA
@@ -1083,10 +1076,9 @@ namespace TestApp
     }
 }
 "@
-        Set-Content -Path (Join-Path $ifaceDir "IServiceA.cs") -Value $iServiceACs
+    Set-Content -Path (Join-Path $ifaceDir "IServiceA.cs") -Value $iServiceACs
 
-        # IServiceB interface with Execute()
-        $iServiceBCs = @"
+    $iServiceBCs = @"
 namespace TestApp
 {
     public interface IServiceB
@@ -1095,10 +1087,9 @@ namespace TestApp
     }
 }
 "@
-        Set-Content -Path (Join-Path $ifaceDir "IServiceB.cs") -Value $iServiceBCs
+    Set-Content -Path (Join-Path $ifaceDir "IServiceB.cs") -Value $iServiceBCs
 
-        # ServiceA implements IServiceA
-        $serviceACs = @"
+    $serviceACs = @"
 namespace TestApp
 {
     public class ServiceA : IServiceA
@@ -1107,10 +1098,9 @@ namespace TestApp
     }
 }
 "@
-        Set-Content -Path (Join-Path $ifaceDir "ServiceA.cs") -Value $serviceACs
+    Set-Content -Path (Join-Path $ifaceDir "ServiceA.cs") -Value $serviceACs
 
-        # ServiceB implements IServiceB
-        $serviceBCs = @"
+    $serviceBCs = @"
 namespace TestApp
 {
     public class ServiceB : IServiceB
@@ -1119,10 +1109,9 @@ namespace TestApp
     }
 }
 "@
-        Set-Content -Path (Join-Path $ifaceDir "ServiceB.cs") -Value $serviceBCs
+    Set-Content -Path (Join-Path $ifaceDir "ServiceB.cs") -Value $serviceBCs
 
-        # Consumer calls IServiceB.Execute() only
-        $consumerCs = @"
+    $consumerCs = @"
 namespace TestApp
 {
     public class Consumer
@@ -1135,78 +1124,247 @@ namespace TestApp
     }
 }
 "@
-        Set-Content -Path (Join-Path $ifaceDir "Consumer.cs") -Value $consumerCs
+    Set-Content -Path (Join-Path $ifaceDir "Consumer.cs") -Value $consumerCs
 
-        # Build content-index and def-index
-        $ErrorActionPreference = "Continue"
-        & $searchBin content-index -d $ifaceDir -e cs 2>&1 | Out-Null
-        & $searchBin def-index -d $ifaceDir -e cs 2>&1 | Out-Null
-        $ErrorActionPreference = "Stop"
+    $ErrorActionPreference = "Continue"
+    & $searchBin content-index -d $ifaceDir -e cs 2>&1 | Out-Null
+    & $searchBin def-index -d $ifaceDir -e cs 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
 
-        # Query search_callers for ServiceA.Execute (should NOT find Consumer)
-        $msgs = @(
-            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
-            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Execute","class":"ServiceA","direction":"up","depth":1}}}'
-        ) -join "`n"
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Execute","class":"ServiceA","direction":"up","depth":1}}}'
+    ) -join "`n"
 
-        $ErrorActionPreference = "Continue"
-        $output = ($msgs | & $searchBin serve --dir $ifaceDir --ext cs --definitions 2>$null) | Out-String
-        $ErrorActionPreference = "Stop"
+    $ErrorActionPreference = "Continue"
+    $output = ($msgs | & $searchBin serve --dir $ifaceDir --ext cs --definitions 2>$null) | Out-String
+    $ErrorActionPreference = "Stop"
 
-        # Extract the JSON-RPC response (id=5)
-        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
-        $testPassed = $true
-        if ($jsonLine) {
-            # BAD: Consumer should NOT appear (it calls IServiceB.Execute, not IServiceA.Execute)
-            if ($jsonLine -match 'Consumer') {
-                Write-Host "FAILED (Consumer should NOT appear as caller of ServiceA.Execute)" -ForegroundColor Red
-                Write-Host "    output: $jsonLine" -ForegroundColor Yellow
-                $testPassed = $false
-            }
-            # Verify totalNodes=0 (no callers for ServiceA.Execute)
-            if ($jsonLine -notmatch 'totalNodes[^0-9]+0[^0-9]') {
-                # May have 0 callers expressed differently; check callTree is empty
-                if ($jsonLine -match 'DoWork') {
-                    $testPassed = $false
-                }
-            }
-            if ($testPassed) {
-                Write-Host "OK" -ForegroundColor Green
-                $passed++
-            }
-            else {
-                $failed++
-            }
+    $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+    $testPassed = $true
+    if ($jsonLine) {
+        # Consumer should NOT appear (it calls IServiceB.Execute, not IServiceA.Execute)
+        if ($jsonLine -match 'Consumer') {
+            Write-Host "FAILED (Consumer should NOT appear as caller of ServiceA.Execute)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $testPassed = $false
+        }
+        # Explicit assertion: totalNodes must be 0 (no callers for ServiceA.Execute)
+        if ($jsonLine -notmatch 'totalNodes[^0-9]+0[^0-9]') {
+            Write-Host "FAILED (expected totalNodes=0, got non-zero - unexpected caller in tree)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $testPassed = $false
+        }
+        if ($testPassed) {
+            Write-Host "OK" -ForegroundColor Green
+            $passed++
         }
         else {
-            Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
-            Write-Host "    output: $output" -ForegroundColor Yellow
             $failed++
         }
+    }
+    else {
+        Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
+        Write-Host "    output: $output" -ForegroundColor Yellow
+        $failed++
+    }
 
-        # Cleanup
+    $ErrorActionPreference = "Continue"
+    & $searchBin cleanup --dir $ifaceDir 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+    Remove-Item -Recurse -Force $ifaceDir -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+    if (Test-Path $ifaceDir) {
         $ErrorActionPreference = "Continue"
         & $searchBin cleanup --dir $ifaceDir 2>&1 | Out-Null
         $ErrorActionPreference = "Stop"
         Remove-Item -Recurse -Force $ifaceDir -ErrorAction SilentlyContinue
     }
-    catch {
-        Write-Host "FAILED (exception: $_)" -ForegroundColor Red
-        $failed++
-        if (Test-Path $ifaceDir) {
-            $ErrorActionPreference = "Continue"
-            & $searchBin cleanup --dir $ifaceDir 2>&1 | Out-Null
-            $ErrorActionPreference = "Stop"
-            Remove-Item -Recurse -Force $ifaceDir -ErrorAction SilentlyContinue
-        }
-    }
-
 }
 
 # Note: T-FIX3-PREFILTER (base types removed from pre-filter) and T-FIX3-FIND-CONTAINING
 # (find_containing_method returns di directly) are internal optimizations with no CLI-observable
 # differences. They are covered by unit tests in handlers_tests_csharp.rs.
+
+# ─── New E2E tests for features added in 2026-02-21/22 ───
+
+# --- T-SERVE-HELP-TOOLS: verify serve --help lists key tools ---
+Write-Host -NoNewline "  T-SERVE-HELP-TOOLS serve-help-tool-list ... "
+$total++
+try {
+    $ErrorActionPreference = "Continue"
+    $helpOutput = & $searchBin serve --help 2>&1 | Out-String
+    $ErrorActionPreference = "Stop"
+
+    $requiredTools = @(
+        "search_branch_status",
+        "search_git_blame",
+        "search_help",
+        "search_reindex_definitions"
+    )
+    $helpPassed = $true
+    foreach ($tool in $requiredTools) {
+        if ($helpOutput -notmatch $tool) {
+            Write-Host "FAILED (missing tool in serve --help: $tool)" -ForegroundColor Red
+            $helpPassed = $false
+        }
+    }
+    if ($helpPassed) {
+        Write-Host "OK" -ForegroundColor Green
+        $passed++
+    }
+    else {
+        $failed++
+    }
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+}
+
+# --- T-BRANCH-STATUS: smoke test for search_branch_status MCP tool ---
+Write-Host -NoNewline "  T-BRANCH-STATUS branch-status-smoke ... "
+$total++
+try {
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_branch_status","arguments":{"repo":"."}}}'
+    ) -join "`n"
+
+    $ErrorActionPreference = "Continue"
+    $output = ($msgs | & $searchBin serve --dir $TestDir --ext $TestExt 2>$null) | Out-String
+    $ErrorActionPreference = "Stop"
+
+    $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+    if ($jsonLine -and $jsonLine -match 'currentBranch' -and $jsonLine -match 'isMainBranch' -and $jsonLine -notmatch '"isError"\s*:\s*true') {
+        Write-Host "OK" -ForegroundColor Green
+        $passed++
+    }
+    else {
+        Write-Host "FAILED (missing currentBranch/isMainBranch or isError)" -ForegroundColor Red
+        Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+        $failed++
+    }
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+}
+
+# --- T-GIT-FILE-NOT-FOUND: nonexistent file returns warning, not error ---
+Write-Host -NoNewline "  T-GIT-FILE-NOT-FOUND git-history-file-warning ... "
+$total++
+try {
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"DOES_NOT_EXIST_12345.txt"}}}'
+    ) -join "`n"
+
+    $ErrorActionPreference = "Continue"
+    $output = ($msgs | & $searchBin serve --dir $TestDir --ext $TestExt 2>$null) | Out-String
+    $ErrorActionPreference = "Stop"
+
+    $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+    if ($jsonLine -and $jsonLine -match 'warning' -and $jsonLine -notmatch '"isError"\s*:\s*true') {
+        Write-Host "OK" -ForegroundColor Green
+        $passed++
+    }
+    else {
+        Write-Host "FAILED (expected warning field, no isError)" -ForegroundColor Red
+        Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+        $failed++
+    }
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+}
+
+# --- T-GIT-NOCACHE: noCache parameter returns valid result ---
+Write-Host -NoNewline "  T-GIT-NOCACHE git-history-nocache ... "
+$total++
+try {
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","noCache":true,"maxResults":1}}}'
+    ) -join "`n"
+
+    $ErrorActionPreference = "Continue"
+    $output = ($msgs | & $searchBin serve --dir $TestDir --ext $TestExt 2>$null) | Out-String
+    $ErrorActionPreference = "Stop"
+
+    $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+    if ($jsonLine -and $jsonLine -match 'commits' -and $jsonLine -notmatch '"isError"\s*:\s*true') {
+        Write-Host "OK" -ForegroundColor Green
+        $passed++
+    }
+    else {
+        Write-Host "FAILED (expected commits, no isError)" -ForegroundColor Red
+        Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+        $failed++
+    }
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+}
+
+# --- T-GIT-TOTALCOMMITS: totalCommits shows real total, not truncated count (BUG-2 regression) ---
+Write-Host -NoNewline "  T-GIT-TOTALCOMMITS git-history-total-vs-returned ... "
+$total++
+try {
+    $msgs = @(
+        '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+        '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+        '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":1}}}'
+    ) -join "`n"
+
+    $ErrorActionPreference = "Continue"
+    $output = ($msgs | & $searchBin serve --dir $TestDir --ext $TestExt 2>$null) | Out-String
+    $ErrorActionPreference = "Stop"
+
+    $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+    if ($jsonLine) {
+        # Extract totalCommits and returned from the response (handles escaped JSON quotes)
+        $totalMatch = [regex]::Match($jsonLine, 'totalCommits\\?"?\s*:\s*(\d+)')
+        $returnedMatch = [regex]::Match($jsonLine, 'returned\\?"?\s*:\s*(\d+)')
+        if ($totalMatch.Success -and $returnedMatch.Success) {
+            $totalVal = [int]$totalMatch.Groups[1].Value
+            $returnedVal = [int]$returnedMatch.Groups[1].Value
+            # Cargo.toml should have more than 1 commit in this repo
+            if ($totalVal -gt $returnedVal -and $returnedVal -eq 1) {
+                Write-Host "OK (total=$totalVal, returned=$returnedVal)" -ForegroundColor Green
+                $passed++
+            }
+            else {
+                Write-Host "FAILED (totalCommits=$totalVal should be > returned=$returnedVal)" -ForegroundColor Red
+                Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+                $failed++
+            }
+        }
+        else {
+            Write-Host "FAILED (could not parse totalCommits/returned)" -ForegroundColor Red
+            Write-Host "    output: $jsonLine" -ForegroundColor Yellow
+            $failed++
+        }
+    }
+    else {
+        Write-Host "FAILED (no JSON-RPC response for id=5)" -ForegroundColor Red
+        Write-Host "    output: $output" -ForegroundColor Yellow
+        $failed++
+    }
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+}
 
 # --- T-GIT-CACHE: Git cache routing — search_git_history returns commits ---
 Write-Host -NoNewline "  T-GIT-CACHE git-cache-routing ... "
