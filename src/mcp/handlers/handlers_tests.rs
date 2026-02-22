@@ -19,7 +19,7 @@ use std::sync::{Arc, RwLock};
 #[test]
 fn test_tool_definitions_count() {
     let tools = tool_definitions();
-    assert_eq!(tools.len(), 16);
+    assert_eq!(tools.len(), 15);
 }
 
 #[test]
@@ -35,7 +35,6 @@ fn test_tool_definitions_names() {
     assert!(names.contains(&"search_definitions"));
     assert!(names.contains(&"search_callers"));
     assert!(names.contains(&"search_help"));
-    assert!(names.contains(&"search_git_pickaxe"));
 }
 
 #[test]

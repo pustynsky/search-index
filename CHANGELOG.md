@@ -8,6 +8,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-22
 
+### Breaking Changes
+
+- **Removed `search_git_pickaxe` MCP tool** — The `search_git_pickaxe` tool has been removed. Its use cases (finding when code was introduced) are better served by the `search_grep` → `search_git_blame` workflow, which is 780x faster (~200ms vs 156 seconds) and handles file renames correctly. The only unique pickaxe capability (finding deleted code) was rare and can be done via `git log -S` directly if needed. Tool count: 16 → 15. Also removed: `next_day_public()`, `run_git_public()`, `FIELD_SEP_STR/CHAR`, `RECORD_SEP_STR/CHAR` (all were pickaxe-only). Updated "Code History Investigation" strategy recipe to use grep+blame workflow. Removed 14 pickaxe unit tests + 3 helper tests.
+
 ### Bug Fixes
 
 - **`search_info` memory spike fix — 1.8 GB temporary allocation eliminated** — `search_info` MCP handler was calling `cmd_info_json()` which fully deserialized ALL index files from `%LOCALAPPDATA%/search-index/` (including indexes for repos the server doesn't serve). For a multi-repo setup with multiple indexed directories, this loaded ~1.8 GB into memory temporarily. Since the main thread never exits, mimalloc never decommitted these freed segments back to the OS, causing Working Set to stay at ~4.4 GB instead of ~2.5 GB. **Fix:** Rewrote `handle_search_info()` to read all statistics from already-loaded in-memory structures (`ctx.index`, `ctx.def_index`, `ctx.git_cache`) via read locks — zero additional allocations. Disk file sizes obtained via `fs::metadata()` only. Removed the `cmd_info_json()` call entirely from the MCP path. Also removed the temporary `force_mimalloc_collect()` workaround from `dispatch_tool()` that was added during diagnosis. Memory log (`--memory-log`) confirms: `search_info` Δ WS went from +1,799 MB to ~0 MB.
