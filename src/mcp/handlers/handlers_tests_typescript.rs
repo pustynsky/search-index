@@ -239,7 +239,7 @@ fn make_ts_ctx_with_defs() -> HandlerContext {
         code_stats: HashMap::new(),
         parse_errors: 0,
         lossy_file_count: 0,
-        empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
+        empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
     };
 
     HandlerContext {
@@ -343,7 +343,7 @@ fn make_ts_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
         code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
     };
 
     let content_index = ContentIndex {
@@ -829,7 +829,7 @@ fn test_ts_search_callers_inject_support() {
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls,
         code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
     };
 
     let ctx = HandlerContext {
@@ -953,7 +953,7 @@ fn test_mixed_cs_ts_definitions_query() {
         attribute_index, base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
         code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
     };
 
     let ctx = HandlerContext {
@@ -1095,7 +1095,7 @@ fn test_mixed_cs_ts_callers_ext_filter() {
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls,
         code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
     };
 
     let ctx = HandlerContext {
@@ -1201,7 +1201,7 @@ fn test_tsx_file_support_through_handler() {
         attribute_index: HashMap::new(), base_type_index,
         file_index, path_to_id, method_calls: HashMap::new(),
         code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
     };
 
     let ctx = HandlerContext {
@@ -1281,7 +1281,7 @@ fn test_ts_incremental_update_through_handler() {
         base_type_index: HashMap::new(), file_index: HashMap::new(),
         path_to_id: HashMap::new(), method_calls: HashMap::new(),
         code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
     };
 
     let clean_path = PathBuf::from(&file_str);
@@ -1428,7 +1428,7 @@ fn test_ts_search_definitions_exclude_dir() {
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
         code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
     };
 
     let ctx = HandlerContext {
@@ -1620,7 +1620,7 @@ fn test_ts_direction_down_with_typed_local_variable() {
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls,
         code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
     };
 
     let ctx = HandlerContext {

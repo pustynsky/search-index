@@ -66,7 +66,6 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 | `search_git_activity`        | Repo-wide activity (all changed files) for a date range. Uses in-memory cache when available (sub-millisecond), falls back to CLI        |
 | `search_git_blame`           | Line-level attribution (`git blame`) for a file or line range. Returns commit hash, author, date, and content per line                   |
 | `search_branch_status`       | Shows current git branch status: branch name, main/master check, behind/ahead counts, dirty files, fetch age. Call before investigating production bugs |
-| `search_git_pickaxe`         | Find commits where specific text was added or removed (git pickaxe). Uses `git log -S` (exact) or `git log -G` (regex) to trace when code was introduced or deleted |
 
 ## What the AI Agent Sees
 
@@ -339,7 +338,7 @@ Check if all files in the repository are properly indexed. Files >500 bytes with
 
 ## Git History Tools
 
-Five MCP tools for querying git history. Always available — no flags needed. When the in-memory git history cache is ready (built automatically in the background on server startup), `search_git_history`, `search_git_authors`, and `search_git_activity` use sub-millisecond cache lookups. When the cache is not ready (first ~60 sec on cold start), these tools transparently fall back to CLI `git log` commands (~2–6 sec). `search_git_diff` and `search_git_blame` always use CLI.
+Six MCP tools for querying git history. Always available — no flags needed. When the in-memory git history cache is ready (built automatically in the background on server startup), `search_git_history`, `search_git_authors`, and `search_git_activity` use sub-millisecond cache lookups. When the cache is not ready (first ~60 sec on cold start), these tools transparently fall back to CLI `git log` commands (~2–6 sec). `search_git_diff` and `search_git_blame` always use CLI.
 
 Cache responses include a `"(from cache)"` hint in the `summary` field so the AI agent knows the data source.
 
@@ -487,60 +486,6 @@ Get line-level attribution for a file or line range via `git blame`. Returns the
   "summary": {"totalLines":6,"file":"src/UserService.cs","startLine":10,"endLine":15,"tool":"search_git_blame"}
 }
 ```
-
----
-
-## `search_git_pickaxe` — Git Pickaxe (Text Introduction Search)
-
-Find exactly which commits added or removed a specific text string or regex pattern. Unlike `search_git_history` which shows ALL commits that touched a file, pickaxe narrows to only the commits where the specified text's occurrence count changed.
-
-### Parameters
-
-| Parameter    | Type    | Required | Description |
-|---|---|---|---|
-| `repo`       | string  | ✅ | Path to local git repository |
-| `text`       | string  | ✅ | Text to search for in commit diffs |
-| `file`       | string  | — | Optional: limit search to a specific file path |
-| `regex`      | boolean | — | If true, treat text as regex pattern (uses `git log -G` instead of `-S`). Default: false |
-| `maxResults` | integer | — | Maximum number of commits to return (default: 10) |
-| `from`       | string  | — | Start date (YYYY-MM-DD, inclusive) |
-| `to`         | string  | — | End date (YYYY-MM-DD, inclusive) |
-
-### Use cases
-
-- **When was this error message introduced?** — `text: "Entry not found"`, `file: "src/Service.cs"`
-- **When was this function removed?** — `text: "fn deprecated_method"`, `regex: false`
-- **Find all commits that changed a regex pattern** — `text: "throw\\s+new\\s+InvalidOperationException"`, `regex: true`
-
-```json
-// Request — find when "search_git_pickaxe" was added to this codebase
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_pickaxe","arguments":{"repo":".","text":"search_git_pickaxe","maxResults":3}}}
-
-// Response
-{
-  "commits": [
-    {
-      "hash": "abc123de",
-      "date": "2025-06-15T14:22:00+00:00",
-      "author": "johndoe",
-      "email": "johndoe@example.com",
-      "message": "Add search_git_pickaxe MCP tool",
-      "patch": "+  \"search_git_pickaxe\" => handle_git_pickaxe(ctx, arguments),"
-    }
-  ],
-  "summary": {
-    "tool": "search_git_pickaxe",
-    "searchText": "search_git_pickaxe",
-    "mode": "exact",
-    "file": "(all files)",
-    "totalCommits": 1,
-    "maxResults": 3,
-    "elapsedMs": 1200.0
-  }
-}
-```
-
-> **Note:** Patch output is truncated to ~2000 characters per commit to prevent response explosion. Always uses git CLI (no cache).
 
 ---
 

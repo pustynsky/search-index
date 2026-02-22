@@ -265,7 +265,7 @@ fn test_ts_incremental_update() {
         files: Vec::new(), definitions: Vec::new(), name_index: HashMap::new(),
         kind_index: HashMap::new(), attribute_index: HashMap::new(),
         base_type_index: HashMap::new(), file_index: HashMap::new(),
-        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
+        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
     };
 
     let clean = PathBuf::from(crate::clean_path(&test_file.to_string_lossy()));
@@ -986,4 +986,133 @@ fn test_ts_multiline_arrow_function_calls_captured() {
     assert!(names.contains(&"initialize"), "Expected call to 'initialize' inside multiline arrow function, got: {:?}", names);
     assert!(names.contains(&"run"), "Expected call to 'run' inside multiline arrow function, got: {:?}", names);
     assert!(names.contains(&"getResult"), "Expected call to 'getResult' inside multiline arrow function, got: {:?}", names);
+}
+// ─── Angular Template Metadata Tests ─────────────────────────────────
+
+// B1: extract_component_metadata tests
+
+#[test]
+fn test_extract_component_metadata_standard() {
+    use super::parser_typescript::extract_component_metadata;
+    let text = "Component({\n    selector: 'datahub-embed',\n    templateUrl: './datahub-embed.component.html',\n})";
+    let result = extract_component_metadata(text);
+    assert!(result.is_some());
+    let (selector, tpl) = result.unwrap();
+    assert_eq!(selector, "datahub-embed");
+    assert_eq!(tpl, Some("./datahub-embed.component.html".to_string()));
+}
+
+#[test]
+fn test_extract_component_metadata_double_quotes() {
+    use super::parser_typescript::extract_component_metadata;
+    let text = r#"Component({selector: "my-widget", templateUrl: "./my-widget.html"})"#;
+    let result = extract_component_metadata(text);
+    assert!(result.is_some());
+    let (selector, tpl) = result.unwrap();
+    assert_eq!(selector, "my-widget");
+    assert_eq!(tpl, Some("./my-widget.html".to_string()));
+}
+
+#[test]
+fn test_extract_component_metadata_no_template_url() {
+    use super::parser_typescript::extract_component_metadata;
+    let text = "Component({\n    selector: 'simple-comp',\n    template: '<div>hello</div>',\n})";
+    let result = extract_component_metadata(text);
+    assert!(result.is_some());
+    let (selector, tpl) = result.unwrap();
+    assert_eq!(selector, "simple-comp");
+    assert_eq!(tpl, None);
+}
+
+#[test]
+fn test_extract_component_metadata_no_selector() {
+    use super::parser_typescript::extract_component_metadata;
+    let text = "Component({\n    templateUrl: './file.html',\n})";
+    let result = extract_component_metadata(text);
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_extract_component_metadata_not_component() {
+    use super::parser_typescript::extract_component_metadata;
+    let text = "Injectable({ providedIn: 'root' })";
+    let result = extract_component_metadata(text);
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_extract_component_metadata_multiline() {
+    use super::parser_typescript::extract_component_metadata;
+    let text = "Component({\n    selector:\n        'multi-line-comp',\n    templateUrl:\n        './multi-line.html',\n})";
+    let result = extract_component_metadata(text);
+    assert!(result.is_some());
+    let (selector, tpl) = result.unwrap();
+    assert_eq!(selector, "multi-line-comp");
+    assert_eq!(tpl, Some("./multi-line.html".to_string()));
+}
+
+// B2: extract_custom_elements tests
+
+#[test]
+fn test_extract_custom_elements_basic() {
+    let html = "<div><my-component></my-component><span>text</span></div>";
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["my-component"]);
+}
+
+#[test]
+fn test_extract_custom_elements_self_closing() {
+    let html = "<my-widget /><another-comp/>";
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["another-comp", "my-widget"]);
+}
+
+#[test]
+fn test_extract_custom_elements_with_attributes() {
+    let html = r#"<my-comp [input]="value" (output)="handler($event)"></my-comp>"#;
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["my-comp"]);
+}
+
+#[test]
+fn test_extract_custom_elements_excludes_standard_html() {
+    let html = "<div><span><p><h1><input><br><table><tr><td></td></tr></table></h1></p></span></div>";
+    let result = super::extract_custom_elements(html);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_extract_custom_elements_excludes_ng_builtins() {
+    let html = "<ng-container><ng-content></ng-content><ng-template></ng-template></ng-container>";
+    let result = super::extract_custom_elements(html);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_extract_custom_elements_dedup_and_case_insensitive() {
+    let html = "<My-Component></My-Component><my-component></my-component><MY-COMPONENT></MY-COMPONENT>";
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["my-component"]);
+}
+
+#[test]
+fn test_extract_custom_elements_empty_html() {
+    let result = super::extract_custom_elements("");
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_extract_custom_elements_mixed() {
+    let html = r#"
+        <div class="container">
+            <ng-container *ngIf="show">
+                <data-grid [config]="gridConfig"></data-grid>
+                <pbi-spinner size="large"></pbi-spinner>
+                <span>Loading...</span>
+            </ng-container>
+            <app-footer></app-footer>
+        </div>
+    "#;
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-footer", "data-grid", "pbi-spinner"]);
 }

@@ -1215,6 +1215,8 @@ mod index_tests {
             lossy_file_count: 0,
             empty_file_ids: vec![],
             extension_methods: std::collections::HashMap::new(),
+            selector_index: std::collections::HashMap::new(),
+            template_children: std::collections::HashMap::new(),
         };
         let estimate = crate::index::estimate_definition_index_memory(&idx);
         assert!(estimate.is_object());

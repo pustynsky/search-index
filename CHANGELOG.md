@@ -8,11 +8,17 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-22
 
+### Features
+
+- **Angular Template Metadata** — Enriched Angular `@Component` definitions with template metadata. `search_definitions` now returns `selector` and `templateChildren` for Angular components. `search_callers` supports component tree navigation — `direction='down'` shows child components from HTML templates (recursive), `direction='up'` with a selector finds parent components. Custom elements (tags with hyphens) are extracted from external `.html` templates.
+
 ### Breaking Changes
 
 - **Removed `search_git_pickaxe` MCP tool** — The `search_git_pickaxe` tool has been removed. Its use cases (finding when code was introduced) are better served by the `search_grep` → `search_git_blame` workflow, which is 780x faster (~200ms vs 156 seconds) and handles file renames correctly. The only unique pickaxe capability (finding deleted code) was rare and can be done via `git log -S` directly if needed. Tool count: 16 → 15. Also removed: `next_day_public()`, `run_git_public()`, `FIELD_SEP_STR/CHAR`, `RECORD_SEP_STR/CHAR` (all were pickaxe-only). Updated "Code History Investigation" strategy recipe to use grep+blame workflow. Removed 14 pickaxe unit tests + 3 helper tests.
 
 ### Bug Fixes
+
+- **Angular template upward recursion stopped at level 1** — `search_callers` with `direction='up'` for Angular selectors only returned direct parent components, ignoring the `depth` parameter. For example, searching up from `operation-button` with `depth=3` found `OperationsBarComponent` (level 1) but NOT its 4 grandparent components (level 2). Root cause: `find_template_parents()` was a flat, non-recursive function — it found direct parents but never recursed to find their parents. Fix: rewrote `find_template_parents()` to accept `max_depth`, `current_depth`, and `visited` set (mirroring the working `build_template_callee_tree()` for downward direction). Grandparents are nested in a `"parents"` field on each parent node. Cycle detection via visited set prevents infinite loops. 4 new unit tests (recursive depth, max_depth respect, cyclic components).
 
 - **`totalCommits` in cache showed truncated count instead of actual total** — When `search_git_history` used the in-memory cache with `maxResults` limiting output, `totalCommits` in the response equaled the returned (truncated) count instead of the actual total. For example, a file with 18 commits queried with `maxResults: 2` showed `totalCommits: 2` instead of `totalCommits: 18`. This misled LLMs into thinking the file had fewer commits than it actually did. Root cause: `query_file_history()` returned only `Vec<CommitInfo>` (after truncation), and the handler used `.len()` for the total count. Fix: `query_file_history()` now returns `(Vec<CommitInfo>, usize)` where the usize is the count BEFORE truncation. The `hint` field now correctly shows "More commits available..." when `totalCommits > returned`. CLI fallback path was already correct. 4 new unit tests. 1 new E2E regression test (T-GIT-TOTALCOMMITS).
 

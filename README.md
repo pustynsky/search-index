@@ -42,6 +42,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 | [Concurrency](docs/concurrency.md) | Thread model, lock strategy, watcher design |
 | [Trade-offs](docs/tradeoffs.md) | Design decisions with alternatives considered |
 | [Benchmarks](docs/benchmarks.md) | Performance data, scaling estimates, industry comparison |
+| [2026-02-21 Feature Release](docs/llm-testing-guide.md) | Design & implementation summary: git tools, branch awareness, call graph fixes, code metrics, performance |
 | [E2E Test Plan](docs/e2e-test-plan.md) | 40+ end-to-end test cases (24 CLI + 16 MCP) with automation script |
 | [Git History Cache Design](user-stories/git-history-cache-design.md) | Cache architecture, data structures, lifecycle, invalidation strategy |
 | [Changelog](CHANGELOG.md) | All notable changes organized by category (features, fixes, performance) |
@@ -57,7 +58,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Respects `.gitignore`** — automatically skips ignored files
 - **Extension filtering** — limit search to specific file types
 - **MCP Server** — native Model Context Protocol server for AI agents (Roo Code, Cline, or any MCP-compatible client) with async startup
-- **Code definition index** — tree-sitter AST parsing for structural code search *(C# and TypeScript/TSX)*
+- **Code definition index** — tree-sitter AST parsing for structural code search *(C# and TypeScript/TSX)*. Angular components enriched with template metadata (selector, child components from HTML templates)
 - **Code complexity metrics** — 7 metrics computed during AST indexing: cyclomatic complexity, cognitive complexity (SonarSource), max nesting depth, parameter count, return/throw count, call count, lambda count. Query with `includeCodeStats`, sort by any metric, filter with `min*` thresholds
 - **Parallel tokenization** — content index tokenization parallelized across all CPU cores
 - **Parallel parsing** — multi-threaded tree-sitter parsing with lazy grammar loading
@@ -134,6 +135,19 @@ The `search_callers` tool builds call trees by tracing method invocations throug
 - **Fuzzy DI interface matching** — finds callers through non-standard interface naming conventions (e.g., `IDataModelService` → `DataModelWebService`) using suffix-tolerant matching against the `base_type_index`
 - **Type inference for local variables** — cast expressions (`(Type)expr`), `as` expressions (`expr as Type`), method return types (`var x = GetStream()`), `await`/`Task<T>` unwrap (`var x = await GetStreamAsync()`), pattern matching (`if (obj is Type name)`, `case Type name:`), and extension method detection. Cross-class method return types are NOT resolved (only same-class methods)
 - **Local variable limitation** — calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may not be detected when the return type cannot be inferred. DI-injected fields, `this`/`base` calls, and direct receiver calls are fully supported
+
+### Angular Template Metadata
+
+Angular `@Component` class definitions are automatically enriched with template metadata during definition indexing:
+
+- **What it does** — extracts `selector` and `templateUrl` from the `@Component()` decorator, reads the paired `.html` file, and scans for custom elements (tags with hyphens) used in the template
+- **`search_definitions`** — Angular components include `selector` (e.g., `"app-user-profile"`) and `templateChildren` (list of child component selectors found in the HTML)
+- **Component tree navigation via `search_callers`**:
+  - `direction='down'` with a component class name → shows child components from the HTML template (recursive with `depth`)
+  - `direction='up'` with a selector (e.g., `"app-footer"`) → finds parent components that use it in their templates
+- **HTML content search** — add `html` to `--ext` / `ext` parameter for `search_grep` to search HTML template content
+
+**Limitations:** Only external templates (`templateUrl`), not inline `template:`. Only tags with hyphens (custom elements per HTML spec). `ng-*` tags are excluded (Angular built-ins). Template metadata updates on full `def-index` rebuild, not incrementally on `.html` changes.
 
 ## Dependencies
 
