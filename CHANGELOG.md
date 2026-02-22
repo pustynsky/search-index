@@ -6,7 +6,30 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-02-22
+
+### Bug Fixes
+
+- **`search_info` memory spike fix — 1.8 GB temporary allocation eliminated** — `search_info` MCP handler was calling `cmd_info_json()` which fully deserialized ALL index files from `%LOCALAPPDATA%/search-index/` (including indexes for repos the server doesn't serve). For a multi-repo setup with multiple indexed directories, this loaded ~1.8 GB into memory temporarily. Since the main thread never exits, mimalloc never decommitted these freed segments back to the OS, causing Working Set to stay at ~4.4 GB instead of ~2.5 GB. **Fix:** Rewrote `handle_search_info()` to read all statistics from already-loaded in-memory structures (`ctx.index`, `ctx.def_index`, `ctx.git_cache`) via read locks — zero additional allocations. Disk file sizes obtained via `fs::metadata()` only. Removed the `cmd_info_json()` call entirely from the MCP path. Also removed the temporary `force_mimalloc_collect()` workaround from `dispatch_tool()` that was added during diagnosis. Memory log (`--memory-log`) confirms: `search_info` Δ WS went from +1,799 MB to ~0 MB.
+
+### Internal
+
+- **`definition_index_path_for()` made public** — Renamed `def_index_path_for()` → `definition_index_path_for()` and made it `pub` in `src/definitions/storage.rs` for use by `handle_search_info()` disk size lookup.
+- **`read_root_from_index_file_pub()` added** — Public wrapper for header-only index file reading in `src/index.rs`, used by `handle_search_info()` to get file-list root directory without full deserialization.
+
+---
+
 ## 2026-02-21
+
+### Features
+
+- **Memory diagnostics (`--memory-log`)** — New `--memory-log` CLI flag for `search serve` writes Working Set / Peak WS / Commit metrics to `memory.log` in the index directory (`%LOCALAPPDATA%/search-index/`) at every key pipeline stage. Metrics are captured at: server startup, content/definition index build start/finish, drop/reload cycles, trigram builds, git cache init/ready. When disabled (default), `log_memory()` is a single `AtomicBool` check — zero overhead. Windows-only (uses `K32GetProcessMemoryInfo`); no-op on other platforms. 7 new unit tests.
+
+- **Memory estimates in `search_info`** — `search_info` MCP response and CLI `search info` now include a `memoryEstimate` section with calculated per-component memory estimates: inverted index, trigram tokens/map, files, definitions, call sites, git cache, and process memory (Working Set / Peak / Commit). Estimates use sampling (first 1000 keys) for efficiency. Available on all platforms; process memory info is Windows-only.
+
+### Performance
+
+- **`mi_collect(true)` fix for cold-start memory spike** — After `drop(build_index)` and before `load_from_disk()`, the server now calls mimalloc's `mi_collect(true)` to force decommit of freed segments from abandoned thread heaps. This prevents the build+drop+reload pattern from inflating Working Set by ~1.5 GB. Applied in 3 locations: content index build thread, definition index build thread, and watcher bulk reindex path.
 
 ### Bug Fixes
 

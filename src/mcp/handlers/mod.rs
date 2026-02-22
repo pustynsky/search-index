@@ -18,7 +18,7 @@ use tracing::{info, warn};
 
 use crate::mcp::protocol::{ToolCallResult, ToolDefinition};
 use crate::{
-    build_content_index, clean_path, cmd_info_json,
+    build_content_index, clean_path,
     save_content_index, ContentIndex, ContentIndexArgs,
 };
 use crate::definitions::DefinitionIndex;
@@ -435,7 +435,7 @@ pub fn dispatch_tool(
         "search_grep" => grep::handle_search_grep(ctx, arguments),
         "search_find" => find::handle_search_find(ctx, arguments),
         "search_fast" => fast::handle_search_fast(ctx, arguments),
-        "search_info" => handle_search_info(),
+        "search_info" => handle_search_info(ctx),
         "search_reindex" => handle_search_reindex(ctx, arguments),
         "search_reindex_definitions" => handle_search_reindex_definitions(ctx, arguments),
         "search_definitions" => definitions::handle_search_definitions(ctx, arguments),
@@ -468,8 +468,157 @@ fn handle_search_help() -> ToolCallResult {
     ToolCallResult::success(serde_json::to_string_pretty(&help).unwrap())
 }
 
-fn handle_search_info() -> ToolCallResult {
-    let info = cmd_info_json();
+/// Build search_info response from in-memory indexes only.
+/// Previous implementation called `cmd_info_json()` which deserialized ALL index
+/// files from disk (~1.8 GB for multi-repo setups), causing a massive memory spike.
+/// This version reads stats directly from the already-loaded in-memory structures
+/// via read locks — zero additional allocations.
+fn handle_search_info(ctx: &HandlerContext) -> ToolCallResult {
+    let mut indexes = Vec::new();
+    let mut memory_estimate = json!({});
+
+    // ── Content index (in-memory) ──
+    if ctx.content_ready.load(Ordering::Acquire) {
+        if let Ok(idx) = ctx.index.read() {
+            if !idx.files.is_empty() {
+                // Get disk file size without loading
+                let exts_str = idx.extensions.join(",");
+                let disk_path = crate::index::content_index_path_for(&idx.root, &exts_str, &ctx.index_base);
+                let size_mb = std::fs::metadata(&disk_path)
+                    .map(|m| (m.len() as f64 / 1_048_576.0 * 10.0).round() / 10.0)
+                    .unwrap_or(0.0);
+
+                let age_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or(std::time::Duration::ZERO)
+                    .as_secs()
+                    .saturating_sub(idx.created_at);
+
+                indexes.push(json!({
+                    "type": "content",
+                    "root": idx.root,
+                    "files": idx.files.len(),
+                    "uniqueTokens": idx.index.len(),
+                    "totalTokens": idx.total_tokens,
+                    "extensions": idx.extensions,
+                    "sizeMb": size_mb,
+                    "ageHours": (age_secs as f64 / 3600.0 * 10.0).round() / 10.0,
+                    "inMemory": true,
+                }));
+            }
+            memory_estimate["contentIndex"] = crate::index::estimate_content_index_memory(&idx);
+        }
+    } else {
+        indexes.push(json!({
+            "type": "content",
+            "status": "building",
+        }));
+    }
+
+    // ── Definition index (in-memory) ──
+    if let Some(ref def_arc) = ctx.def_index {
+        if ctx.def_ready.load(Ordering::Acquire) {
+            if let Ok(idx) = def_arc.read() {
+                if !idx.files.is_empty() {
+                    let disk_path = crate::definitions::definition_index_path_for(
+                        &idx.root, &idx.extensions.join(","), &ctx.index_base,
+                    );
+                    let size_mb = std::fs::metadata(&disk_path)
+                        .map(|m| (m.len() as f64 / 1_048_576.0 * 10.0).round() / 10.0)
+                        .unwrap_or(0.0);
+
+                    let age_secs = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or(std::time::Duration::ZERO)
+                        .as_secs()
+                        .saturating_sub(idx.created_at);
+
+                    let call_sites: usize = idx.method_calls.values().map(|v| v.len()).sum();
+                    let mut def_info = json!({
+                        "type": "definition",
+                        "root": idx.root,
+                        "files": idx.files.len(),
+                        "definitions": idx.definitions.len(),
+                        "callSites": call_sites,
+                        "extensions": idx.extensions,
+                        "sizeMb": size_mb,
+                        "ageHours": (age_secs as f64 / 3600.0 * 10.0).round() / 10.0,
+                        "inMemory": true,
+                    });
+                    if idx.parse_errors > 0 {
+                        def_info["readErrors"] = json!(idx.parse_errors);
+                    }
+                    if idx.lossy_file_count > 0 {
+                        def_info["lossyUtf8Files"] = json!(idx.lossy_file_count);
+                    }
+                    indexes.push(def_info);
+                }
+                memory_estimate["definitionIndex"] = crate::index::estimate_definition_index_memory(&idx);
+            }
+        } else {
+            indexes.push(json!({
+                "type": "definition",
+                "status": "building",
+            }));
+        }
+    }
+
+    // ── File list index (disk metadata only — small file, no full deserialization) ──
+    {
+        let file_index_path = crate::index::index_path_for(&ctx.server_dir, &ctx.index_base);
+        if file_index_path.exists() {
+            if let Some(root) = crate::index::read_root_from_index_file_pub(&file_index_path) {
+                let size_mb = std::fs::metadata(&file_index_path)
+                    .map(|m| (m.len() as f64 / 1_048_576.0 * 10.0).round() / 10.0)
+                    .unwrap_or(0.0);
+                indexes.push(json!({
+                    "type": "file-list",
+                    "root": root,
+                    "sizeMb": size_mb,
+                }));
+            }
+        }
+    }
+
+    // ── Git cache (in-memory) ──
+    if ctx.git_cache_ready.load(Ordering::Acquire) {
+        if let Ok(guard) = ctx.git_cache.read() {
+            if let Some(ref cache) = *guard {
+                let cache_path = crate::git::cache::GitHistoryCache::cache_path_for(&ctx.server_dir, &ctx.index_base);
+                let size_mb = std::fs::metadata(&cache_path)
+                    .map(|m| (m.len() as f64 / 1_048_576.0 * 10.0).round() / 10.0)
+                    .unwrap_or(0.0);
+
+                indexes.push(json!({
+                    "type": "git-history",
+                    "commits": cache.commits.len(),
+                    "files": cache.file_commits.len(),
+                    "authors": cache.authors.len(),
+                    "branch": cache.branch,
+                    "headHash": cache.head_hash,
+                    "sizeMb": size_mb,
+                    "inMemory": true,
+                }));
+                memory_estimate["gitCache"] = crate::index::estimate_git_cache_memory(cache);
+            }
+        }
+    }
+
+    // ── Process memory info (Windows only) ──
+    let process_memory = crate::index::get_process_memory_info();
+    if !process_memory.as_object().map_or(true, |m| m.is_empty()) {
+        memory_estimate["process"] = process_memory;
+    }
+
+    let mut info = json!({
+        "directory": ctx.index_base.display().to_string(),
+        "indexes": indexes,
+    });
+
+    if !memory_estimate.as_object().map_or(true, |m| m.is_empty()) {
+        info["memoryEstimate"] = memory_estimate;
+    }
+
     ToolCallResult::success(serde_json::to_string(&info).unwrap())
 }
 

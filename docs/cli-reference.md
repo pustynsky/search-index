@@ -420,6 +420,8 @@ search serve --dir C:\Projects --ext cs,ts,tsx --watch --definitions
 | `--debounce-ms <MS>`   | Debounce delay for file watcher (default: 500)                       |
 | `--bulk-threshold <N>` | File changes triggering full reindex (default: 100)                  |
 | `--log-level <LEVEL>`  | Log level: error, warn, info, debug (default: info)                  |
+| `--max-response-kb <N>`| Max response size in KB before truncation, 0 = unlimited (default: 16)|
+| `--memory-log`         | Write Working Set / Peak / Commit metrics to `memory.log` in index dir|
 
 ---
 

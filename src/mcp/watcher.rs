@@ -91,6 +91,9 @@ pub fn start_watcher(
                         // and reload from disk (compact, defragmented allocations).
                         // Same pattern used at startup in serve.rs.
                         drop(new_index);
+                        crate::index::log_memory("watcher: after drop(bulk reindex)");
+                        crate::index::force_mimalloc_collect();
+                        crate::index::log_memory("watcher: after mi_collect (bulk)");
                         let ext_reload = extensions.join(",");
                         let new_index = match load_content_index(&dir_str, &ext_reload, &index_base) {
                             Ok(idx) => idx,

@@ -252,6 +252,11 @@ pub struct ServeArgs {
     /// Prevents large search results from filling the LLM context window.
     #[arg(long, default_value = "16")]
     pub max_response_kb: usize,
+
+    /// Enable memory diagnostics: write Working Set / Commit / Peak to a log file
+    /// in the index directory (memory.log). Useful for diagnosing memory spikes.
+    #[arg(long)]
+    pub memory_log: bool,
 }
 
 #[derive(Parser, Debug)]

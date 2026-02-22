@@ -6,7 +6,7 @@ use crate::clean_path;
 
 use super::types::DefinitionIndex;
 
-fn def_index_path_for(dir: &str, exts: &str, index_base: &std::path::Path) -> PathBuf {
+pub fn definition_index_path_for(dir: &str, exts: &str, index_base: &std::path::Path) -> PathBuf {
     let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
     let hash = search::stable_hash(&[
         canonical.to_string_lossy().as_bytes(),
@@ -20,13 +20,13 @@ fn def_index_path_for(dir: &str, exts: &str, index_base: &std::path::Path) -> Pa
 pub fn save_definition_index(index: &DefinitionIndex, index_base: &std::path::Path) -> Result<(), crate::SearchError> {
     std::fs::create_dir_all(index_base)?;
     let exts_str = index.extensions.join(",");
-    let path = def_index_path_for(&index.root, &exts_str, index_base);
+    let path = definition_index_path_for(&index.root, &exts_str, index_base);
     crate::index::save_compressed(&path, index, "definition-index")
 }
 
 #[allow(dead_code)]
 pub fn load_definition_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Result<DefinitionIndex, crate::SearchError> {
-    let path = def_index_path_for(dir, exts, index_base);
+    let path = definition_index_path_for(dir, exts, index_base);
     crate::index::load_compressed(&path, "definition-index")
 }
 

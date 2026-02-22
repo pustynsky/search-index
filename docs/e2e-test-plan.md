@@ -6220,6 +6220,98 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ---
 
 
+### T-MEMORY-LOG: `serve --memory-log` — Memory diagnostics file
+
+**Tool:** `search serve --memory-log`
+
+**Background:** When `--memory-log` is passed to `search serve`, the server writes a `memory.log` file in the index directory (`%LOCALAPPDATA%/search-index/`) with Working Set / Peak WS / Commit at every key pipeline stage.
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_info","arguments":{}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --memory-log
+```
+
+**Expected:**
+
+- stderr contains `[memory-log] Enabled, writing to`
+- stderr contains `[memory]` lines with timing, WS_MB, Peak_MB, Commit_MB, and labels
+- File `%LOCALAPPDATA%/search-index/memory.log` is created with header + data lines
+- Labels include: `serve: startup`, `content-build: starting`, `content-build: finished`, etc.
+- When `--memory-log` is NOT passed, no `[memory]` lines appear in stderr
+
+**Validates:** Memory diagnostics file creation, `log_memory()` calls at key pipeline stages, no-op when disabled.
+
+**Unit tests:** `test_log_memory_is_noop_when_disabled`, `test_enable_memory_log_creates_file`, `test_get_process_memory_info_returns_json`, `test_force_mimalloc_collect_does_not_panic`
+
+---
+
+### T-MEMORY-ESTIMATE: `search_info` — Memory estimates in response
+
+**Tool:** `search_info`
+
+**Background:** `search_info` now includes a `memoryEstimate` section with per-component memory estimates and process memory info.
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_info","arguments":{}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- Response JSON contains `memoryEstimate` object
+- `memoryEstimate.contentIndex` has: `invertedIndexMB`, `trigramTokensMB`, `trigramMapMB`, `filesMB`, `totalEstimateMB`, `uniqueTokens`, `totalPostings`, `fileCount`
+- `memoryEstimate.definitionIndex` has: `definitionsMB`, `callSitesMB`, `filesMB`, `totalEstimateMB`, `definitionCount`
+- `memoryEstimate.process` has (Windows only): `workingSetMB`, `peakWorkingSetMB`, `commitMB`
+- All MB values are rounded to 1 decimal place
+- All count values are integers
+
+**Validates:** Memory estimation for all index components, process memory info via Windows API.
+
+**Unit tests:** `test_estimate_content_index_memory_empty`, `test_estimate_content_index_memory_nonempty`, `test_estimate_definition_index_memory_empty`
+
+---
+
+### T-MI-COLLECT: `mi_collect(true)` — Memory decommit after build+drop+reload
+
+**Background:** After `drop(build_index)` and before `load_from_disk()`, the server calls `mi_collect(true)` to force mimalloc to decommit freed segments. This prevents abandoned thread heaps from inflating Working Set after the build+drop+reload pattern.
+
+**Scenario:** Start the MCP server with `--memory-log` on a large codebase (no pre-built index on disk). Observe the memory log for the drop → mi_collect → reload sequence.
+
+**Expected memory.log entries (approximate):**
+
+```
+    2.50 |    800.0 |    800.0 |    850.0 | content-build: finished
+    2.51 |    400.0 |    800.0 |    450.0 | serve: after drop(content build)
+    2.52 |    200.0 |    800.0 |    250.0 | serve: after mi_collect (content)
+    2.80 |    350.0 |    800.0 |    400.0 | serve: after reload content from disk
+```
+
+**Assertions:**
+
+- WS after `mi_collect` < WS after `drop` (freed segments decommitted)
+- WS after `reload` < WS at `finished` (reload is more compact than build)
+- Peak WS stays at or near the build-time peak (expected — Peak is high-water mark)
+
+**Validates:** `force_mimalloc_collect()` reduces Working Set after dropping build-time allocations. The same pattern applies to definition index and watcher bulk reindex.
+
+**Unit test:** `test_force_mimalloc_collect_does_not_panic`
+
+**Status:** Manual verification via `--memory-log`. The mi_collect call itself is tested for no-panic behavior.
+
+---
+
 ### T-TOKEN-BUDGET: Tool definitions stay within token budget
 
 **Tool:** All 16 tools via `tools/list`

@@ -75,7 +75,17 @@ Run-Test "T62 grep-substring-and"     "$Binary grep `"contentindex,tokenize`" -d
 Run-Test "T63 grep-exact"             "$Binary grep contentindex -d $TestDir -e $TestExt --exact"
 Run-Test "T64 grep-regex-no-substr"   "$Binary grep `".*stale.*`" -d $TestDir -e $TestExt --regex"
 
+# T19: info
+Run-Test "T19 info"                "$Binary info"
+
+# T20: def-index + def-audit
+Run-Test "T20 def-index"           "$Binary def-index -d $TestDir -e $TestExt"
+Run-Test "T-DEF-AUDIT def-audit"   "$Binary def-audit -d $TestDir -e $TestExt"
+
+# T49: def-index with TypeScript
+Run-Test "T49 def-index-ts"        "$Binary def-index -d $TestDir -e ts"
 # T-EXT-CHECK: verify index files have new semantic extensions
+# NOTE: must run AFTER def-index (T20) since .code-structure files are created by def-index
 Write-Host -NoNewline "  T-EXT-CHECK index-file-extensions ... "
 $total++
 try {
@@ -117,15 +127,6 @@ catch {
     $failed++
 }
 
-# T19: info
-Run-Test "T19 info"                "$Binary info"
-
-# T20: def-index + def-audit
-Run-Test "T20 def-index"           "$Binary def-index -d $TestDir -e $TestExt"
-Run-Test "T-DEF-AUDIT def-audit"   "$Binary def-audit -d $TestDir -e $TestExt"
-
-# T49: def-index with TypeScript
-Run-Test "T49 def-index-ts"        "$Binary def-index -d $TestDir -e ts"
 
 # T21-T23: error handling
 Run-Test "T21 invalid-regex"       "$Binary grep `"[invalid`" -d $TestDir -e $TestExt --regex" -ExpectedExit 1

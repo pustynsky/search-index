@@ -40,6 +40,12 @@ pub fn cmd_serve(args: ServeArgs) {
 
     let idx_base = index_dir();
 
+    // Enable memory diagnostics if --memory-log was passed
+    if args.memory_log {
+        crate::index::enable_memory_log(&idx_base);
+    }
+    crate::index::log_memory("serve: startup");
+
     // ─── Async startup: create empty indexes, start event loop immediately ───
     use std::collections::HashMap;
 
@@ -77,6 +83,7 @@ pub fn cmd_serve(args: ServeArgs) {
             tokens = idx.index.len(),
             "Content index loaded from disk"
         );
+        crate::index::log_memory("serve: content loaded from disk");
         let idx = if args.watch {
             mcp::watcher::build_watch_index_from(idx)
         } else {
@@ -84,6 +91,7 @@ pub fn cmd_serve(args: ServeArgs) {
         };
         *index.write().unwrap_or_else(|e| e.into_inner()) = idx;
         content_ready.store(true, Ordering::Release);
+        crate::index::log_memory("serve: content ready");
 
         // Pre-warm trigram index in background to eliminate cold-start penalty
         let warmup_index = Arc::clone(&index);
@@ -107,6 +115,7 @@ pub fn cmd_serve(args: ServeArgs) {
 
         std::thread::spawn(move || {
             info!("Building content index in background...");
+            crate::index::log_memory("content-build: starting");
             let build_start = Instant::now();
             let new_idx = build_content_index(&ContentIndexArgs {
                 dir: bg_dir.clone(),
@@ -117,6 +126,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 threads: 0,
                 min_token_len: DEFAULT_MIN_TOKEN_LEN,
             });
+            crate::index::log_memory("content-build: finished");
             if let Err(e) = save_content_index(&new_idx, &bg_idx_base) {
                 warn!(error = %e, "Failed to save content index to disk");
             }
@@ -127,6 +137,9 @@ pub fn cmd_serve(args: ServeArgs) {
             let file_count = new_idx.files.len();
             let token_count = new_idx.index.len();
             drop(new_idx);
+            crate::index::log_memory("serve: after drop(content build)");
+            crate::index::force_mimalloc_collect();
+            crate::index::log_memory("serve: after mi_collect (content)");
             let new_idx = load_content_index(&bg_dir, &bg_ext, &bg_idx_base)
                 .unwrap_or_else(|e| {
                     warn!(error = %e, "Failed to reload content index from disk, rebuilding");
@@ -137,6 +150,7 @@ pub fn cmd_serve(args: ServeArgs) {
                     })
                 });
 
+            crate::index::log_memory("serve: after reload content from disk");
             let new_idx = if bg_watch {
                 mcp::watcher::build_watch_index_from(new_idx)
             } else {
@@ -151,6 +165,7 @@ pub fn cmd_serve(args: ServeArgs) {
             );
             *bg_index.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
             bg_ready.store(true, Ordering::Release);
+            crate::index::log_memory("serve: content ready");
 
             // Pre-warm trigram index after background build
             eprintln!("[warmup] Starting trigram pre-warm...");
@@ -212,6 +227,7 @@ pub fn cmd_serve(args: ServeArgs) {
             );
             *def_arc.write().unwrap_or_else(|e| e.into_inner()) = idx;
             def_ready.store(true, Ordering::Release);
+            crate::index::log_memory("serve: def ready");
         } else {
             // Build in background
             let bg_def = Arc::clone(&def_arc);
@@ -222,12 +238,14 @@ pub fn cmd_serve(args: ServeArgs) {
 
             std::thread::spawn(move || {
                 info!("Building definition index in background...");
+                crate::index::log_memory("def-build: starting");
                 let build_start = Instant::now();
                 let new_idx = definitions::build_definition_index(&definitions::DefIndexArgs {
                     dir: bg_dir.clone(),
                     ext: bg_def_exts.clone(),
                     threads: 0,
                 });
+                crate::index::log_memory("def-build: finished");
                 if let Err(e) = definitions::save_definition_index(&new_idx, &bg_idx_base) {
                     warn!(error = %e, "Failed to save definition index to disk");
                 }
@@ -236,6 +254,9 @@ pub fn cmd_serve(args: ServeArgs) {
                 let def_count = new_idx.definitions.len();
                 let file_count = new_idx.files.len();
                 drop(new_idx);
+                crate::index::log_memory("serve: after drop(def build)");
+                crate::index::force_mimalloc_collect();
+                crate::index::log_memory("serve: after mi_collect (def)");
                 let new_idx = definitions::load_definition_index(&bg_dir, &bg_def_exts, &bg_idx_base)
                     .unwrap_or_else(|e| {
                         warn!(error = %e, "Failed to reload definition index from disk, rebuilding");
@@ -244,6 +265,7 @@ pub fn cmd_serve(args: ServeArgs) {
                         })
                     });
 
+                crate::index::log_memory("serve: after reload def from disk");
                 let elapsed = build_start.elapsed();
                 info!(
                     elapsed_ms = format_args!("{:.1}", elapsed.as_secs_f64() * 1000.0),
@@ -253,6 +275,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 );
                 *bg_def.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
                 bg_def_ready.store(true, Ordering::Release);
+                crate::index::log_memory("serve: def ready");
             });
         }
 
@@ -293,6 +316,7 @@ pub fn cmd_serve(args: ServeArgs) {
 
         std::thread::spawn(move || {
             let start = Instant::now();
+            crate::index::log_memory("git-cache: starting");
             eprintln!("[git-cache] Initializing for {}...", bg_dir);
 
             // Determine repo path — check if it's a git repository
@@ -413,6 +437,7 @@ pub fn cmd_serve(args: ServeArgs) {
             bg_git_ready.store(true, Ordering::Release);
 
             let elapsed = start.elapsed();
+            crate::index::log_memory("git-cache: ready");
             eprintln!(
                 "[git-cache] Ready: {} commits, {} files in {:.1}s",
                 commit_count, file_count, elapsed.as_secs_f64()
