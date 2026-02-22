@@ -976,22 +976,23 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 // --- Subdir tests ---
 
 #[test] fn test_validate_search_dir_subdirectory() {
-    let tmp = std::env::temp_dir().join("search_test_subdir_val");
+    let parent_tmp = tempfile::tempdir().unwrap();
+    let tmp = parent_tmp.path().join("subdir_val");
     std::fs::create_dir_all(&tmp).unwrap();
-    let result = validate_search_dir(&tmp.to_string_lossy(), &std::env::temp_dir().to_string_lossy());
+    let result = validate_search_dir(&tmp.to_string_lossy(), &parent_tmp.path().to_string_lossy());
     assert!(result.is_ok());
     assert!(result.unwrap().is_some());
-    let _ = std::fs::remove_dir(&tmp);
 }
 
 #[test] fn test_grep_with_subdir_filter() {
-    let tmp = std::env::temp_dir().join("search_test_grep_subdir");
+    let tmp_holder = tempfile::tempdir().unwrap();
+    let tmp = tmp_holder.path();
     let sub_a = tmp.join("subA"); let sub_b = tmp.join("subB");
     std::fs::create_dir_all(&sub_a).unwrap(); std::fs::create_dir_all(&sub_b).unwrap();
     std::fs::write(sub_a.join("hello.txt"), "ProductCatalog usage here").unwrap();
     std::fs::write(sub_b.join("other.txt"), "ProductCatalog other usage").unwrap();
     let index = crate::build_content_index(&crate::ContentIndexArgs { dir: tmp.to_string_lossy().to_string(), ext: "txt".to_string(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2 });
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "txt".to_string(), metrics: false, index_base: tmp.clone(), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "txt".to_string(), metrics: false, index_base: tmp.to_path_buf(), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
     let r_all = handle_search_grep(&ctx, &json!({"terms": "productcatalog"}));
     let o_all: Value = serde_json::from_str(&r_all.content[0].text).unwrap();
     assert_eq!(o_all["summary"]["totalFiles"], 2);
@@ -999,17 +1000,15 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     assert!(!r_sub.is_error);
     let o_sub: Value = serde_json::from_str(&r_sub.content[0].text).unwrap();
     assert_eq!(o_sub["summary"]["totalFiles"], 1);
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 #[test] fn test_grep_rejects_outside_dir() {
-    let tmp = std::env::temp_dir().join("search_test_grep_reject");
-    std::fs::create_dir_all(&tmp).unwrap();
+    let tmp_holder = tempfile::tempdir().unwrap();
+    let tmp = tmp_holder.path();
     let index = ContentIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), file_token_counts: vec![], total_tokens: 0, extensions: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: tmp.clone(), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: tmp.to_path_buf(), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
     let result = handle_search_grep(&ctx, &json!({"terms": "test", "dir": r"Z:\some\other\path"}));
     assert!(result.is_error);
-    let _ = std::fs::remove_dir_all(&tmp);
 }
 
 // --- Response truncation integration tests ---

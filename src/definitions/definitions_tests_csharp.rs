@@ -247,9 +247,8 @@ namespace MyApp
 
 #[test]
 fn test_attribute_index_no_duplicates_for_same_attr_name() {
-    let dir = std::env::temp_dir().join("search_attr_dedup_test");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     std::fs::write(dir.join("service.cs"), r#"
 [Obsolete]
 [Obsolete("Use NewService instead")]
@@ -268,15 +267,12 @@ public class OtherService { }
     let deduped_len = { let mut d = sorted.clone(); d.dedup(); d.len() };
     assert_eq!(attr_indices.len(), deduped_len);
     assert_eq!(attr_indices.len(), 2);
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn test_incremental_update_new_file() {
-    let dir = std::env::temp_dir().join("search_def_incr_new");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     let test_file = dir.join("new.cs");
     std::fs::write(&test_file, "public class NewClass { public void NewMethod() {} }").unwrap();
 
@@ -295,15 +291,12 @@ fn test_incremental_update_new_file() {
     assert!(index.name_index.contains_key("newclass"));
     assert!(index.name_index.contains_key("newmethod"));
     assert_eq!(index.files.len(), 1);
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn test_incremental_update_existing_file() {
-    let dir = std::env::temp_dir().join("search_def_incr_update");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     let test_file = dir.join("existing.cs");
     std::fs::write(&test_file, "public class OldClass { }").unwrap();
 
@@ -331,8 +324,6 @@ fn test_incremental_update_existing_file() {
     assert!(!index.name_index.contains_key("oldclass"));
     assert!(index.name_index.contains_key("updatedclass"));
     assert!(index.name_index.contains_key("value"));
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -553,9 +544,8 @@ public class OrderService {
 }
 
 #[test] fn test_incremental_update_preserves_call_graph() {
-    let dir = std::env::temp_dir().join("search_def_incr_callgraph");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
     let test_file = dir.join("service.cs");
     std::fs::write(&test_file, r#"
 public class MyService {
@@ -600,8 +590,6 @@ public class MyService {
     assert!(new_names.contains(&"Update"));
     assert!(new_names.contains(&"Commit"));
     assert!(!new_names.contains(&"Insert"));
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ─── Non-UTF8 / Lossy Parsing Tests ──────────────────────────────────

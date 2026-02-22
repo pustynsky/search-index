@@ -26,6 +26,8 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Internal
 
+- **Test parallelism race conditions fixed (US-9)** — Migrated 14 unit tests from hardcoded `std::env::temp_dir().join("fixed_name")` to `tempfile::tempdir()` across 4 test files (`definitions_tests.rs`, `definitions_tests_csharp.rs`, `definitions_tests_typescript.rs`, `handlers_tests.rs`). The hardcoded temp directory names caused race conditions when `cargo test` ran tests in parallel (default behavior, 24 threads on this machine), as two tests could simultaneously write/delete the same directory. `tempfile::tempdir()` generates unique OS-guaranteed paths with automatic cleanup on drop. No test logic changed — only the temp directory creation mechanism. All 822 tests pass with 0 failures under full parallelism.
+
 - **6 new E2E tests for previously untested MCP features** — Added `T-SERVE-HELP-TOOLS` (verifies `serve --help` lists key tools), `T-BRANCH-STATUS` (smoke test for `search_branch_status` MCP tool), `T-GIT-FILE-NOT-FOUND` (nonexistent file returns warning, not error), `T-GIT-NOCACHE` (`noCache` parameter returns valid result), `T-GIT-TOTALCOMMITS` (totalCommits > returned regression test for BUG-2 fix). Total E2E tests: 48 → 55.
 
 - **`definition_index_path_for()` made public** — Renamed `def_index_path_for()` → `definition_index_path_for()` and made it `pub` in `src/definitions/storage.rs` for use by `handle_search_info()` disk size lookup.
@@ -58,6 +60,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 ### Bug Fixes
 
 - **UTF-16 BOM detection in `read_file_lossy()`** — Files encoded in UTF-16LE or UTF-16BE (with BOM) were previously read as lossy UTF-8, producing garbled content (`��/ / - - - -`). Tree-sitter received garbage instead of valid source code, resulting in 0 definitions for affected files. The fix adds BOM detection to `read_file_lossy()`: UTF-16LE BOM (`FF FE`) → decode as UTF-16LE, UTF-16BE BOM (`FE FF`) → decode as UTF-16BE, UTF-8 BOM (`EF BB BF`) → strip BOM. All three indexes (content, definitions, callers) benefit from this single-function fix. Affects ~44 files previously reported as `lossyUtf8Files` in audit. 15 new unit tests.
+
 ### Performance
 
 - **Optimized MCP tool descriptions for LLM token budget** — Shortened parameter descriptions across all 14 MCP tools (~100 parameters total), reducing the system prompt token footprint by ~30% (~2,000 tokens). Concrete examples moved from inline parameter descriptions to a new `parameterExamples` section in `search_help` (on-demand via 1 extra call). Critical usage hints preserved (e.g., `class` in `search_callers`). Tool-level descriptions unchanged. Semantic purpose of each parameter preserved (8-15 words). Added `test_tool_definitions_token_budget` test to prevent description bloat from re-accumulating. Added `test_render_json_has_parameter_examples` test to verify examples are accessible via `search_help`.
@@ -270,16 +273,16 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## Summary
 
-| Metric | Value |
-|--------|-------|
-| Total PRs | 28 |
-| Features | 20 |
-| Bug Fixes | 10 |
-| Performance | 3 |
-| Internal | 5 |
-| Unit tests (latest) | 710+ |
-| E2E tests (latest) | 48+ |
-| Binary size reduction | 20.4 MB → 9.8 MB (−52%) |
-| Index size reduction | 566 MB → 327 MB (−42%, LZ4) |
-| Memory reduction | 3.7 GB → 2.1 GB (−43%) |
-| Build speed improvement | 150s → 42s (3.6×) |
+| Metric                  | Value                       |
+| ----------------------- | --------------------------- |
+| Total PRs               | 28                          |
+| Features                | 20                          |
+| Bug Fixes               | 10                          |
+| Performance             | 3                           |
+| Internal                | 5                           |
+| Unit tests (latest)     | 822                         |
+| E2E tests (latest)      | 55+                         |
+| Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
+| Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |
+| Memory reduction        | 3.7 GB → 2.1 GB (−43%)      |
+| Build speed improvement | 150s → 42s (3.6×)           |
