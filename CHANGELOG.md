@@ -1,7 +1,7 @@
 # Changelog
 
 
-## Unreleased
+## 0.4.0 (2026-07-25)
 
 - **`xray_git_history` now distinguishes fast cached history from full followed history.** Default requests use the repo-scoped literal-path cache and report `source="git-cache"`, `lineage="direct-path"`, and `safeForFullHistory=false`; `noCache=true` bypasses cache for `git --follow` and reports `source="git-cli"`, `lineage="follow"`, and `safeForFullHistory=true`. `firstCommit` and `xray_git_diff` remain CLI-only, and authors/activity no longer use a workspace cache for another repository. The Git cache format remains version 2.
 
