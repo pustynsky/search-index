@@ -4701,6 +4701,7 @@ mod retry_cascade_tests {
 fn make_ctx_with_ext(dir: &std::path::Path, ext: &str) -> HandlerContext {
     use std::collections::HashMap;
     use crate::ContentIndex;
+    let dir = crate::canonicalize_test_root(dir);
     let extensions: Vec<String> = ext.split(',')
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
@@ -5604,10 +5605,12 @@ fn test_file_symlink_edit_preserves_link_and_updates_target() {
 #[test]
 fn test_file_symlink_edit_reindexes_logical_path() {
     let tmp = tempfile::tempdir().unwrap();
-    let root = crate::canonicalize_test_root(&tmp.path().join("root"));
-    let external = crate::canonicalize_test_root(&tmp.path().join("external"));
+    let root = tmp.path().join("root");
+    let external = tmp.path().join("external");
     std::fs::create_dir_all(&root).unwrap();
     std::fs::create_dir_all(&external).unwrap();
+    let root = crate::canonicalize_test_root(&root);
+    let external = crate::canonicalize_test_root(&external);
     let target = external.join("target.cs");
     let link = root.join("alias.cs");
     std::fs::write(&target, "class BeforeIdentity {}\n").unwrap();
