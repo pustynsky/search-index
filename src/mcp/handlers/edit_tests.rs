@@ -8773,7 +8773,7 @@ fn test_generate_unified_diff_caps_at_2000_lines() {
     }));
     let elapsed = started.elapsed();
 
-    assert!(!result.is_error, "edit must succeed: {}", &result.content[0].text);
+    assert!(!result.is_error, "edit must succeed: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["dryRun"], true);
     assert!(output.get("writeStatus").is_none());
@@ -8899,7 +8899,7 @@ fn test_generate_unified_diff_truncates_oversize_byte_payload() {
         "dryRun": true
     }));
 
-    assert!(!result.is_error, "edit must succeed: {}", &result.content[0].text);
+    assert!(!result.is_error, "edit must succeed: {}", result.content[0].text);
     let text = &result.content[0].text;
     assert!(
         text.contains("diff truncated"),

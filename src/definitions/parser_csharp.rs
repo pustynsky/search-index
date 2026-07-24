@@ -1864,15 +1864,10 @@ fn extract_csharp_event_def(
     let name = if let Some(name_node) = find_child_by_field(node, "name") {
         node_text(name_node, source).to_string()
     } else {
-        let var_decl = find_child_by_kind(node, "variable_declaration");
-        if let Some(vd) = var_decl {
-            let declarator = find_child_by_kind(vd, "variable_declarator");
-            if let Some(d) = declarator {
-                if let Some(n) = find_child_by_field(d, "name") {
-                    node_text(n, source).to_string()
-                } else { return None; }
-            } else { return None; }
-        } else { return None; }
+        let var_decl = find_child_by_kind(node, "variable_declaration")?;
+        let declarator = find_child_by_kind(var_decl, "variable_declarator")?;
+        let name = find_child_by_field(declarator, "name")?;
+        node_text(name, source).to_string()
     };
     let modifiers = extract_modifiers(node, source);
     let attributes = extract_attributes(node, source);
