@@ -3128,7 +3128,7 @@ impl CallerTreeBuilder<'_> {
 
                 let caller_key = format!("{}.{}.{}",
                     caller_parent.as_deref().unwrap_or("?"),
-                    &caller_name,
+                    caller_name,
                     caller_line
                 );
 
@@ -3764,7 +3764,7 @@ impl CalleeTreeBuilder<'_> {
 
                     let callee_key = format!("{}.{}.{}",
                         callee_def.parent.as_deref().unwrap_or("?"),
-                        &callee_def.name,
+                        callee_def.name,
                         callee_def.line_start
                     );
 

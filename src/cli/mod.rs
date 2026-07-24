@@ -313,7 +313,7 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
     let pattern = if args.ignore_case { args.pattern.to_lowercase() } else { args.pattern.clone() };
 
     let re = if args.regex {
-        let pat = if args.ignore_case { format!("(?i){}", &args.pattern) } else { args.pattern.clone() };
+        let pat = if args.ignore_case { format!("(?i){}", args.pattern) } else { args.pattern.clone() };
         match Regex::new(&pat) {
             Ok(r) => Some(r),
             Err(e) => return Err(SearchError::InvalidRegex { pattern: pat, source: e }),
