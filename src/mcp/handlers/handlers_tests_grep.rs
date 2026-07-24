@@ -403,7 +403,8 @@ fn test_wide_substring_waits_for_inflight_trigram_rebuild() {
 #[test]
 fn test_xray_edit_schedules_background_trigram_rebuild() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let file_path = temp_dir.path().join("Edited.cs");
+    let root = crate::canonicalize_test_root(temp_dir.path());
+    let file_path = root.join("Edited.cs");
     std::fs::write(&file_path, "public class BeforeNeedle {}\n").unwrap();
 
     let file_path_string = file_path.to_string_lossy().to_string();
@@ -414,7 +415,7 @@ fn test_xray_edit_schedules_background_trigram_rebuild() {
     let mut path_to_id = HashMap::new();
     path_to_id.insert(crate::path_identity_key(&std::path::PathBuf::from(clean_file_path.clone())), 0);
     let content_index = ContentIndex {
-        root: clean_path(&temp_dir.path().to_string_lossy()),
+        root: clean_path(&root.to_string_lossy()),
         files: vec![clean_file_path],
         index: index_map,
         total_tokens: 1,
@@ -427,7 +428,7 @@ fn test_xray_edit_schedules_background_trigram_rebuild() {
     };
     let ctx = HandlerContextBuilder::new()
         .with_content_index(content_index)
-        .with_server_dir(temp_dir.path().to_string_lossy().to_string())
+        .with_server_dir(root.to_string_lossy().to_string())
         .build();
 
     let result = dispatch_tool(&ctx, "xray_edit", &json!({
@@ -4380,6 +4381,7 @@ fn test_xray_grep_literal_prefilter_scope_aware_counters_with_dir_scope() {
     ));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).unwrap();
+    let tmp_dir = crate::canonicalize_test_root(&tmp_dir);
     let inside = tmp_dir.join("inside");
     let outside = tmp_dir.join("outside");
     std::fs::create_dir_all(&inside).unwrap();
