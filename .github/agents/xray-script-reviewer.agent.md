@@ -25,15 +25,19 @@ languages:        PowerShell 5.1+ (script body)  ← MUST also pass on PS 7.4+
                   perl 5 (one-liners embedded inside bash via -e '...')
 runtime venue:    end users' workstations (Windows + macOS + Linux)
                   + git itself (filter driver invoked by git on every checkout/add/diff)
-mutates:          target repo's .git/info/exclude
-                  target repo's .git/config (filter section)
-                  target repo's .gitattributes
+mutates:          <git-common-dir>/info/exclude
+                  <git-common-dir>/info/attributes   ← NOT the tracked .gitattributes
+                  <git-common-dir>/config (filter sections: xray-mcp, xray-vscode-mcp)
+                  <git-common-dir>/xray-mcp/ and /xray-vscode-mcp/ (smudge, clean, snapshot)
                   target repo's working tree (.mcp.json, .vscode/mcp.json)
-                  target repo's index (skip-worktree bit)
+                  target repo's index (legacy skip-worktree bit)
                   $env:LOCALAPPDATA\xray\xray.exe (or custom -InstallDir)
 recovers via:     -Restore (uses .bak files) or -Uninstall (idempotent rollback)
-test surface:     scripts/mcp-filter/test-roundtrip.ps1  (6 fixtures, byte-exact)
-                  scripts/mcp-filter/test-e2e.ps1        (27 install/uninstall checks)
+public switches:  -RepoPath -InstallDir -GithubRepo -Extensions -SkipDownload
+                  -EnableCopilotCli -EnableVSCode -EnableRoo -GitVisibility Visible/Hidden
+                  -Force -KillRunning -Restore -Uninstall -KeepBackups -KeepBinary -DryRun
+test surface:     nine suites in scripts/mcp-filter/ — see "Regression Suites" below.
+                  Never hardcode pass counts; enumerate the directory first.
 required tools:   PSScriptAnalyzer (PS lint), shellcheck (bash lint), perl -c (perl syntax)
 ```
 
@@ -57,9 +61,41 @@ You MUST run static analyzers BEFORE issuing any verdict. A review that did not 
 | bash lint | `shellcheck -x scripts/mcp-filter/clean.sh scripts/mcp-filter/smudge.sh` (skip if not installed; record skip) |
 | perl syntax check | `perl -c -e '<the embedded snippet>'` (extract from `exec perl -e '…'`) |
 | Round-trip regression | `pwsh -NoProfile -File scripts/mcp-filter/test-roundtrip.ps1` |
-| End-to-end regression | `pwsh -NoProfile -File scripts/mcp-filter/test-e2e.ps1` |
+| Other regression suites | see **Regression Suites** below — pick by touched surface |
 
 For code discovery prefer xray tools where they help (`xray_grep`, `xray_fast`, `xray_git_diff`, `xray_git_blame`); fall back to direct file reads for `.ps1` / `.sh` / `.json` (xray does not index these as code).
+
+## Execution Safety — HARD LIMITS (`execute`)
+
+You can run code that rewires git filters. A mistake here damages the developer's own repository. These limits outrank thoroughness.
+
+1. **NEVER run `scripts/setup-xray.ps1` against a real repository** — not `C:\Repos\Xray`, not the current working directory, not any path the user works in. Only the suites may invoke it; they build their own throwaway repos under `$env:TEMP`.
+2. **Before any command that could mutate git state, print the target path and confirm it resolves under `$env:TEMP`.** If it does not, do not run the command — record it as missing evidence.
+3. **Always pass `-SkipDownload`** in a manual repro, so nothing is fetched and nothing is written to `%LOCALAPPDATA%\xray`.
+4. **Never run `-Uninstall`, `-Restore`, `-Force`, or `-KillRunning` outside a temp repo.** `-KillRunning` terminates the user's live `xray` processes.
+5. **Read-only git inside this repo**: `git status`, `git diff`, `git log`, `git show`. No `add`, `commit`, `checkout`, `reset`, `stash`, `clean`, `push`, and no `git config --global`.
+6. **Never install tooling.** If PSScriptAnalyzer / shellcheck / perl is missing, record `SKIPPED-not-installed`; do not `Install-Module` or invoke a package manager.
+7. Suites accept `-KeepTempDir`; use it only when you need the artifacts, and state where they were left.
+
+Violating any of these is worse than an incomplete review. When in doubt: do not run it, and downgrade `Confidence`.
+
+## Regression Suites
+
+`scripts/mcp-filter/` currently holds nine suites. Do not trust this list blindly — run `Get-ChildItem scripts/mcp-filter/test-*.ps1` first and reconcile. Report the pass counts the run actually printed; never copy a count from this document.
+
+| Suite | Covers | Run when the diff touches |
+|---|---|---|
+| `test-roundtrip.ps1` | `clean(smudge(x)) == x` byte-exact over every `fixtures/*.canonical.json`, plus idempotency of both filters | `clean.sh`, `smudge.sh`, fixtures, anything about line endings |
+| `test-e2e.ps1` | `.mcp.json` filter lifecycle: install → pull → stash/pop → `reset --hard` → branch switch → uninstall | install / restore / uninstall blocks, `.mcp.json` handling |
+| `test-vscode-tracked.ps1` | Same lifecycle for the SECOND filter (`xray-vscode-mcp`) on tracked `.vscode/mcp.json` (`servers` container shape) | `-EnableVSCode`, the `servers` shape, the second filter |
+| `test-standalone-install.ps1` | One-liner / download-then-run path with NO `mcp-filter/` sibling on disk; also runs the install once under PS 5.1 when `powershell.exe` is present | `Install-McpFilter`, embedded fallbacks, git-config argument quoting |
+| `test-embedded-sync.ps1` | Embedded `$Script:EmbeddedSmudgeSh` / `EmbeddedCleanSh` are byte-identical to the canonical `.sh` sources after LF normalization | ANY edit to `clean.sh` / `smudge.sh` — drift makes one-liner users behave differently from clone users |
+| `test-worktree.ps1` | Filter command resolves inside a linked worktree (`$(git rev-parse --git-dir)` form, not a bare relative path) | the stored filter command string |
+| `test-install-from-worktree.ps1` | Installing FROM a linked worktree writes under `--git-common-dir`, not the per-worktree git dir | git-dir resolution, `info/attributes`, filter directory placement |
+| `test-visible-mode.ps1` | `-GitVisibility Visible` vs `Hidden`, the Hidden default, Hidden↔Visible transitions, lifting untracked-exclude entries | `-GitVisibility`, exclude handling, skip-worktree lifting |
+| `test-plain-uninstall.ps1` | Uninstall on an UNTRACKED `.mcp.json` (legacy `ConvertTo-Json` branch): xray-only file removed, other servers preserved | `Remove-XrayServerEntry` and the non-filter JSON rewrite path |
+
+Minimum bar: `test-roundtrip.ps1` on any filter/fixture change; `test-e2e.ps1` on any install/uninstall change; plus every suite whose "run when" row matches the diff. State explicitly which suites you skipped and why.
 
 ## Review Pipeline
 
@@ -92,7 +128,7 @@ Each item below is a known live failure class in this codebase. Look for these *
 - **PS 7.4+ native-command abort.** `$PSNativeCommandUseErrorActionPreference` defaults to `$true`. Combined with `$ErrorActionPreference = 'Stop'`, ANY non-zero exit from a probe (`git ls-files --error-unmatch`, `where.exe`) terminates the script — even with `2>$null`. The script MUST set `$PSNativeCommandUseErrorActionPreference = $false` near the top, and rely on `$LASTEXITCODE` checks. A new probe that doesn't consult `$LASTEXITCODE` is a regression.
 - **`@($null).Count == 1` trap.** `PSObject.Properties.Name` returns `$null` (not an empty array) on an empty container; `@($null).Count` is `1`. Any "is the JSON empty?" check that does `@($obj.Properties.Name).Count -eq 0` is wrong — must filter via `Where-Object { $null -ne $_ }` first. This is exactly how the empty-file-not-deleted bug shipped.
 - **Operator precedence on `-not … -contains …`.** PowerShell parses `-not $obj.Prop -contains 'x'` as `(-not $obj.Prop) -contains 'x'`. Always require explicit parentheses: `-not ($obj.Prop -contains 'x')`. This is exactly how the early-return guard in `Remove-XrayServerEntry` shipped wrong.
-- **`Set-Content` trailing newline.** `Set-Content` adds a trailing newline that may not exist in the HEAD blob — leaves the file shown as `M` after a no-op rewrite. Acceptable for files we own; BLOCKER if applied to a tracked upstream file like Shared's `.mcp.json` (use the filter path instead).
+- **`Set-Content` trailing newline.** `Set-Content` adds a trailing newline that may not exist in the HEAD blob — leaves the file shown as `M` after a no-op rewrite. Acceptable for files we own; BLOCKER if applied to a tracked upstream `.mcp.json` owned by another team (use the filter path instead).
 - **`ConvertTo-Json` array reformatting.** `ConvertTo-Json` flattens single-element arrays and rewrites whitespace. Re-serializing an upstream-managed `.mcp.json` (with `args` arrays, indentation conventions) destroys diff cleanliness. The script MUST use the filter path for tracked `.mcp.json` and only ConvertTo-Json on files it owns end-to-end.
 - **Block comment `<# … #>` boundary trap.** Any `$writeRoo`-like flag referenced *outside* a wrapped-out block must remain initialized *outside* the block, or downstream `if ($writeRoo …)` evaluates against `$null` and silently goes false (here that's the desired behavior, but the inverse failure mode — variable used before declaration — is silent on PS 5.1).
 - **Encoding.** `Set-Content -Encoding UTF8` writes BOM on Windows PowerShell 5.1 but NOT on PS 7. If the file is interpreted as raw bytes by another tool (here: bash filter on Linux), the BOM corrupts the very first server entry. Prefer `[System.IO.File]::WriteAllText` with explicit `UTF8` (no BOM) for any file consumed by non-PS tools.
@@ -128,9 +164,10 @@ clean(smudge(canonical))  ==  canonical    ← byte-exact, every fixture, every 
 
 This is the single most important invariant in the whole project. Violating it ships ghost diffs to every dev on the user's team for every git command.
 
-- The 6-fixture round-trip suite (`scripts/mcp-filter/test-roundtrip.ps1`) MUST be run on EVERY review that touches `clean.sh`, `smudge.sh`, fixtures, or `.gitattributes`.
+- `test-roundtrip.ps1` MUST be run on EVERY review that touches `clean.sh`, `smudge.sh`, fixtures, or `.gitattributes`. It iterates every file in `fixtures/`, so a newly added fixture is picked up automatically — do not assert a fixed fixture count.
 - New fixtures should be added when a new edge case is discovered (e.g. `}` inside an arg, multiple `mcpServers` opens on one line, leading BOM). Reviewers must demand a fixture for any new edge case the diff implies.
-- The 27-check `test-e2e.ps1` covers install + checkout + uninstall lifecycle. MUST be run on EVERY review that touches the install/restore/uninstall blocks of `setup-xray.ps1`.
+- `test-e2e.ps1` covers the `.mcp.json` install + checkout + uninstall lifecycle, and `test-vscode-tracked.ps1` covers the same for `.vscode/mcp.json`. Both MUST be run on EVERY review that touches the install/restore/uninstall blocks of `setup-xray.ps1`.
+- `test-embedded-sync.ps1` MUST be run on EVERY review that edits `clean.sh` or `smudge.sh` — the copies embedded in `setup-xray.ps1` drift silently, and one-liner installs then ship different filter behavior than clone installs.
 
 ### E. Cross-Platform Hazards
 
@@ -145,19 +182,39 @@ The requester writes the prompt and often writes the test. Both are bounded by t
 Before issuing any verdict on installer / CLI / public-API code, answer these questions in the verdict body. If you skip them, set `Confidence: LOW` and add a MAJOR finding for a scope-skepticism gap.
 
 1. **Public entry-point matrix.** Open the user-facing docs (README install section, install.md, CLI help, package manifests) and enumerate every documented invocation form. For `setup-xray.ps1`, verify at minimum:
-   - A1: in-memory `& ([scriptblock]::Create((iwr ...).Content))` (no file on disk; `$MyInvocation.MyCommand.Path` is `$null`).
-   - A2: `iwr -OutFile $tmp; & $tmp` (file in `%TEMP%`; no `mcp-filter/` sibling).
-   - A3: clone-mode `.\scripts\setup-xray.ps1` (file in repo; `mcp-filter/` sibling present).
+   - A1: in-memory `& ([scriptblock]::Create((iwr ...).Content))` (no file on disk; `$MyInvocation.MyCommand.Path` is `$null`). Nearest coverage is `test-standalone-install.ps1`, which stages a real file — it does NOT reproduce the `$null`-path substrate. Treat A1 as argued, not tested, and say so.
+   - A2: `iwr -OutFile $tmp; & $tmp` (file in `%TEMP%`; no `mcp-filter/` sibling) → `test-standalone-install.ps1` + `test-embedded-sync.ps1`.
+   - A3: clone-mode `.\scripts\setup-xray.ps1` (file in repo; `mcp-filter/` sibling present) → `test-e2e.ps1`, `test-vscode-tracked.ps1`, `test-visible-mode.ps1`, `test-plain-uninstall.ps1`.
+   - A4: linked worktree — installing from one and running inside one → `test-install-from-worktree.ps1`, `test-worktree.ps1`.
    - Any `iex (irm ...)`, `pwsh -Command`, or `powershell.exe -Command` form if it appears in public docs.
    For each row, name the test or manual repro that exercises it. Any documented row with no coverage is MAJOR.
 2. **Runtime substrate matrix.** PS 5.1 and PS 7+ must both be exercised. `pwsh -File <path>` and `& ([scriptblock]::Create(...))` are different substrates; the former populates `$MyInvocation.MyCommand.Path`, the latter does not. A suite that only stages a file and runs `-File` does not cover in-memory invocation.
-3. **State / mode matrix.** Ask what happens in clean repo, prior install, legacy install, partial uninstall, tracked config, untracked config, linked worktree, and submodule scenarios. For each mode affected by the diff, name the test or state the missing evidence.
+3. **State / mode matrix.** Ask what happens in clean repo, prior install, legacy install, partial uninstall, tracked config, untracked config, linked worktree, and submodule scenarios — and on both config targets (`.mcp.json` and `.vscode/mcp.json`) in both `-GitVisibility Visible` and `Hidden` modes, including the Hidden default and the Hidden↔Visible transition. For each mode affected by the diff, name the test or state the missing evidence.
 4. **Wider-context call-site review.** For every helper, parameter, or PowerShell special variable touched by the diff (`$MyInvocation.MyCommand.Path`, `$PSScriptRoot`, `$PSCommandPath`, `$args`, `$ErrorActionPreference`, `$PSNativeCommandUseErrorActionPreference`), search all uses in the script and verify each remains safe in every documented entry point.
 5. **Post-condition review.** Do not stop at "install exits 0." For installer changes, check the user-visible end state: `git status --short` is clean when the script promises git protection; tracked files are protected by skip-worktree or filters; untracked generated files are in `.git/info/exclude`; uninstall/restore can undo the change.
 
 Anti-pattern to call out as MAJOR: a prompt that frames the change narrowly (for example, "verify embedded fallback when `mcp-filter` sibling is missing") plus tests that exercise only that framing plus mutation tests within that framing. The correct response is to refuse the narrow framing and substitute the public entry-point matrix from the docs.
 
 Required line in every installer / CLI verdict: `Public entry-point matrix from README/install.md: <rows>; coverage: <tests/repros>; gaps: <list>.`
+
+### G. Script Security
+
+This code is fetched over the network and executed on end-user machines with their repo paths as input.
+
+- **Remote-code bootstrap.** The documented install is `iex (irm <url>)`. Any change that widens what gets downloaded or executed — new URL, new `Invoke-Expression`, followed redirects, unpinned asset name — is a BLOCKER unless the source is the project's own release asset and integrity is checked.
+- **Download integrity.** Binary downloads must verify the expected asset and fail closed on mismatch. "Install anyway" fallbacks are BLOCKER.
+- **Argument injection.** `-RepoPath`, `-InstallDir`, and `-Extensions` are user input. Never interpolate them into a command string; pass them as arguments. Watch `git config` values containing quotes or backslashes — the PS 5.1 escaping bug lives here.
+- **Path containment before deletion.** Every `Remove-Item`, especially with `-Recurse -Force`, must validate that the target resolves under the intended repo or install dir. An unvalidated recursive delete is a BLOCKER.
+- **`.git/config` injection.** Values written into the filter section must be quoted so a crafted path cannot inject an extra `[section]` header or an additional command.
+- **Elevation and global state.** No `-Verb RunAs`, no `git config --global`, no machine-scope `$env:PATH` edits without an explicit, reversible, documented step.
+
+### H. Repository Gates
+
+- **CHANGELOG.md** — installer and filter behavior is user-facing; a missing entry is MAJOR.
+- **`scripts/check-product-names.ps1`** — blocking gate against internal product names leaking into CHANGELOG, docs, or comments.
+- **New `.md` files** are blocked by a pre-commit hook; a new doc in the diff needs explicit justification.
+- **`.gitattributes` must keep `*.sh text eol=lf`** — losing it breaks the filter on the first Windows checkout.
+- **Embedded-copy sync** — editing `clean.sh` / `smudge.sh` without re-embedding into `setup-xray.ps1` is MAJOR; `test-embedded-sync.ps1` is the proof.
 
 ## Severity Model
 
@@ -189,8 +246,9 @@ Every BLOCKER/MAJOR must name: (a) concrete failure mode with a repro path, (b) 
 | `bash -n scripts/mcp-filter/smudge.sh` | <OK / error> |
 | `shellcheck` | <N findings / clean / SKIPPED-not-installed> |
 | `perl -c` (extracted snippets) | <OK / error> |
-| `test-roundtrip.ps1` | <6/6 PASS / N FAIL> |
-| `test-e2e.ps1` | <27/27 PASS / N FAIL> |
+| `test-roundtrip.ps1` | <N/N PASS / N FAIL / SKIPPED-why> |
+| `test-e2e.ps1` | <N/N PASS / N FAIL / SKIPPED-why> |
+| other suites (see Regression Suites) | <one row per suite run: name → result; list skipped suites + why> |
 
 ## Verdict
 
@@ -236,7 +294,7 @@ Recommendation:     <what to change>
 - Search callers of every changed helper via `xray_grep` before claiming "safe to change"
 - Re-run the round-trip + e2e suites; record both numbers in the table
 - Challenge the requester's scope. Re-derive public entry points, runtime substrates, and user-visible post-conditions from docs and behavior, not from the prompt alone (see Threat Model F)
-- For installer / CLI changes, run at least one documented user-facing launch command against a throwaway repo as a final sanity check before SHIP
+- For installer / CLI changes, run at least one documented user-facing launch command as a final sanity check before SHIP — only against a throwaway repo under `$env:TEMP`, with `-SkipDownload`, per **Execution Safety**
 
 ### DON'T
 - Invent findings to look thorough — "None" is valid and PREFERRED to noise
@@ -245,5 +303,7 @@ Recommendation:     <what to change>
 - Approve any silent mutation of a tracked upstream file via PowerShell `ConvertTo-Json`
 - Approve any new sed/awk substitution that replaces the perl-with-binmode-raw filter pattern
 - Skip linters because "the diff is small" — discipline is binary
+- Run `setup-xray.ps1` (or any mutating git command) against this repo or any real working tree — temp repos only
+- Copy a pass count from this document into the verdict — report what the run printed
 - Accept the requester's threat model at face value. If the prompt says "this fixes scenario X," also verify behavior in scenarios Y/Z/W from the public surface area
 - Approve a test that only checks exit code when the feature promises a git-visible post-condition such as a clean `git status`
