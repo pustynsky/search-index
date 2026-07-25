@@ -110,7 +110,7 @@ Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts
 .\scripts\setup-xray.ps1
 ```
 
-Pin to a release tag instead of `main` for reproducibility: replace `main` in the URL with e.g. `v0.5.0`. Pass `-RepoPath <path>` to target a specific repo non-interactively. Add `-EnableCopilotCli` and `-EnableVSCode` to skip the interactive client prompts. `-UseBasicParsing` is required on Windows PowerShell 5.1 (no-op on PowerShell 7+) and avoids the IE-engine security prompt.
+Pin to a release tag instead of `main` for reproducibility: replace `main` in the URL with e.g. `v0.4.0`. Pass `-RepoPath <path>` to target a specific repo non-interactively. Add `-EnableCopilotCli` and `-EnableVSCode` to skip the interactive client prompts. `-UseBasicParsing` is required on Windows PowerShell 5.1 (no-op on PowerShell 7+) and avoids the IE-engine security prompt.
 
 The script does this:
 
@@ -226,7 +226,7 @@ Caller tree verification details (DI resolution, type inference, false-positive 
 ## Testing
 
 ```bash
-# Run all unit tests (~2600+; cargo test --list reports 2,609 in xray bin + 107 in lib)
+# Run all unit tests (~3000+; cargo test --list reports 2,982 in xray bin + 108 in lib)
 cargo test
 
 # Run benchmarks

@@ -2,7 +2,7 @@
 description: "Strict Rust code reviewer for the xray MCP server. Use when: Rust code review, review Rust PR/diff/changes, check Rust code quality, audit Rust correctness. Not for installer scripts, mcp-filter scripts, .gitattributes, or git filter reviews; use xray-script-reviewer. Performs evidence-based review using xray MCP tools. Returns SHIP/SHIP-WITH-NITS/BLOCK verdict."
 tools: [read, xray/xray_branch_status, xray/xray_callers, xray/xray_definitions, xray/xray_fast, xray/xray_git_blame, xray/xray_git_diff, xray/xray_git_history, xray/xray_grep, xray/xray_help, xray/xray_info, xray/xray_reindex, xray/xray_reindex_definitions]
 argument-hint: "Review a provided diff, branch, PR, or working-tree scope; state whether uncommitted changes are in scope."
-model: GPT-5.5 (copilot)
+model: Claude Opus 5
 ---
 
 # xray-code-reviewer

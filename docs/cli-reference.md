@@ -32,7 +32,7 @@ xray index -d C:\Projects --hidden --no-ignore
 
 ## `xray fast` — Search File Name Index
 
-Searches a pre-built file name index. Instant results. Supports comma-separated patterns for multi-file lookup (OR logic).
+Searches a pre-built file name index. Instant results. The pattern is a single substring, or a regex with `--regex`, matched against file names. The CLI does **not** split it on commas. Multi-pattern OR is available in the MCP `xray_fast` tool, which takes an array.
 
 ```bash
 # Search by file name (substring match)
@@ -41,14 +41,11 @@ xray fast "notepad" -d C:\Windows
 # With extension filter
 xray fast "notepad" -d C:\Windows -e exe --files-only
 
-# Comma-separated multi-term search (OR logic) — find multiple files at once
-xray fast "UserService,OrderProcessor,PaymentHandler" -d C:\Projects -e cs
-
 # Regex search
 xray fast "config\.\w+" -d C:\Projects --regex
 
-# Find large files (> 100MB)
-xray fast "" -d C:\ --min-size 104857600
+# Find large files (> 100MB) — the pattern is required, so match everything with a regex
+xray fast "." -d C:\ --regex --min-size 104857600
 
 # Find directories only
 xray fast "node_modules" -d C:\Projects --dirs-only
@@ -57,7 +54,7 @@ xray fast "node_modules" -d C:\Projects --dirs-only
 xray fast ".dll" -d C:\Windows -c
 ```
 
-If no index exists for the directory, it will be built automatically on first use.
+If no index exists for the directory, it will be built automatically on first use. An empty pattern is rejected with an error.
 
 **Options:**
 
@@ -68,7 +65,7 @@ If no index exists for the directory, it will be built automatically on first us
 | `-i, --ignore-case`  | Case-insensitive search                        |
 | `-c, --count`        | Show match count only                          |
 | `-e, --ext <EXT>`    | Filter by extension                            |
-| `--auto-reindex`     | Auto-rebuild if stale (default: true)          |
+| `--auto-reindex`     | Rebuild a stale index. Off by default; without it, xray uses the stale index and prints a warning          |
 | `--dirs-only`        | Show only directories                          |
 | `--files-only`       | Show only files                                |
 | `--min-size <BYTES>` | Minimum file size filter                       |
@@ -189,7 +186,7 @@ xray grep "HttpClient" -d C:\Projects -e cs
 | `-d, --dir <DIR>`   | Directory whose content index to search (default: `.`)                                                                                                                                                                     |
 | `-c, --count`       | Show match count only                                                                                                                                                                                                      |
 | `--show-lines`      | Display actual line content from files                                                                                                                                                                                     |
-| `--auto-reindex`    | Auto-rebuild if stale (default: true)                                                                                                                                                                                      |
+| `--auto-reindex`    | Rebuild a stale index. Off by default; without it, xray uses the stale index and prints a warning                                                                                                                                                                                      |
 | `--respect-git-exclude` | Respect `.git/info/exclude` during auto-rebuild (default: false)                                                                                                                                                        |
 | `-e, --ext <EXT>`   | Filter results by extension                                                                                                                                                                                                |
 | `--max-results <N>` | Limit number of results (0 = unlimited)                                                                                                                                                                                    |
@@ -332,6 +329,7 @@ Each definition includes: name, kind, file path, line range, full signature, mod
 | `-d, --dir <DIR>`   | Directory to scan recursively (default: `.`)    |
 | `-e, --ext <EXTS>`  | Extensions to parse (default: `cs`)             |
 | `-t, --threads <N>` | Parallel parsing threads, 0 = auto (default: 0) |
+| `--respect-git-exclude` | Respect `.git/info/exclude` (default: false; xray ignores it so locally-excluded files are still indexed) |
 
 ---
 

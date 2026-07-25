@@ -247,6 +247,8 @@ AVAILABLE TOOLS (exposed via MCP):
   xray_git_blame   -- Line-by-line git blame for a file or line range
   xray_branch_status-- Show current git branch status, behind/ahead counts, dirty files
   xray_help        -- Show tips and best practices for effective search tool usage
+  xray_edit        -- Edit files by line-range operations or text-match replacements
+                        (atomic, multi-file, dryRun preview, returns a unified diff)
   xray_reindex_definitions -- Re-index code definitions (AST parser). Requires --definitions
 
 HOW IT WORKS:
@@ -308,8 +310,7 @@ pub struct ServeArgs {
 
     /// Disable the periodic re-scan fail-safe that catches filesystem
     /// events the OS-level `notify` watcher dropped (best-effort on every
-    /// platform; see `docs/bug-reports/bug-2026-04-21-watcher-misses-new-files-both-indexes.md`).
-    /// Only relevant together with `--watch`.
+    /// platform). Only relevant together with `--watch`.
     #[arg(long)]
     pub no_periodic_rescan: bool,
 

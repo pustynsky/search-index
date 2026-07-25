@@ -46,7 +46,6 @@ graph TB
         DISK["%LOCALAPPDATA%/xray/"]
     end
 
-    FIND --> WALK
     INDEX --> WALK --> FI
     CIDX --> WALK --> TOK --> CI --> TRI
     DIDX --> WALK --> TSP --> DI
@@ -655,7 +654,7 @@ src/
 │                               tokenize(), clean_path() — shared by binary and benchmarks
 ├── lib_tests.rs              # Unit tests for tokenizer, clean_path, indexing
 ├── lib_property_tests.rs     # Property-based tests (proptest)
-├── main.rs                   # Entry point (~30 lines): mod declarations, re-exports, fn main()
+├── main.rs                   # Entry point (~45 lines): mod declarations, re-exports, fn main()
 ├── main_tests.rs             # Integration tests for CLI commands
 ├── index.rs                  # Index storage: save/load/build for FileIndex and ContentIndex
 │                               index_dir(), *_path_for(), build_index(), build_content_index()
@@ -673,8 +672,8 @@ src/
 │   └── git_tests.rs          # Git CLI integration tests
 │
 ├── cli/                      # CLI layer: argument parsing + command implementations
-│   ├── mod.rs                # Cli struct, Commands enum, cmd_find/fast/grep dispatch
-│   ├── args.rs               # All Args structs (FindArgs, IndexArgs, ContentIndexArgs, etc.)
+│   ├── mod.rs                # Cli struct, Commands enum, cmd_fast/cmd_grep/cmd_index dispatch
+│   ├── args.rs               # All Args structs (FastArgs, IndexArgs, ContentIndexArgs, etc.)
 │   ├── info.rs               # cmd_info, cmd_info_json, cmd_cleanup, cmd_def_audit
 │   ├── serve.rs              # cmd_serve — MCP server setup and launch
 │   ├── cli_tests.rs          # CLI command tests
@@ -689,16 +688,19 @@ src/
 │   ├── parser_typescript.rs  # TypeScript/TSX AST parsing (classes, functions, interfaces, etc.)
 │   ├── parser_rust.rs        # Rust AST parsing (structs, enums, traits, impl blocks, functions)
 │   ├── parser_sql.rs         # SQL DDL parsing (regex-based: stored procs, tables, views, etc.)
+│   ├── parser_xml.rs         # XML AST parsing behind the MCP on-demand path
+│   ├── csharp_semantics.rs   # C# symbol identity, overload and ambiguity resolution
 │   ├── storage.rs            # save/load/find definition index + def_index_path_for()
 │   ├── incremental.rs        # update_file_definitions, remove_file_definitions
 │   ├── definitions_tests.rs  # General definition tests
-│   ├── definitions_tests_csharp.rs   # C# parser tests
+│   ├── definitions_tests_csharp.rs     # C# parser tests
 │   ├── definitions_tests_typescript.rs # TypeScript parser tests
-│   ├── definitions_tests_rust.rs     # Rust parser tests
-│   ├── definitions_tests_sql.rs      # SQL parser tests
+│   ├── definitions_tests_rust.rs       # Rust parser tests
+│   ├── definitions_tests_sql.rs        # SQL parser tests
+│   ├── definitions_tests_xml.rs        # XML parser tests
 │   ├── audit_tests.rs        # Definition index audit/coverage tests
 │   ├── storage_tests.rs      # Storage serialization tests
-│   └── tree_sitter_utils_tests.rs    # Tree-sitter utility + CodeStats tests
+│   └── tree_sitter_utils_tests.rs      # Tree-sitter utility + CodeStats tests
 │
 └── mcp/                      # MCP server layer
     ├── mod.rs                # Module exports
@@ -708,6 +710,7 @@ src/
     ├── server_tests.rs       # Server lifecycle tests
     ├── watcher.rs            # File watcher, incremental index updates
     ├── watcher_tests.rs      # Watcher integration tests
+    ├── lock_order.rs         # RAII guards that enforce the documented lock hierarchy
     └── handlers/             # Tool implementations (one file per tool group)
         ├── mod.rs            # tool_definitions() + dispatch_tool() + reindex handlers
         ├── grep.rs           # handle_xray_grep + phrase/substring helpers
@@ -720,6 +723,8 @@ src/
         ├── arg_validation.rs # Shared MCP-tool argument validation helpers
         ├── advisory_hints.rs # Hint generation for empty/ambiguous tool responses
         ├── grep_literal_extract.rs # Literal-fragment extraction from regex for prefilter
+        ├── token_regex.rs    # Token-regex expansion planner (global vs scoped strategy)
+        ├── file_scope.rs     # Shared dir/file/ext scope resolution for grep and definitions
         ├── utils.rs          # validate_search_dir, sorted_intersect, metrics helpers,
         │                       response size truncation, body injection utilities
         ├── handlers_test_utils.rs    # Shared test infrastructure (mock contexts, helpers)
@@ -731,14 +736,18 @@ src/
         ├── handlers_tests_fast.rs    # File search handler tests
         ├── handlers_tests_grep.rs    # Grep handler tests
         ├── handlers_tests_git.rs     # Git handler tests
+        ├── handlers_tests_line_regex.rs # lineRegex scan tests
+        ├── handlers_tests_workspace.rs  # Workspace binding and roots tests
         ├── handlers_tests_misc.rs    # Miscellaneous handler tests
-        ├── grep_tests.rs            # Grep-specific unit tests
+        ├── grep_tests.rs             # Grep-specific unit tests
         ├── grep_tests_additional.rs  # Additional grep tests
-        ├── callers_tests.rs         # Callers-specific unit tests
+        ├── grep_literal_extract_tests.rs # Literal-extraction unit tests
+        ├── callers_tests.rs          # Callers-specific unit tests
         ├── callers_tests_additional.rs # Additional callers tests
-        ├── definitions_tests.rs     # Definitions handler unit tests
-        ├── git_handler_tests.rs     # Git handler unit tests
-        └── utils_tests.rs          # Utils/truncation unit tests
+        ├── definitions_tests.rs      # Definitions handler unit tests
+        ├── edit_tests.rs             # Edit handler unit tests
+        ├── git_handler_tests.rs      # Git handler unit tests
+        └── utils_tests.rs            # Utils/truncation unit tests
 ```
 
 **Dependency direction.** `cli/*` → `index.rs` → `lib.rs` (types). `mcp/*` → `index.rs` + `definitions/*`. No circular dependencies. The MCP layer depends on core index types, but core has no knowledge of MCP. `main.rs` delegates to `cli::run()`.
@@ -769,23 +778,30 @@ The engine has two layers with **different language coverage**:
 
 ## Shutdown semantics and Ctrl+C handling
 
-**MINOR-15 documentation.**
+The MCP server is a stdio-based daemon. It reads newline-framed JSON-RPC requests from `stdin` in a blocking `BufReader::read_line()` loop on the main thread. However the loop ends, the exit path is the same: `save_indexes_on_shutdown()` flushes both `ContentIndex` and `DefinitionIndex` to disk so incremental watcher updates survive the next launch.
 
-The MCP server is a stdio-based daemon. It reads newline-framed JSON-RPC requests from `stdin` in a blocking `BufReader::read_line()` loop on the main thread. Graceful shutdown is triggered by **EOF on stdin**, that is, the MCP client closing its write end of the pipe. On shutdown, the server flushes both `ContentIndex` and `DefinitionIndex` to disk so that incremental watcher updates survive the next launch.
+The loop ends in one of three ways. Each is recorded as a `shutdown` protocol event with its reason:
 
-### Known limitation: `Ctrl+C` inside a terminal session
+| Reason | Trigger |
+| --- | --- |
+| `stdin` | EOF on stdin — the MCP client closed its write end of the pipe |
+| `signal` | Ctrl+C / SIGINT / SIGTERM observed through the signal handler |
+| `error` | Unrecoverable read error on stdin |
 
-If `xray serve` is launched manually in a terminal (not as a child process of an MCP client) and the operator presses `Ctrl+C`, the terminating `SIGINT` / Windows console control event reaches the process **while the main thread is parked inside the blocking `read_line()` syscall**. Rust's default `Ctrl+C` handler simply aborts the process. The shutdown path that writes the in-memory incremental index updates to disk is skipped. Concretely:
+### Signal handling
 
-- Any file events that have been tokenized and applied since the last full index rebuild but have NOT yet been persisted via the debounced watcher save are lost. On next start the indexes are reloaded from the on-disk snapshot, so the loss is equivalent to ~1 debounce window (default 500 ms) of file changes.
-- Search correctness is not affected. The watcher will re-apply those events on the next startup because the FS `mtime`s are still newer than the index `mtime`.
+`run_server_with_io` installs a `ctrlc::set_handler` callback at startup (skipped in tests via the `install_signal_handler` flag). The handler does not terminate the process. It sets an `AtomicBool`, prints `Received shutdown signal, saving indexes...` to stderr, and returns. The event loop checks that flag after every `read_line()` return and breaks with reason `signal`, which reaches the same save-and-exit path as EOF.
+
+The handler is deliberately side-effect-free: saving indexes touches `RwLock`-protected state, which must not be entered from a signal context.
+
+### Known limitation: the flag is only observed between reads
+
+The main thread notices the flag when `read_line()` returns. If the process is parked inside a blocking read with no further client traffic, the signal is latched but the loop stays there until the next line or EOF arrives. In the supported deployment mode (MCP client → child process over pipes) the client closes the pipe on exit, so the loop exits right away. For a manually launched `xray serve` in an idle terminal, press Ctrl+C and then close stdin (`Ctrl+D` on Unix, `Ctrl+Z<Enter>` on Windows cmd) to unblock the read.
+
+A fully preemptive shutdown would mean replacing the blocking read with `poll()` on Unix and `WaitForMultipleObjects` on Windows. That platform-specific complexity is not worth it for an operator-only edge case.
 
 ### Recommended operator workflow
 
-- **Preferred:** close `stdin` (`Ctrl+D` on Unix, `Ctrl+Z<Enter>` on Windows cmd) to trigger the full graceful shutdown path.
 - **From an MCP client:** closing the client (VS Code, Claude Desktop, etc.) closes the pipe automatically. No operator action needed.
-- **Inside a CI script:** send `SIGTERM` only after closing the child process's stdin pipe. On Windows, send `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)` only as a last resort.
-
-### Why we don't install a custom `Ctrl+C` handler
-
-A custom handler would need to inject a "shutdown" message into the blocking `read_line()` loop. On Unix that requires switching to `poll()`-based stdin reads. On Windows the equivalent is `WaitForMultipleObjects` on the stdin handle plus a signal event. Both approaches add platform-specific complexity and a non-trivial test surface for a behavior (operator-initiated `Ctrl+C` on a manually launched serve) that is explicitly out of the supported deployment mode (MCP client → child process over pipes). The stdin-close workaround above covers 100% of production usage.
+- **Manual terminal session:** Ctrl+C, or close `stdin` directly (`Ctrl+D` on Unix, `Ctrl+Z<Enter>` on Windows cmd).
+- **Inside a CI script:** close the child process's stdin pipe, or send `SIGTERM`. On Windows, `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)` is a last resort.

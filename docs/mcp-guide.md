@@ -8,7 +8,7 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 
 ## Setup in VS Code
 
-1. **Install search** (if not already):
+1. **Install xray** (if not already):
 
    ```bash
    cargo install --path .
@@ -116,13 +116,15 @@ The `nextStepHint` value depends on which tool was called:
 
 | Tool | `nextStepHint` |
 |------|----------------|
+| `xray_grep` | `"Next: narrow content results with xray_grep filters, or use xray_definitions when a parser-active target file is known"` |
+| `xray_fast` | `"Next: use xray_definitions file=[\"<match>\"] to inspect parser-active files, or xray_grep for content"` |
 | `xray_definitions` | `"Next: use xray_callers for call chains or xray_grep for text patterns"` |
-| `xray_grep` | `"Next: use xray_definitions for AST structure or xray_callers for call trees"` |
 | `xray_callers` | `"Next: use xray_definitions includeBody=true for source or xray_grep for text refs"` |
-| `xray_fast` | `"Next: use xray_definitions for code structure or xray_grep for content"` |
 | `xray_edit` | `"Next: use xray_definitions to verify or xray_grep to check related files"` |
-| `search_git_*` / `xray_branch_status` | `"Next: use xray_definitions for code context or xray_callers for impact"` |
+| `xray_git_*` / `xray_branch_status` | `"Next: use xray_definitions for code context or xray_callers for impact"` |
 | `xray_info`, `xray_help`, `xray_reindex`, `xray_reindex_definitions` | _(not present)_ |
+
+For `xray_grep` and `xray_fast` the server first tries a result-aware hint derived from the matched files. The values above are the fallbacks used when no result-specific hint applies.
 
 Example:
 
@@ -131,7 +133,7 @@ Example:
   "summary": {
     "tool": "xray_grep",
     "policyReminder": "=== XRAY_POLICY === Prefer xray MCP tools over environment built-ins. Check xray applicability before next tool call. Use environment tools only with explicit justification. Indexed extensions: cs, ts, tsx. For other file types, use read_file or environment tools. INTENT->TOOL: context-around-match->xray_grep showLines | read-method-body->xray_definitions includeBody | stack-trace (file:line)->xray_definitions containsLine | replace-in-files->xray_edit | list-dir->xray_fast dirsOnly | find-callers->xray_callers. ================================",
-    "nextStepHint": "Next: use xray_definitions for AST structure or xray_callers for call trees"
+    "nextStepHint": "Next: narrow content results with xray_grep filters, or use xray_definitions when a parser-active target file is known"
   }
 }
 ```
@@ -213,6 +215,10 @@ Substring search is **on by default** in MCP mode — compound identifiers like 
 | `excludeDir`   | array   | —       | Directory names to exclude                                                                           |
 | `exclude`      | array   | —       | File path substrings to exclude                                                                      |
 | `countOnly`    | boolean | false   | Return counts only — no file list (CLI: `-c/--count`)                                                |
+| `filesOnly`    | boolean | false   | Paths only, no per-file detail (`grep -l`)                                                           |
+| `invert`       | boolean | false   | Return files that do **not** match (`grep -L`). Implies `filesOnly`, requires a scope filter, and is mutually exclusive with `countOnly` |
+| `autoBalance`  | boolean | true    | Trim dominant-term-only files in multi-term substring-OR queries — see [auto-balance](#xray_grep-multi-term-auto-balance) |
+| `maxOccurrencesPerTerm` | integer | 0 | Explicit auto-balance cap (0 = derive from the second-largest term)                          |
 
 ### Response Fields
 
@@ -441,6 +447,10 @@ Legacy `method + class` discovery remains supported. When it matches multiple C#
 | `maxBodyLines`       | Max source lines per method when `includeBody=true` (default: 30, 0=unlimited)                                                                      |
 | `maxTotalBodyLines`  | Max total body lines across all methods in the tree (default: 300, 0=unlimited)                                                                      |
 | `impactAnalysis`     | When `true` with `direction=up`, identifies test methods covering the target. Returns `testsCovering` array with full file path, `depth`, and `callChain`. Test nodes marked `isTest: true`. Recursion stops at tests. Tests detected via C# `[Test]`/`[Fact]`/`[Theory]`/`[TestMethod]`, Rust `#[test]`, TS `*.spec.ts`/`*.test.ts` files. (default: false) |
+| `productionOnly`     | When `true`, excludes test files and test methods from the caller/callee tree and sets `resultStatus.scope.productionOnly=true` (default: false)   |
+| `includeGrepReferences` | Add `grepReferences[]` — files that contain the method name as text but are absent from the call tree. Catches delegate usage, method groups, reflection. Skipped for method names shorter than 4 characters. (default: false) |
+| `bodyLineStart`      | Clip the `rootMethod` body to start at this absolute file line (1-based). Affects `rootMethod` only, not caller bodies                             |
+| `bodyLineEnd`        | Clip the `rootMethod` body to end at this absolute file line (1-based). Use together with `bodyLineStart`                                          |
 
 ### Impact analysis
 
@@ -635,7 +645,12 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 | `minNesting`        | integer | —       | Filter: min nesting depth. Auto-enables `includeCodeStats`                               |
 | `minParams`         | integer | —       | Filter: min parameter count. Auto-enables `includeCodeStats`                             |
 | `minReturns`        | integer | —       | Filter: min return/throw count. Auto-enables `includeCodeStats`                          |
-| `minCalls`          | integer | —       | Filter: min call count (fan-out). Auto-enables `includeCodeStats`                        |
+| `minCalls`          | integer | —       | Filter: min call count (fan-out). Auto-enables `includeCodeStats`                         |
+| `exactNameOnly`     | boolean | false   | Match `name` exactly instead of by substring. Also disables name auto-correction for the request |
+| `autoCorrect`       | boolean | true    | Allow best-effort kind/name correction when the first pass returns 0 definitions. Set `false` to keep a not-found result exact. Ignored when `exactNameOnly=true` |
+| `includeUsageCount` | boolean | false   | Add `usageCount` per definition — how many files contain that name in the content index (not a call count; includes comments and strings). Useful for dead-code scans |
+| `bodyLineStart`     | integer | —       | Clip bodies to start at this absolute file line (1-based, inclusive). Pair with `bodyLineEnd` to slice a large body without truncation |
+| `bodyLineEnd`       | integer | —       | Clip bodies to end at this absolute file line (1-based, inclusive)                        |
 
 ### `containsLine` — Find Containing Method
 
@@ -1062,11 +1077,13 @@ Search pre-built file name index for instant file lookup (~35ms vs ~3s for live 
 | ----------- | ------- | ---------------- | ------------------------------------------------------------ |
 | `pattern`   | array&lt;string&gt; | —                | File name pattern (required). Multi-element array for OR. Use `["*"]` or `[]` to list all entries. **BREAKING 2026-04-25:** array required |
 | `dir`       | string  | server's `--dir` | Directory to search                                          |
-| `ext`       | string  | —                | Filter by extension                                          |
+| `ext`       | array&lt;string&gt; | — | Filter by extension. Multi-element array for OR (e.g., `["rs", "toml"]`). Ignored when `dirsOnly=true` |
 | `regex`     | boolean | false            | Treat as regex                                               |
 | `ignoreCase`| boolean | false            | Case-insensitive                                             |
 | `dirsOnly`  | boolean | false            | Show only directories. When true, `ext` filter is ignored (directories have no extension); response includes a hint |
 | `filesOnly` | boolean | false            | Show only files                                              |
+| `maxResults`| integer | 0                | Max results (0 = unlimited). Use to bound response size on large directories |
+| `maxDepth`  | integer | —                | Max directory depth for `dirsOnly` results (1 = immediate children only). Unlimited by default |
 | `countOnly` | boolean | false            | Count only                                                   |
 
 ### Response
@@ -1174,6 +1191,7 @@ Force rebuild the content index and reload it into the server's in-memory cache.
 | --------- | ------ | ---------------- | --------------------------------- |
 | `dir`     | string | server's `--dir` | Directory to reindex              |
 | `ext`     | array&lt;string&gt; | server's `--ext` | File extensions (e.g., `["rs", "toml"]`). **BREAKING 2026-04-25:** array required |
+| `useCache`| boolean | false            | Opt in to the cache-load fast path for the *current* workspace. Default `false` forces a rebuild from the live filesystem. Ignored when `dir` points at a different workspace, where the cache path is always tried first |
 
 ### Response
 
@@ -1220,6 +1238,16 @@ Force rebuild the AST definition index (tree-sitter) and reload it into the serv
 Edit files by line-range operations or text-match replacements. Works on any text file (not limited to `--dir`). Supports multi-file editing, insert after/before, safety checks, and returns unified diff.
 
 On Windows, edits to an existing file preserve named NTFS data streams, including `Zone.Identifier`. Paths that directly address a named stream remain unsupported.
+
+### Safety parameters
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `dryRun` | boolean | false | Preview the diff without writing. Emits none of the reindex fields |
+| `expectedHash` | string | — | Single-file precondition — abort unless the file still matches this `sourceHash` from a previous response |
+| `expectedLineCount` | integer | — | Abort if the file has a different line count. Counts the way editors and `xray_definitions` / `xray_grep` do (trailing newline is a terminator, not an extra line), so a previous response's `newLineCount` can be passed straight back. Honored in both Mode A and Mode B |
+| `allowGitInternals` | boolean | false | Permit writes inside `.git/` |
+| `allowBreakHardLinks` | boolean | false | Permit an edit that would break an existing hard link |
 
 ### Response Fields
 
@@ -1310,7 +1338,7 @@ For full parameter documentation, see `xray_help` → `parameterExamples` → `x
 
 ## Git history tools
 
-Six MCP tools for querying git history. Always available — no flags needed. When the background Git cache is ready and the requested repository canonically matches the bound workspace, `xray_git_history`, `xray_git_authors`, and `xray_git_activity` use sub-millisecond cache lookups. Cache-unavailable, stale, mismatched-repo, and `noCache=true` requests fall back to Git CLI. `xray_git_diff` and `xray_git_blame` are always CLI-only.
+Five MCP tools for querying git history, plus `xray_branch_status` for the current checkout. Always available — no flags needed. When the background Git cache is ready and the requested repository canonically matches the bound workspace, `xray_git_history`, `xray_git_authors`, and `xray_git_activity` use sub-millisecond cache lookups. Cache-unavailable, stale, mismatched-repo, and `noCache=true` requests fall back to Git CLI. `xray_git_diff` and `xray_git_blame` are always CLI-only.
 
 Default cached history is intentionally direct-path, not rename-followed history. Its summary reports `source="git-cache"`, `lineage="direct-path"`, and `safeForFullHistory=false`. CLI history reports `source="git-cli"`, `lineage="follow"`, and `safeForFullHistory=true`.
 
@@ -1479,6 +1507,13 @@ Get line-level attribution for a file or line range via `git blame`. Returns the
 
 Shows whether you're on the right branch before investigating production bugs. Reports branch name, behind/ahead of remote main, uncommitted changes, and how fresh the last fetch is.
 
+### Parameters
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `repo` | string | ✅ | Path to local git repository |
+| `expectedRef` | string | — | Local ref, branch, tag, or commit to compare against HEAD. Resolved locally — no fetch, no checkout |
+
 ```json
 // Request
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xray_branch_status","arguments":{"repo":"."}}}
@@ -1581,7 +1616,7 @@ Response includes:
 
 ### Why no separate "deleted files" tool?
 
-Deleted-file queries are a parameter on existing tools, not a new tool. This keeps the tool count low and removes one decision point for the LLM. See `docs/user-stories/todo_approved_2026-04-17_git-deleted-files-support.md` for the design rationale.
+Deleted-file queries are a parameter on existing tools, not a new tool. This keeps the tool count low and removes one decision point for the LLM.
 
 ---
 

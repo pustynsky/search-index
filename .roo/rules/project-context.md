@@ -9,7 +9,7 @@ After every code change, before completing the task, verify ALL of the following
 1. **Unit tests** — the change has test(s) covering the new/modified behavior
 2. **All unit tests pass** — run `cargo test --bin xray` and confirm 0 failures
 3. **Ask user to stop MCP server** — before reinstalling the binary, ask the user to stop the MCP server (restart VS Code or stop the xray server)
-4. **Reinstall binary** — `cargo install --path . --force`
+4. **Reinstall binary** — `.\scripts\install-local.ps1` (release build → staged verify → deploy to `%LOCALAPPDATA%\xray\xray.exe`). Never use `cargo install --path . --force`: it writes to `~/.cargo/bin`, which diverges from the documented install path
 5. **Run E2E tests** — after the binary is installed, run `.\e2e-test.ps1` and confirm 0 failures
 6. **Self-review for hidden bugs** — BEFORE documenting, critically review ALL changes in this branch:
    - Re-read every modified function. Ask: "Are there code paths where this change is NOT applied consistently?" (e.g., adding a field to one summary builder but missing 5 others)
@@ -55,7 +55,7 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
    - Check current branch with `git rev-parse --abbrev-ref HEAD`
    - If on `main`: run `git pull` then `git checkout -b <branch-name>`
    - If NOT on `main`: run `git stash`, `git checkout main`, `git pull`, `git checkout -b <branch-name>`, `git stash pop`
-   - Branch name format: `users/<user-alias>/<feature-name>`
+   - Branch name format: `feat/<topic>` for features, `fix/<topic>` for bug fixes, `perf/<topic>` for performance, `docs/<topic>` for doc-only changes
 3. **Product name check** — run `powershell -File scripts/check-product-names.ps1` and confirm the output says "No product-specific names found". If any product-specific names are reported, stop and make them neutral before proceeding.
 4. **Stage tracked changes only** — `git add -u` (never auto-add untracked files)
 5. **Prepare commit message** — write a concise commit title
@@ -87,9 +87,10 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
 
 ## User Story Convention
 
-- **Approved user stories** are saved as `docs/todo_approved_{YYYY-MM-DD}_{feature-name}.md`
+- **Approved user stories** are saved as `docs/user-stories/todo_approved_{YYYY-MM-DD}_{feature-name}.md`
+- `docs/user-stories/` is gitignored — stories are local working notes and are NEVER staged or committed
 - Format: `todo_approved_{date}_{kebab-case-feature-name}.md`
-- Example: `docs/todo_approved_2026-02-28_override-caller-tracking.md`
+- Example: `docs/user-stories/todo_approved_2026-02-28_override-caller-tracking.md`
 - Language: Russian (unless explicitly requested otherwise)
 - Must include: problem description, solution approach, implementation plan with code sketches, acceptance criteria
 
@@ -129,8 +130,7 @@ Output: JSON + Markdown reports with episodes, tool scorecard, recommendations, 
 
 ### Related artifacts
 
-- User story for the analyzer: `docs/user-stories/todo_approved_2026-03-12_mcp-transcript-analyzer.md`
-- Example improvement story derived from analysis: `docs/user-stories/todo_approved_2026-03-12_search-definitions-ux-improvements.md`
+- Analyzer design notes and the improvement stories derived from them live under the gitignored `docs/user-stories/` folder.
 
 ## Lessons Learned
 
@@ -139,7 +139,7 @@ Output: JSON + Markdown reports with episodes, tool scorecard, recommendations, 
 - **Follow the post-change checklist strictly** — do not skip steps or reorder them. The checklist exists to prevent regressions and ensure quality. When in doubt, re-read the checklist.
 - **Documentation is a contract** — if docs describe a flag/feature, the code MUST support it. If a doc says `--substring` exists as a CLI flag but the code doesn't have it, that's a bug — either fix the code or fix the docs. Never leave docs and code out of sync.
 - **ALWAYS use PS script files for PowerShell** — NEVER run PowerShell commands inline via `powershell -Command "..."` or `pwsh -Command "..."`. ALWAYS write a `.ps1` file first, execute with `pwsh -File script.ps1`, then delete. This applies to ALL PowerShell commands without exception — even simple one-liners. Inline PowerShell breaks on: colons, backticks, nested quotes, dollar signs, array indexing (`$arr[0]`), regex, redirections (`2>`), and many other characters. Script files avoid ALL escaping issues. The only exception: `pwsh -Command "Get-Content file"` with no special chars — but even then, prefer a script file to be safe.
-- **Stop MCP server before reinstall** — before running `cargo install --path . --force`, propose running `taskkill /IM xray.exe /F` to stop any running xray.exe processes. If the user agrees, run it yourself. Don't ask the user to restart VS Code — just kill the process directly.
+- **Stop MCP server before reinstall** — before running `.\scripts\install-local.ps1`, propose running `taskkill /IM xray.exe /F` to stop any running xray.exe processes. If the user agrees, run it yourself. Don't ask the user to restart VS Code — just kill the process directly.
 - **Always run product name check before staging** — run `scripts/check-product-names.ps1` before `git add -u`. If product-specific names are found in documentation or code, replace them with neutral equivalents before committing. This prevents accidental exposure of internal/proprietary names in the public repository.
 - **Feature discoverability across interfaces** — every new feature must be exposed in BOTH CLI help and MCP tool descriptions. If a feature exists in code but isn't in `--help` or tool descriptions, users/LLMs can't discover it. Review `src/cli/args.rs` (CLI), `src/tips.rs` (MCP descriptions), and `xray_help` output after every feature addition.
 - **New response fields must be documented in tool descriptions** — when a feature adds new fields to the response (e.g., `rootMethod`, `bodyOmitted`), the tool schema description and `xray_help` parameter examples must explicitly mention them. LLMs read tool descriptions to decide how to use the tool — if a response field isn't mentioned, the LLM will make a separate call to get that data. Example: `includeBody=true` adds a `rootMethod` object to the response — without documenting this, the LLM would still call `xray_definitions` separately to get the root method body.
@@ -148,4 +148,4 @@ Output: JSON + Markdown reports with episodes, tool scorecard, recommendations, 
 - **Documentation checklist step 9 is not optional** — every new parameter/feature MUST be documented in ALL relevant places BEFORE proposing commit. The full list: (1) `src/mcp/handlers/mod.rs` tool schema, (2) `src/tips.rs` parameter examples, (3) `docs/mcp-guide.md` parameter tables + response fields, (4) `docs/cli-reference.md` if CLI-facing, (5) appropriate `docs/e2e/*.md` test scenario, (6) `CHANGELOG.md`. Real example (2026-03-01): `includeDocComments` was added to code, tests, tips.rs, and mod.rs schema — but `docs/mcp-guide.md` parameter tables were missed until the user caught it. The checklist item 9 already covers this, but it was skipped in the rush to propose commit. Never skip documentation steps.
 - **Bump index format_version when adding fields** — `ContentIndex` and `DefinitionIndex` have `format_version` fields with constants `CONTENT_INDEX_VERSION` (in `src/lib.rs`) and `DEFINITION_INDEX_VERSION` (in `src/definitions/types.rs`). When adding, removing, or reordering fields in either struct, increment the corresponding constant. This ensures old indexes on disk are rejected and rebuilt automatically on next startup. Without bumping, old indexes load with `#[serde(default)]` zeros for new fields — causing silent data corruption. The `format_version` field MUST stay after `root` in the struct (never first) because `read_root_from_index_file()` reads `root` as the first bincode field.
 - **Keep policyReminder in every MCP response** — `summary.policyReminder` repeats XRAY_POLICY in every successful JSON response. This is NOT redundant despite being in the system prompt — LLMs are prone to forgetting instructions as context grows. The ~200 chars per response cost (~650 tokens per 13-call session) is justified as reinforcement against tool selection drift. Never remove policyReminder to "save tokens".
-- **Wait for MCP server reconnection after reinstall** — after stopping (`taskkill`) and reinstalling the binary (`cargo install`), the MCP server is disconnected. E2E tests (`e2e-test.ps1`) run through CLI and do NOT require the MCP server — run them immediately after install. AFTER E2E tests pass, STOP and ask the user to reconnect the MCP server (restart VS Code or restart the MCP server). Only proceed with MCP tool verification after the user confirms the server is back.
+- **Wait for MCP server reconnection after reinstall** — after stopping (`taskkill`) and reinstalling the binary (`.\scripts\install-local.ps1`), the MCP server is disconnected. E2E tests (`e2e-test.ps1`) run through CLI and do NOT require the MCP server — run them immediately after install. AFTER E2E tests pass, STOP and ask the user to reconnect the MCP server (restart VS Code or restart the MCP server). Only proceed with MCP tool verification after the user confirms the server is back.

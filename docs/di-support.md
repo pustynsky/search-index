@@ -33,7 +33,7 @@ is one of these four mechanisms, all driven by the existing AST and
 content indexes:
 
 1. **Direct `base_types` match at the call site** — implemented in
-   [`resolve_call_site_via_base_types`](../src/mcp/handlers/callers.rs).
+   [`resolve_call_site` / `resolve_call_site_with_policy`](../src/mcp/handlers/callers.rs).
    For each candidate definition the tool checks two things:
    - the candidate's `parent` class name equals the receiver type (with
      a generic-arity guard so `new List<T>()` does not collide with a
@@ -52,8 +52,8 @@ content indexes:
      literally implements).
    Disabling it (`resolveInterfaces=false`) returns only the direct
    matches from mechanism 1.
-3. **Fuzzy DI candidate-file expansion** — implemented near
-   [`callers.rs:1622`](../src/mcp/handlers/callers.rs#L1622) via
+3. **Fuzzy DI candidate-file expansion** — implemented in
+   [`callers.rs`](../src/mcp/handlers/callers.rs) via
    `find_implementations_of_interface` plus
    `collect_substring_file_ids`. When a `class` filter is supplied, the
    pre-filter that decides which files to scan is widened with:
@@ -64,8 +64,8 @@ content indexes:
      `IClassName` — this is what catches DI-injected fields named
      `_userService`, `m_userService`, `userServiceField`, etc.
 4. **Local-variable type inference inside one method** — implemented in
-   [`extract_csharp_var_declaration_types`](../src/definitions/parser_csharp.rs#L1144)
-   and [`collect_csharp_local_var_types`](../src/definitions/parser_csharp.rs#L1095).
+   [`extract_csharp_var_declaration_types`](../src/definitions/parser_csharp.rs)
+   and [`collect_csharp_local_var_types`](../src/definitions/parser_csharp.rs).
    Lets the receiver of a chained call (`x.DoStuff()`) be resolved when
    `x` is a local that the analyser can type. See the next section for
    the exact list of patterns covered. (TypeScript has the analogous
@@ -139,7 +139,7 @@ local) is not resolved either, for the same reason.
 | Keyed services / `[FromKeyedServices("a")] IBar b` | ✅ for the call itself | Parameter is still `IBar` so the call site is picked up. The key string itself is invisible. |
 | `IServiceProvider.GetRequiredService<IFoo>()` stored in a field | ✅ if assigned to a field | `_foo = sp.GetRequiredService<IFoo>(); ... _foo.X()` works because `_foo` is typed |
 | Castle DynamicProxy / Autofac interceptors | ✅ when the proxy implements the same interface | The proxy still appears as an implementation of `IFoo` in `base_types` |
-| Source-generated DI containers (StrongInject, Pure.DI, Jab) | ✅ if generated `.cs` files are on disk and not excluded | Generated files participate in the index like any other source. If `.gitignore` excludes `obj/Generated/`, they will be invisible — pass `--no-respect-gitignore` or whitelist the folder if you need them indexed |
+| Source-generated DI containers (StrongInject, Pure.DI, Jab) | ✅ if generated `.cs` files are on disk and not excluded | Generated files participate in the index like any other source. If `.gitignore` excludes `obj/Generated/`, they will be invisible — pass `--no-ignore` or whitelist the folder if you need them indexed |
 
 ### What does **not** work (or works only by accident through textual file pre-filter)
 
@@ -274,6 +274,6 @@ roadmap items.
 - [tradeoffs.md — §10 Interface Resolution Depth](tradeoffs.md#10-interface-resolution-depth-in-caller-trees)
   — why `resolveInterfaces` only expands at depth 0 and what the
   combinatorial trade-off looks like.
-- [mcp-guide.md — `xray_callers`](mcp-guide.md#xray_callers--call-tree-analysis)
+- [mcp-guide.md — `xray_callers`](mcp-guide.md#xray_callers--call-tree)
   — protocol-level reference for `class`, `resolveInterfaces`, and the
   Limitations section.

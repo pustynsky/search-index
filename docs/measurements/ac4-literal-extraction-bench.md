@@ -1,8 +1,7 @@
 # AC-4 — `xray_grep` `lineRegex` literal-trigram prefilter, end-to-end measurement
 
 This document records cold/warm `searchTimeMs` for the three canonical
-calls cited in
-[`user-story_xray-grep-lineRegex-perf-hints_2026-04-26.md`](../../user-story_xray-grep-lineRegex-perf-hints_2026-04-26.md),
+calls cited in the `xray_grep` lineRegex perf-hints story (AC-4),
 measured on the Shared (60k C# file) repository against:
 
 - **Baseline binary** — `main` HEAD just before the AC-4 merge commit.
@@ -92,7 +91,7 @@ threshold needs to be re-tuned.
 
 ## Provenance
 
-- Story: [`user-story_xray-grep-lineRegex-perf-hints_2026-04-26.md`](../../user-story_xray-grep-lineRegex-perf-hints_2026-04-26.md), §AC-4
+- Story: `user-story_xray-grep-lineRegex-perf-hints_2026-04-26.md`, §AC-4 (local working note, not tracked in git)
 - CHANGELOG entry: [2026-04-26 — Performance](../../CHANGELOG.md)
 - Implementation: [`src/mcp/handlers/grep_literal_extract.rs`](../../src/mcp/handlers/grep_literal_extract.rs), [`src/mcp/handlers/grep.rs`](../../src/mcp/handlers/grep.rs)
 - Differential test (parity, not perf): `test_xray_grep_line_regex_prefilter_differential_parity` in [`src/mcp/handlers/handlers_tests_grep.rs`](../../src/mcp/handlers/handlers_tests_grep.rs)

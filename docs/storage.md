@@ -293,12 +293,12 @@ fn is_stale(&self) -> bool {
 
 | Behavior                            | `xray fast` / `xray grep`                                | `xray serve`                   |
 | ----------------------------------- | ------------------------------------------------------------ | -------------------------------- |
-| Index stale, `--auto-reindex true`  | Rebuild automatically                                        | N/A (index stays in RAM)         |
-| Index stale, `--auto-reindex false` | Print warning, use stale                                     | N/A                              |
+| Index stale, `--auto-reindex` passed  | Rebuild automatically                                        | N/A (index stays in RAM)         |
+| Index stale, `--auto-reindex` omitted | Print warning, use stale                                     | N/A                              |
 | Index missing                       | Build automatically (`xray fast`) or error (`xray grep`) | Build in background (async startup) |
 | With `--watch`                      | N/A                                                          | Incremental updates, never stale |
 
-Default max age: 24 hours (`--max-age-hours 24`).
+Default max age: 24 hours (`--max-age-hours 24`). `--auto-reindex` is an opt-in flag that takes no value. Omit it and xray uses the stale index, with a warning.
 
 ## Index discovery
 
