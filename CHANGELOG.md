@@ -1,6 +1,13 @@
 # Changelog
 
 
+## Unreleased
+
+- **Documentation audit against the 0.4.0 code base.** Every git-tracked doc was re-validated against the live CLI help, the MCP `tools/list` schemas, and the AST index. `architecture.md` no longer claims that no `Ctrl+C` handler is installed (`ctrlc::set_handler` has been in `run_server_with_io` for a while, and the `signal` shutdown path saves both indexes), and its module tree now matches all 79 `src/**/*.rs` files, without the stale `cmd_find` / `FindArgs` names or the orphan Mermaid node. `cli-reference.md` and `storage.md` no longer describe `--auto-reindex` as defaulting to true or taking a value, and the `xray fast` section drops an empty-pattern example and a comma-separated multi-pattern claim that the CLI never supported. `mcp-guide.md` corrects the `nextStepHint` dictionary and the `xray_fast ext` type, and documents 15 previously missing parameters across `xray_grep`, `xray_callers`, `xray_definitions`, `xray_fast`, `xray_reindex`, `xray_edit`, and `xray_branch_status`. `di-support.md` replaces a non-existent function name, three stale line anchors, a broken heading anchor, and the invented `--no-respect-gitignore` flag. `installation.md` stops advertising the disabled Roo config path. `benchmarks.md` no longer states that the CLI defaults to exact token matching. Release-tag pin examples and the reported unit-test counts were refreshed.
+
+- **`xray serve --help` now lists `xray_edit`.** The tool was missing from the `AVAILABLE TOOLS` section. `xray def-index --help` reports the measured ~103 MB LZ4 index size instead of an uncompressed figure, and the `--no-periodic-rescan` help text no longer references a bug-report path that does not exist in the repository.
+
+
 ## 0.4.0 (2026-07-25)
 
 - **Updated `crossbeam-epoch` to 0.9.20.** This resolves `RUSTSEC-2026-0204` before release.

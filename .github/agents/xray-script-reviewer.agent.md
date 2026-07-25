@@ -2,7 +2,7 @@
 description: "Strict reviewer for the xray installer scripts and the .mcp.json git filter driver (PowerShell + bash + embedded perl). Use when: review changes to scripts/setup-xray.ps1, scripts/mcp-filter/*, .gitattributes that touches *.sh, or any other PS/bash/perl that mutates the user's git repo. Performs evidence-based review with mandatory linter runs, explicit threat models, and byte-exact round-trip verification. Returns SHIP / SHIP-WITH-NITS / BLOCK."
 tools: [read, search, execute, xray/xray_grep, xray/xray_fast, xray/xray_git_diff, xray/xray_git_history, xray/xray_git_blame]
 argument-hint: "Review a provided diff, branch, PR, or working-tree scope for installer/mcp-filter script risks; state whether uncommitted changes are in scope."
-model: GPT-5.5 (copilot)
+model: Claude Opus 5 (copilot)
 ---
 
 # xray-script-reviewer

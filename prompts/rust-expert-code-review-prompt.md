@@ -4,7 +4,6 @@ applies_to: rust-cli-single-crate
 project: code-xray
 profile: sync, single-crate, lib+bin, unpublished, no-FFI
 last_updated: 2026-04-20
-changelog: ./rust-expert-code-review-prompt.CHANGELOG.md
 ---
 
 # Code Review — Rust Code Analysis Prompt V2.0
@@ -599,4 +598,4 @@ Recommendation:           <what to change>
 
 ---
 
-_Changelog moved to [`rust-expert-code-review-prompt.CHANGELOG.md`](./rust-expert-code-review-prompt.CHANGELOG.md). When using this prompt with an LLM, the changelog file does not need to be loaded._
+_Revision history for this prompt is in the git log: `git log -- prompts/rust-expert-code-review-prompt.md`._

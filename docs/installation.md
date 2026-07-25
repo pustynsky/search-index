@@ -38,7 +38,7 @@ cd xray
 .\scripts\setup-xray.ps1
 ```
 
-> **Pin a release.** Replace `main` in the URLs above with a tag (e.g. `v0.5.0`) to lock the script to a specific release for reproducibility.
+> **Pin a release.** Replace `main` in the URLs above with a tag (e.g. `v0.4.0`) to lock the script to a specific release for reproducibility.
 >
 > **Target a specific repo non-interactively.** Pass `-RepoPath <path>` to skip the path prompt.
 >
@@ -51,13 +51,13 @@ cd xray
 1. Downloads the latest `xray.exe` from [GitHub releases](https://github.com/pustynsky/xray/releases) to `%LOCALAPPDATA%\xray\`
 2. Scans the target repository and detects file extensions (shows top-20, auto-suggests based on frequency)
 3. Creates MCP configuration:
-   - `.vscode/mcp.json` — for **VS Code GitHub Copilot Chat** (agent mode)
-   - `.roo/mcp.json` — for **Roo Code** (optional, prompted with default N)
+   - `.vscode/mcp.json` — for **VS Code GitHub Copilot Chat** (agent mode, with `-EnableVSCode`)
    - `.mcp.json` — for **GitHub Copilot CLI** (with `-EnableCopilotCli`)
+   - Roo Code (`.roo/mcp.json`) — **not** written; see the Roo note below
 4. Protects configs from accidental git push:
    - Tracked `.mcp.json` (shared repo case) → per-clone **git smudge/clean filter** (`xray-mcp`) so `git status` stays clean and `git pull` succeeds silently when upstream changes the file. See [Shared repo with a tracked `.mcp.json`](#shared-repo-with-a-tracked-mcpjson-smudgeclean-filter) below.
    - Tracked `.vscode/mcp.json` (shared repo case) → identical per-clone smudge/clean filter (`xray-vscode-mcp`) — same hazard, same fix, just bound to the VS Code-shape `servers` container.
-   - Untracked `.vscode/mcp.json` / `.roo/mcp.json` → `git update-index --skip-worktree` (local edits invisible to git; safe because these are typically untracked).
+   - Untracked `.vscode/mcp.json` → `git update-index --skip-worktree` (local edits invisible to git; safe because this file is typically untracked).
    - Untracked files → `.git/info/exclude` (local gitignore)
 
 All xray tools are enabled by default **except** `xray_edit` (opt-in for safety).

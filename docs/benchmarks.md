@@ -63,7 +63,7 @@ Real production C# codebase (enterprise backend monorepo):
 | Definition index size        | 103.1 MB on disk (LZ4 compressed; ~328 MB uncompressed) |
 | Files parsed for definitions | 48,599–48,649 (varies by run)                           |
 
-## Content Search: search vs ripgrep
+## Content Search: xray vs ripgrep
 
 Single-term search for `HttpClient` across the full codebase. xray.exe token matching finds 1,072 files; rg substring matching finds 2,092 files (includes `IHttpClientFactory`, `HttpClientHandler`, etc.):
 
@@ -90,7 +90,7 @@ Measured via `xray grep` on 48,779-file C# index (754K unique tokens). Search+Ra
 | Regex (`I.*Cache`)                                    | 60.6ms           | 1,425         | rg: 2,650 files (33.6s) |
 | Exclude filters (`StorageIndexManager`)               | 0.025ms          | 2             | rg: 4 files (22.9s)     |
 
-**File count differences**: xray.exe uses exact token matching by default in CLI mode (no `--substring` flag). rg does substring content matching. In MCP mode, `substring=true` is the default, so MCP file counts typically match rg.
+**File count differences**: these CLI numbers were measured when `xray grep` still defaulted to exact token matching. The CLI now defaults to trigram substring matching (`--exact` restores the old exact-token behavior), so current CLI counts compare to rg the same way MCP counts do.
 
 ## MCP Server: xray_grep vs ripgrep (11-Test Suite)
 

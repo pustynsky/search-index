@@ -543,7 +543,7 @@ EXAMPLES:
 
 PERFORMANCE:
   48,643 files -> 846,167 definitions in ~14s (24 threads)
-  Index size: ~230 MB on disk
+  Index size: ~103 MB on disk (LZ4-compressed)
 "#)]
 pub struct DefIndexArgs {
     /// Directory to recursively scan for source files to parse
