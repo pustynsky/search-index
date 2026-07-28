@@ -29,6 +29,39 @@ struct EditRequestOptions {
     expected_line_count: Option<usize>,
     allow_break_hard_links: bool,
     allow_git_internals: bool,
+    /// `None` = caller omitted `lineEnding`.
+    line_ending: Option<LineEndingRequest>,
+}
+
+/// Caller-requested line-ending policy for the written file.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineEndingRequest {
+    /// Keep the existing format. Rejected when the file does not exist yet.
+    Preserve,
+    Lf,
+    Crlf,
+}
+
+impl LineEndingRequest {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value.to_ascii_lowercase().as_str() {
+            "preserve" => Ok(Self::Preserve),
+            "lf" => Ok(Self::Lf),
+            "crlf" => Ok(Self::Crlf),
+            _ => Err(format!(
+                "Parameter 'lineEnding' must be one of \"preserve\", \"lf\", \"crlf\"; got \"{}\".",
+                value
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Preserve => "preserve",
+            Self::Lf => "lf",
+            Self::Crlf => "crlf",
+        }
+    }
 }
 
 /// Maximum number of files for multi-file edit (protection against abuse).
@@ -196,6 +229,13 @@ pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     let allow_git_internals = args.get("allowGitInternals")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let line_ending = match args.get("lineEnding").and_then(Value::as_str) {
+        Some(value) => match LineEndingRequest::parse(value) {
+            Ok(parsed) => Some(parsed),
+            Err(error) => return ToolCallResult::error(error),
+        },
+        None => None,
+    };
 
     // ── Validate mode and construct EditMode ──
     let mode = match (operations, edits) {
@@ -219,6 +259,7 @@ pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         expected_line_count,
         allow_break_hard_links,
         allow_git_internals,
+        line_ending,
     };
 
     // ── Dispatch single vs multi-file ──
@@ -255,6 +296,7 @@ const KNOWN_EDIT_PARAMS: &[&str] = &[
     "allowBreakHardLinks",
     "allowGitInternals",
     "expectedHash",
+    "lineEnding",
 ];
 
 /// Per-edit fields accepted inside `edits[]` / `operations[]` (used both for
@@ -610,6 +652,11 @@ fn check_top_level_param_types(obj: &serde_json::Map<String, Value>) -> Option<S
     {
         return Some(err("expectedLineCount", "a non-negative integer", v));
     }
+    if let Some(v) = obj.get("lineEnding")
+        && !v.is_string()
+    {
+        return Some(err("lineEnding", "a string", v));
+    }
     None
 }
 
@@ -733,6 +780,54 @@ fn content_bytes(content: &str, line_ending: &str) -> Vec<u8> {
     } else {
         content.as_bytes().to_vec()
     }
+}
+
+/// Public name of an on-disk line ending.
+fn eol_name(line_ending: &str) -> &'static str {
+    if line_ending == "\r\n" { "CRLF" } else { "LF" }
+}
+
+/// Emit the line-ending decision. `lineEnding` stays as an alias of
+/// `resultLineEnding` for clients that already read it. `bytes_changed` keeps
+/// the report byte-truthful: a file with no line terminators is byte-identical
+/// under either format, so nothing is ever converted.
+fn apply_line_ending_fields(
+    response: &mut Value,
+    target: &PreparedEditTarget,
+    requested: Option<LineEndingRequest>,
+    bytes_changed: bool,
+) {
+    let result = eol_name(target.line_ending);
+    let original = target.original_line_ending.map(eol_name);
+    let (requested_name, source) = match requested {
+        Some(explicit @ (LineEndingRequest::Lf | LineEndingRequest::Crlf)) => {
+            (explicit.as_str(), "explicit")
+        }
+        Some(LineEndingRequest::Preserve) => ("preserve", "preserve"),
+        None if target.file_existed => ("preserve", "default-preserve"),
+        None => ("lf", "fallback-lf"),
+    };
+    response["lineEnding"] = json!(result);
+    response["requestedLineEnding"] = json!(requested_name);
+    response["originalLineEnding"] = json!(original);
+    response["resultLineEnding"] = json!(result);
+    response["lineEndingDecisionSource"] = json!(source);
+    response["lineEndingChanged"] =
+        json!(bytes_changed && original.is_some_and(|o| o != result));
+}
+
+/// Diff placeholder when the only byte-level change is the line ending —
+/// a unified diff over LF-normalized text would render as empty.
+fn line_ending_only_diff(target: &PreparedEditTarget, bytes_changed: bool) -> Option<String> {
+    let original = target.original_line_ending?;
+    if !bytes_changed || original == target.line_ending {
+        return None;
+    }
+    Some(format!(
+        "(line endings: {} -> {})",
+        eol_name(original),
+        eol_name(target.line_ending)
+    ))
 }
 
 // Test-only injection point for simulating a filesystem mutation between the initial
@@ -974,6 +1069,9 @@ struct PreparedEditTarget {
     normalized_content: String,
     source_bytes: Vec<u8>,
     line_ending: &'static str,
+    /// Format detected on disk before any caller override. `None` for a new file
+    /// and for an existing file with no line terminators.
+    original_line_ending: Option<&'static str>,
     file_existed: bool,
     symlink_followed: bool,
     hard_link_count: u64,
@@ -1184,13 +1282,25 @@ fn read_and_validate_requested_file(
     dry_run: bool,
     allow_break_hard_links: bool,
     allow_git_internals: bool,
+    requested_line_ending: Option<LineEndingRequest>,
 ) -> Result<PreparedEditTarget, String> {
     let logical_path = resolve_path(server_dir, path_str);
     #[cfg(windows)]
     reject_ntfs_alternate_data_stream(&logical_path, path_str)?;
     ensure_git_internal_edit_allowed(&logical_path, path_str, allow_git_internals)?;
-    let target = read_and_validate_file(server_dir, path_str, dry_run, allow_break_hard_links)?;
+    let mut target = read_and_validate_file(server_dir, path_str, dry_run, allow_break_hard_links)?;
     ensure_git_internal_edit_allowed(&target.write_path, path_str, allow_git_internals)?;
+    match requested_line_ending {
+        Some(LineEndingRequest::Lf) => target.line_ending = "\n",
+        Some(LineEndingRequest::Crlf) => target.line_ending = "\r\n",
+        Some(LineEndingRequest::Preserve) if !target.file_existed => {
+            return Err(format!(
+                "Parameter 'lineEnding' is \"preserve\", but '{}' does not exist yet — there is no format to preserve. Use \"lf\" or \"crlf\".",
+                path_str
+            ));
+        }
+        Some(LineEndingRequest::Preserve) | None => {}
+    }
     Ok(target)
 }
 
@@ -1216,6 +1326,7 @@ fn read_and_validate_file(
             normalized_content: String::new(),
             source_bytes: Vec::new(),
             line_ending: "\n",
+            original_line_ending: None,
             file_existed: false,
             symlink_followed: false,
             hard_link_count: 0,
@@ -1271,6 +1382,9 @@ fn read_and_validate_file(
         ));
     }
     let line_ending = detect_line_ending(&content);
+    // No line terminators = no format to preserve or convert: the bytes are
+    // identical under LF and CRLF. Mirrors the "NONE" xray_info reports.
+    let original_line_ending = content.contains('\n').then_some(line_ending);
     let normalized_content = if line_ending == "\r\n" {
         content.replace("\r\n", "\n")
     } else {
@@ -1283,6 +1397,7 @@ fn read_and_validate_file(
         write_path,
         normalized_content,
         line_ending,
+        original_line_ending,
         file_existed: true,
         symlink_followed,
         hard_link_count,
@@ -2190,6 +2305,7 @@ fn handle_single_file_edit(
         expected_line_count,
         allow_break_hard_links,
         allow_git_internals,
+        line_ending: requested_line_ending,
     } = options;
     let edit_start = std::time::Instant::now();
     // Read and validate. `file_existed` is captured BEFORE the write so we can
@@ -2200,6 +2316,7 @@ fn handle_single_file_edit(
         dry_run,
         allow_break_hard_links,
         allow_git_internals,
+        requested_line_ending,
     ) {
         Ok(target) => target,
         Err(error) => return ToolCallResult::error(error),
@@ -2280,9 +2397,6 @@ fn handle_single_file_edit(
         "linesRemoved": edit_result.lines_removed,
         "newLineCount": edit_result.new_line_count,
         "dryRun": dry_run,
-        // Fix 4: expose line ending so clients can reconcile tool-diff (LF) with
-        // on-disk bytes (LF or CRLF). Prevents "diff disagrees with git diff" confusion.
-        "lineEnding": if target.line_ending == "\r\n" { "CRLF" } else { "LF" },
         // INSERT-after-EOF idiom hint: agents can read these values directly
         // from a previous response instead of guessing from stale state.
         "appendRangeHint": {
@@ -2290,6 +2404,10 @@ fn handle_single_file_edit(
             "endLine": edit_result.new_line_count,
         },
     });
+
+    // Fix 4: expose line ending so clients can reconcile tool-diff (LF) with
+    // on-disk bytes (LF or CRLF). Prevents "diff disagrees with git diff" confusion.
+    apply_line_ending_fields(&mut response, &target, requested_line_ending, !content_unchanged);
 
     response["sourceHash"] = json!(target.source_hash.as_deref());
     response["resultHash"] = json!(result_hash);
@@ -2331,6 +2449,8 @@ fn handle_single_file_edit(
 
     if !edit_result.diff.is_empty() {
         response["diff"] = json!(edit_result.diff);
+    } else if let Some(note) = line_ending_only_diff(&target, !content_unchanged) {
+        response["diff"] = json!(note);
     } else {
         response["diff"] = json!("(no changes)");
     }
@@ -2489,6 +2609,7 @@ fn handle_multi_file_edit(
         expected_line_count,
         allow_break_hard_links,
         allow_git_internals,
+        line_ending: requested_line_ending,
     } = options;
     let edit_start = std::time::Instant::now();
     // Validate paths array
@@ -2530,6 +2651,7 @@ fn handle_multi_file_edit(
             dry_run,
             allow_break_hard_links,
             allow_git_internals,
+            requested_line_ending,
         ) {
             Ok(target) => target,
             Err(error) => return ToolCallResult::error(format!("File '{}': {}", path_str, error)),
@@ -2771,7 +2893,6 @@ fn handle_multi_file_edit(
             "linesAdded": result.lines_added,
             "linesRemoved": result.lines_removed,
             "newLineCount": result.new_line_count,
-            "lineEnding": if target.line_ending == "\r\n" { "CRLF" } else { "LF" },
             // INSERT-after-EOF idiom hint: agents can read these values directly
             // from a previous response instead of guessing from stale state.
             "appendRangeHint": {
@@ -2779,6 +2900,7 @@ fn handle_multi_file_edit(
                 "endLine": result.new_line_count,
             },
         });
+        apply_line_ending_fields(&mut file_result, target, requested_line_ending, !*content_unchanged);
         file_result["sourceHash"] = json!(target.source_hash.as_deref());
         file_result["resultHash"] = json!(result_hash);
         if result.total_replacements > 0 {
@@ -2810,6 +2932,8 @@ fn handle_multi_file_edit(
         }
         if !result.diff.is_empty() {
             file_result["diff"] = json!(result.diff);
+        } else if let Some(note) = line_ending_only_diff(target, !*content_unchanged) {
+            file_result["diff"] = json!(note);
         } else {
             file_result["diff"] = json!("(no changes)");
         }

@@ -668,6 +668,11 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "expectedHash": {
                         "type": "string",
                         "description": "Single-file precondition: must match a prior sourceHash."
+                    },
+                    "lineEnding": {
+                        "type": "string",
+                        "enum": ["preserve", "lf", "crlf"],
+                        "description": "Line endings written: 'preserve' (default for an existing file; error if the file is new), 'lf', 'crlf'. Newlines inside `content` never override it. Converting an existing file counts as a change. New file defaults to LF. Per-file for 'paths'. Response fields: see xray_help."
                     }
                 },
                 "required": []

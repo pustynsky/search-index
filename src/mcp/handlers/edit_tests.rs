@@ -8918,3 +8918,467 @@ fn test_generate_unified_diff_truncates_oversize_byte_payload() {
     );
 }
 
+
+// ─── `lineEnding` parameter: preserve / lf / crlf ─────────────────────
+
+fn assert_pure_crlf(path: &std::path::Path) {
+    let raw = std::fs::read(path).unwrap();
+    let crlf = raw.windows(2).filter(|w| *w == b"\r\n").count();
+    let lf = raw.iter().filter(|b| **b == b'\n').count();
+    assert!(crlf > 0, "expected CRLF endings, got {:?}", String::from_utf8_lossy(&raw));
+    assert_eq!(crlf, lf, "bare LF left in file: {:?}", String::from_utf8_lossy(&raw));
+}
+
+fn assert_pure_lf(path: &std::path::Path) {
+    let raw = std::fs::read(path).unwrap();
+    assert!(raw.contains(&b'\n'), "expected LF endings, got {:?}", String::from_utf8_lossy(&raw));
+    assert!(!raw.contains(&b'\r'), "CR left in file: {:?}", String::from_utf8_lossy(&raw));
+}
+
+fn parse_edit_response(result: &ToolCallResult) -> serde_json::Value {
+    serde_json::from_str(&result.content[0].text).unwrap()
+}
+
+#[test]
+fn test_line_ending_new_file_crlf() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "new.txt",
+        "lineEnding": "crlf",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "first line\nsecond line" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["lineEnding"], "CRLF");
+    assert_eq!(parsed["resultLineEnding"], "CRLF");
+    assert_eq!(parsed["requestedLineEnding"], "crlf");
+    assert!(parsed["originalLineEnding"].is_null());
+    assert_eq!(parsed["lineEndingDecisionSource"], "explicit");
+    assert_eq!(parsed["lineEndingChanged"], false);
+    assert_pure_crlf(&tmp.path().join("new.txt"));
+}
+
+#[test]
+fn test_line_ending_new_file_lf() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "new.txt",
+        "lineEnding": "lf",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "first line\nsecond line" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["resultLineEnding"], "LF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "explicit");
+    assert_pure_lf(&tmp.path().join("new.txt"));
+}
+
+#[test]
+fn test_line_ending_new_file_defaults_to_lf() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "new.txt",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "first line\nsecond line" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["requestedLineEnding"], "lf");
+    assert_eq!(parsed["resultLineEnding"], "LF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "fallback-lf");
+    assert_pure_lf(&tmp.path().join("new.txt"));
+}
+
+#[test]
+fn test_line_ending_existing_crlf_preserved_without_param() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("crlf.txt");
+    std::fs::write(&path, b"a\r\nb\r\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "crlf.txt",
+        "edits": [{ "search": "a", "replace": "A" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["requestedLineEnding"], "preserve");
+    assert_eq!(parsed["originalLineEnding"], "CRLF");
+    assert_eq!(parsed["resultLineEnding"], "CRLF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "default-preserve");
+    assert_eq!(parsed["lineEndingChanged"], false);
+    assert_pure_crlf(&path);
+}
+
+#[test]
+fn test_line_ending_existing_lf_preserved_without_param() {
+    let (tmp, filename, path) = create_temp_file("a\nb\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "a", "replace": "A" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["originalLineEnding"], "LF");
+    assert_eq!(parsed["resultLineEnding"], "LF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "default-preserve");
+    assert_eq!(parsed["lineEndingChanged"], false);
+    assert_pure_lf(&path);
+}
+
+#[test]
+fn test_line_ending_convert_lf_to_crlf_counts_as_change() {
+    let (tmp, filename, path) = create_temp_file("a\nb\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "lineEnding": "crlf",
+        "operations": []
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["writeStatus"], "committed");
+    assert_eq!(parsed["lineEndingChanged"], true);
+    assert_eq!(parsed["originalLineEnding"], "LF");
+    assert_eq!(parsed["resultLineEnding"], "CRLF");
+    assert_ne!(parsed["sourceHash"], parsed["resultHash"]);
+    assert_eq!(parsed["diff"], "(line endings: LF -> CRLF)");
+    assert_pure_crlf(&path);
+}
+
+#[test]
+fn test_line_ending_convert_crlf_to_lf_counts_as_change() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("crlf.txt");
+    std::fs::write(&path, b"a\r\nb\r\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "crlf.txt",
+        "lineEnding": "lf",
+        "operations": []
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["writeStatus"], "committed");
+    assert_eq!(parsed["lineEndingChanged"], true);
+    assert_eq!(parsed["diff"], "(line endings: CRLF -> LF)");
+    assert_ne!(parsed["sourceHash"], parsed["resultHash"]);
+    assert_pure_lf(&path);
+}
+
+#[test]
+fn test_line_ending_crlf_inside_content_does_not_override_lf() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "new.txt",
+        "lineEnding": "lf",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "first\r\nsecond" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    assert_pure_lf(&tmp.path().join("new.txt"));
+}
+
+#[test]
+fn test_line_ending_lf_inside_content_does_not_override_crlf() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "new.txt",
+        "lineEnding": "crlf",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "first\nsecond" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    assert_pure_crlf(&tmp.path().join("new.txt"));
+}
+
+#[test]
+fn test_line_ending_preserve_rejected_for_new_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "new.txt",
+        "lineEnding": "preserve",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "x" }]
+    }));
+
+    assert!(result.is_error, "{:?}", result);
+    assert!(result.content[0].text.contains("does not exist yet"), "{}", result.content[0].text);
+    assert!(!tmp.path().join("new.txt").exists());
+}
+
+#[test]
+fn test_line_ending_invalid_value_rejected() {
+    let (tmp, filename, _) = create_temp_file("a\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "lineEnding": "cr",
+        "edits": [{ "search": "a", "replace": "A" }]
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("must be one of"), "{}", result.content[0].text);
+}
+
+#[test]
+fn test_line_ending_wrong_type_rejected() {
+    let (tmp, filename, _) = create_temp_file("a\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "lineEnding": 5,
+        "edits": [{ "search": "a", "replace": "A" }]
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("'lineEnding' must be a string"), "{}", result.content[0].text);
+}
+
+#[test]
+fn test_line_ending_value_is_case_insensitive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "new.txt",
+        "lineEnding": "CRLF",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "a\nb" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["resultLineEnding"], "CRLF");
+    assert_pure_crlf(&tmp.path().join("new.txt"));
+}
+
+#[test]
+fn test_line_ending_multi_file_preserve_keeps_each_format() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("lf.txt"), b"a\nb\n").unwrap();
+    std::fs::write(tmp.path().join("crlf.txt"), b"a\r\nb\r\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["lf.txt", "crlf.txt"],
+        "edits": [{ "search": "a", "replace": "A" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["results"][0]["resultLineEnding"], "LF");
+    assert_eq!(parsed["results"][0]["lineEndingDecisionSource"], "default-preserve");
+    assert_eq!(parsed["results"][1]["resultLineEnding"], "CRLF");
+    assert_eq!(parsed["results"][1]["lineEndingDecisionSource"], "default-preserve");
+    assert_pure_lf(&tmp.path().join("lf.txt"));
+    assert_pure_crlf(&tmp.path().join("crlf.txt"));
+}
+
+#[test]
+fn test_line_ending_multi_file_crlf_applies_to_every_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("one.txt"), b"a\nb\n").unwrap();
+    std::fs::write(tmp.path().join("two.txt"), b"a\nb\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["one.txt", "two.txt"],
+        "lineEnding": "crlf",
+        "edits": [{ "search": "a", "replace": "A" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    for i in 0..2 {
+        assert_eq!(parsed["results"][i]["resultLineEnding"], "CRLF");
+        assert_eq!(parsed["results"][i]["lineEndingChanged"], true);
+    }
+    assert_pure_crlf(&tmp.path().join("one.txt"));
+    assert_pure_crlf(&tmp.path().join("two.txt"));
+}
+
+#[test]
+fn test_line_ending_dry_run_reports_same_decision_as_real_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+    let args = json!({
+        "path": "new.txt",
+        "lineEnding": "crlf",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "a\nb" }]
+    });
+
+    let mut preview_args = args.clone();
+    preview_args["dryRun"] = json!(true);
+    let preview = handle_xray_edit(&ctx, &preview_args);
+    assert!(!preview.is_error, "{:?}", preview);
+    let preview_parsed = parse_edit_response(&preview);
+    assert!(!tmp.path().join("new.txt").exists(), "dryRun must not write");
+
+    let real = handle_xray_edit(&ctx, &args);
+    assert!(!real.is_error, "{:?}", real);
+    let real_parsed = parse_edit_response(&real);
+
+    for field in ["requestedLineEnding", "originalLineEnding", "resultLineEnding", "lineEndingDecisionSource", "lineEndingChanged"] {
+        assert_eq!(preview_parsed[field], real_parsed[field], "field {} diverged", field);
+    }
+    assert_pure_crlf(&tmp.path().join("new.txt"));
+}
+
+/// Stage 1 does not normalize mixed-EOL files: the existing pre-write rejection
+/// still fires even when the caller asks for an explicit format.
+#[test]
+fn test_line_ending_mixed_file_still_rejected_with_explicit_format() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("mixed.txt");
+    std::fs::write(&path, b"a\r\nb\nc\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "mixed.txt",
+        "lineEnding": "crlf",
+        "operations": []
+    }));
+
+    assert!(result.is_error, "{:?}", result);
+    assert!(result.content[0].text.contains("mixed LF and CRLF"), "{}", result.content[0].text);
+    assert_eq!(std::fs::read(&path).unwrap(), b"a\r\nb\nc\n");
+}
+
+
+/// A file with no line terminators is byte-identical under LF and CRLF, so a
+/// format request cannot convert anything. The response must not claim it did.
+#[test]
+fn test_line_ending_file_without_terminators_reports_no_conversion() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("single.txt");
+    std::fs::write(&path, b"hello").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "single.txt",
+        "lineEnding": "crlf",
+        "operations": []
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["writeStatus"], "unchanged");
+    assert_eq!(parsed["sourceHash"], parsed["resultHash"]);
+    assert!(parsed["originalLineEnding"].is_null());
+    assert_eq!(parsed["lineEndingChanged"], false);
+    assert_eq!(parsed["diff"], "(no changes)");
+    assert_eq!(std::fs::read(&path).unwrap(), b"hello");
+}
+
+#[test]
+fn test_line_ending_empty_file_reports_no_conversion() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("empty.txt");
+    std::fs::write(&path, b"").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "empty.txt",
+        "lineEnding": "crlf",
+        "operations": []
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["writeStatus"], "unchanged");
+    assert_eq!(parsed["lineEndingChanged"], false);
+    assert_eq!(parsed["diff"], "(no changes)");
+    assert_eq!(std::fs::read(&path).unwrap(), b"");
+}
+
+/// Boundary for `line_ending_only_diff`: asking for the format the file already
+/// has must stay a no-op, not report a conversion.
+#[test]
+fn test_line_ending_same_format_request_is_a_no_op() {
+    let (tmp, filename, path) = create_temp_file("a\nb\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "lineEnding": "lf",
+        "operations": []
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["writeStatus"], "unchanged");
+    assert_eq!(parsed["lineEndingDecisionSource"], "explicit");
+    assert_eq!(parsed["lineEndingChanged"], false);
+    assert_eq!(parsed["diff"], "(no changes)");
+    assert_eq!(parsed["sourceHash"], parsed["resultHash"]);
+    assert_eq!(std::fs::read(&path).unwrap(), b"a\nb\n");
+}
+
+/// Explicit `preserve` on an existing file is distinguishable from an omitted
+/// parameter through `lineEndingDecisionSource`.
+#[test]
+fn test_line_ending_explicit_preserve_on_existing_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("crlf.txt");
+    std::fs::write(&path, b"a\r\nb\r\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "crlf.txt",
+        "lineEnding": "preserve",
+        "edits": [{ "search": "a", "replace": "A" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["requestedLineEnding"], "preserve");
+    assert_eq!(parsed["lineEndingDecisionSource"], "preserve");
+    assert_eq!(parsed["resultLineEnding"], "CRLF");
+    assert_eq!(parsed["lineEndingChanged"], false);
+    assert_pure_crlf(&path);
+}
+
+/// `preserve` + a path that does not exist must abort the whole batch during
+/// validation — before any file is staged or written.
+#[test]
+fn test_line_ending_preserve_aborts_batch_before_any_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("one.txt"), b"a\nb\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["one.txt", "missing.txt"],
+        "lineEnding": "preserve",
+        "edits": [{ "search": "a", "replace": "A" }]
+    }));
+
+    assert!(result.is_error, "{:?}", result);
+    assert!(result.content[0].text.contains("does not exist yet"), "{}", result.content[0].text);
+    assert_eq!(std::fs::read(tmp.path().join("one.txt")).unwrap(), b"a\nb\n",
+        "first file must be untouched when a later path aborts the batch");
+    assert!(!tmp.path().join("missing.txt").exists());
+}
+
