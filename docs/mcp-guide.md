@@ -1253,13 +1253,50 @@ On Windows, edits to an existing file preserve named NTFS data streams, includin
 
 | Parameter | Type | Default | Description |
 | --- | --- | --- | --- |
-| `lineEnding` | string | `preserve` for an existing file, LF for a new one | `preserve` \| `lf` \| `crlf`. Resolved per file for `paths` |
+| `lineEnding` | string | `preserve` for an existing file, `auto` for a new one | `preserve` \| `auto` \| `lf` \| `crlf`. Resolved per file for `paths` |
 
 `preserve` keeps the format detected on disk. It is an error for a file that
-does not exist yet, because there is nothing to preserve — pass `lf` or `crlf`
-instead. `\n` and `\r\n` inside `content` never override the parameter: input is
-always parsed into logical lines and re-serialized with the selected format.
-Files with mixed LF and CRLF are still rejected before any write.
+does not exist yet, because there is nothing to preserve — pass `auto`, `lf` or
+`crlf` instead. `\n` and `\r\n` inside `content` never override the parameter:
+input is always parsed into logical lines and re-serialized with the selected
+format. Files with mixed LF and CRLF are still rejected before any write.
+
+#### `auto`
+
+For an existing file `auto` is identical to `preserve`. For a file being
+created it follows the line ending Git would materialize in the working tree,
+so the result survives `git add` in a repository with `core.safecrlf=true`
+without disabling the check.
+
+The decision is resolved **only through Git** — `.editorconfig` and the format of
+neighbouring files are deliberately not consulted, because neither of them
+affects whether `git add` succeeds, while both could contradict Git and
+reintroduce the failure:
+
+1. An effective `eol=lf` / `eol=crlf` attribute wins outright.
+2. Otherwise, if `text` or `text=auto` applies, the working-tree format comes
+   from `core.autocrlf` (`true` → CRLF, `input` → LF), then `core.eol`
+   (`crlf` / `lf`), then the platform default.
+3. If `text` is unspecified, `core.autocrlf` alone decides; `false` means Git
+   writes the bytes through untouched.
+4. `-text`, no worktree, missing Git, or any Git failure → LF.
+
+The legacy `crlf` attribute is honoured per the gitattributes(5) compatibility
+table — `crlf` → `text`, `-crlf` → `-text`, `crlf=input` → `eol=lf` — but only
+when neither `text` nor `eol` applies, which is what Git itself does. `git
+check-attr text eol` does not surface it, so it is queried explicitly.
+
+No Git process is spawned when there is no `.git` above the path, so files
+outside a repository cost nothing extra. `xray_edit` never runs `git add` and
+never writes Git config — it only reads `git check-attr` and `git config`.
+
+Inside a repository, resolving `auto` costs one `git check-attr` and, unless an
+`eol` attribute settles it, one `git config` per file being created. Nothing is
+cached, so a config change takes effect immediately; a `paths` batch that
+creates many files at once pays that cost per path. Editing an existing file
+never consults Git at all.
+
+#### Conversions
 
 Asking for a format the file does not have is a real change — the file is
 rewritten, `resultHash` differs from `sourceHash`, and the unified diff (which
@@ -1275,7 +1312,7 @@ byte-identical under either format, so it reports `originalLineEnding: null`,
 | `requestedLineEnding` | The requested value, or the default that was applied |
 | `originalLineEnding` | `LF` / `CRLF` detected on disk; `null` for a new file or a file with no line terminators |
 | `resultLineEnding` | `LF` / `CRLF` actually written or planned |
-| `lineEndingDecisionSource` | `explicit` (`lf`/`crlf` requested), `preserve` (requested), `default-preserve` (omitted, existing file), `fallback-lf` (omitted, new file) |
+| `lineEndingDecisionSource` | `explicit` (`lf`/`crlf` requested), `preserve` (requested `preserve`, or `auto` on an existing file), `default-preserve` (omitted, existing file), `gitattributes-eol`, `git-worktree-policy`, `fallback-lf` |
 | `lineEndingChanged` | Whether the byte-level line-ending format actually changed |
 
 All six fields are present on `dryRun` responses too, and report the same
