@@ -5,6 +5,7 @@
 //! See `cache.rs` for the pre-built in-memory cache path (sub-millisecond queries).
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::process::Command;
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -869,6 +870,262 @@ pub fn shallow_cache_clear() {
 }
 
 
+// ─── Working-tree line-ending policy ─────────────────────────────────
+// Answers "which line ending would Git put in the working tree for this path",
+// so a file created by xray_edit can be `git add`ed without tripping
+// core.safecrlf. Read-only: never runs `git add` and never writes config.
+
+/// Line ending Git materializes in the working tree.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum WorktreeEol {
+    Lf,
+    Crlf,
+}
+
+/// Which Git rule produced a [`WorktreeEol`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum EolSource {
+    /// `eol=lf` / `eol=crlf` from an effective `.gitattributes`.
+    GitattributesEol,
+    /// `text` / `text=auto` combined with `core.autocrlf` / `core.eol`.
+    WorktreePolicy,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AutoCrlf {
+    True,
+    Input,
+    False,
+}
+
+#[derive(Clone, Copy, Default)]
+struct EolConfig {
+    autocrlf: Option<AutoCrlf>,
+    eol: Option<WorktreeEol>,
+}
+
+fn native_eol() -> WorktreeEol {
+    if cfg!(windows) { WorktreeEol::Crlf } else { WorktreeEol::Lf }
+}
+
+/// Line ending Git would write into the working tree for `path`.
+///
+/// `None` means "Git has no opinion": no worktree above the path, Git missing
+/// or failing, or an attribute/config combination under which Git performs no
+/// conversion at all. The caller then applies its own default.
+///
+/// The path does NOT have to exist — `git check-attr` is pattern-based, which
+/// is exactly what a not-yet-created file needs. No Git process is spawned
+/// when there is no `.git` above the path.
+pub fn worktree_line_ending(path: &Path) -> Option<(WorktreeEol, EolSource)> {
+    // The write follows symlinks, so the policy must come from where the bytes
+    // actually land, not from the lexical path the caller typed.
+    let physical = physical_target_path(path)?;
+    let root = discover_worktree_root(&physical)?;
+    let relative = worktree_relative_path(&root, &physical)?;
+    let (text, eol) = check_attr_line_ending_inputs(&root, &relative)?;
+
+    // An explicit `eol` attribute outranks every config knob.
+    match eol.as_str() {
+        "lf" => return Some((WorktreeEol::Lf, EolSource::GitattributesEol)),
+        "crlf" => return Some((WorktreeEol::Crlf, EolSource::GitattributesEol)),
+        _ => {}
+    }
+
+    let config = read_eol_config(&root);
+    let resolved = match text.as_str() {
+        // Declared text: always converted. core.eol is ignored while
+        // core.autocrlf is true or input, per git-config(1).
+        "set" | "auto" => match config.autocrlf {
+            Some(AutoCrlf::True) => WorktreeEol::Crlf,
+            Some(AutoCrlf::Input) => WorktreeEol::Lf,
+            _ => config.eol.unwrap_or_else(native_eol),
+        },
+        // Undeclared text: core.autocrlf alone decides, and `false` means
+        // Git writes the bytes through untouched.
+        "unspecified" => match config.autocrlf {
+            Some(AutoCrlf::True) => WorktreeEol::Crlf,
+            Some(AutoCrlf::Input) => WorktreeEol::Lf,
+            _ => return None,
+        },
+        // `-text` (unset) or an unrecognized value: no conversion.
+        _ => return None,
+    };
+    Some((resolved, EolSource::WorktreePolicy))
+}
+
+/// Where the write will physically land: the nearest existing ancestor is
+/// canonicalized — so a directory symlink attributes the file to the repository
+/// it really points into — and the not-yet-created suffix is re-appended.
+fn physical_target_path(path: &Path) -> Option<std::path::PathBuf> {
+    let mut missing_suffix: Vec<&std::ffi::OsStr> = Vec::new();
+    let mut current = path;
+    loop {
+        if let Ok(resolved) = std::fs::canonicalize(current) {
+            let mut physical = strip_verbatim_prefix(resolved);
+            for component in missing_suffix.iter().rev() {
+                physical.push(component);
+            }
+            return Some(physical);
+        }
+        missing_suffix.push(current.file_name()?);
+        current = current.parent()?;
+    }
+}
+
+/// Windows canonicalization yields verbatim paths (`\\?\C:\…`), which
+/// `CreateProcess` rejects as a working directory. Convert the two forms that
+/// have an ordinary equivalent; anything else (device namespace, Volume GUID)
+/// is left alone rather than corrupted into a relative path.
+fn strip_verbatim_prefix(path: std::path::PathBuf) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        enum VerbatimKind {
+            Disk,
+            Unc,
+            Other,
+        }
+        use std::path::{Component, Prefix};
+        let kind = match path.components().next() {
+            Some(Component::Prefix(prefix)) => match prefix.kind() {
+                Prefix::VerbatimDisk(_) => VerbatimKind::Disk,
+                Prefix::VerbatimUNC(_, _) => VerbatimKind::Unc,
+                _ => VerbatimKind::Other,
+            },
+            _ => VerbatimKind::Other,
+        };
+        let Some(text) = path.to_str() else {
+            return path;
+        };
+        match kind {
+            // \\?\C:\rest -> C:\rest
+            VerbatimKind::Disk => {
+                if let Some(rest) = text.strip_prefix(r"\\?\") {
+                    return std::path::PathBuf::from(rest);
+                }
+            }
+            // \\?\UNC\server\share\rest -> \\server\share\rest
+            VerbatimKind::Unc => {
+                if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+                    return std::path::PathBuf::from(format!(r"\\{}", rest));
+                }
+            }
+            VerbatimKind::Other => {}
+        }
+    }
+    path
+}
+
+/// Nearest ancestor directory holding a `.git` entry. `.git` may be a file
+/// (linked worktree or submodule), so existence is enough.
+fn discover_worktree_root(path: &Path) -> Option<std::path::PathBuf> {
+    let mut current = path.parent();
+    while let Some(directory) = current {
+        if directory.join(".git").exists() {
+            return Some(directory.to_path_buf());
+        }
+        current = directory.parent();
+    }
+    None
+}
+
+/// Root-relative, forward-slash path — the form `git check-attr` expects.
+fn worktree_relative_path(root: &Path, path: &Path) -> Option<String> {
+    let relative = path.strip_prefix(root).ok()?;
+    Some(relative.to_str()?.replace('\\', "/"))
+}
+
+/// Effective `text` and `eol` for a path, including the legacy `crlf`
+/// attribute. `git check-attr text eol` does NOT surface `crlf`, yet Git still
+/// honors it — `git ls-files --eol` reports `attr/text` for a `* crlf` rule — so
+/// the compatibility table from gitattributes(5) is applied here.
+fn check_attr_line_ending_inputs(root: &Path, relative: &str) -> Option<(String, String)> {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(root)
+        .args(["check-attr", "-z", "text", "eol", "crlf", "--"])
+        .arg(relative);
+    let output = run_git(&mut cmd).ok()?;
+
+    // -z output is a flat NUL-separated stream of (path, attribute, value).
+    let fields: Vec<&str> = output.split('\0').collect();
+    let mut text = None;
+    let mut eol = None;
+    let mut crlf = None;
+    for chunk in fields.chunks(3) {
+        let [_, attribute, value] = chunk else { continue };
+        match *attribute {
+            "text" => text = Some((*value).to_string()),
+            "eol" => eol = Some((*value).to_string()),
+            "crlf" => crlf = Some((*value).to_string()),
+            _ => {}
+        }
+    }
+    Some(apply_legacy_crlf_attribute(text?, eol?, crlf?))
+}
+
+/// gitattributes(5) compatibility: `crlf` -> `text`, `-crlf` -> `-text`,
+/// `crlf=input` -> `eol=lf`. Git drops the legacy attribute entirely as soon as
+/// a modern one applies — verified against `git ls-files --eol` for
+/// `text -crlf`, `-text crlf`, `eol=crlf crlf=input` and `text=auto crlf=input`,
+/// where the effective attribute was `text`, `-text`, `text eol=crlf` and
+/// `text=auto` respectively.
+fn apply_legacy_crlf_attribute(text: String, eol: String, crlf: String) -> (String, String) {
+    if text != "unspecified" || eol != "unspecified" {
+        return (text, eol);
+    }
+    match crlf.as_str() {
+        "input" => (text, "lf".to_string()),
+        "set" => ("set".to_string(), eol),
+        "unset" => ("unset".to_string(), eol),
+        _ => (text, eol),
+    }
+}
+
+/// `core.autocrlf` / `core.eol` as Git resolves them for this worktree — system,
+/// global, local, and `include`/`includeIf` are all folded in by Git itself.
+/// Not cached: config is read once per created file, and a stale answer would
+/// be worse than the spawn it saves.
+fn read_eol_config(root: &Path) -> EolConfig {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(root)
+        .args(["config", "-z", "--get-regexp", r"^core\.(autocrlf|eol)$"]);
+    // Exit 1 here just means neither key is set; check-attr already proved Git works.
+    let Ok(output) = run_git(&mut cmd) else {
+        return EolConfig::default();
+    };
+
+    let mut config = EolConfig::default();
+    // Entries arrive lowest-precedence first, so a later one legitimately wins.
+    for entry in output.split('\0').filter(|entry| !entry.is_empty()) {
+        let Some((key, value)) = entry.split_once('\n') else { continue };
+        let value = value.trim().to_ascii_lowercase();
+        match key.trim().to_ascii_lowercase().as_str() {
+            "core.autocrlf" => {
+                let parsed = match value.as_str() {
+                    "true" | "yes" | "on" | "1" => Some(AutoCrlf::True),
+                    "input" => Some(AutoCrlf::Input),
+                    "false" | "no" | "off" | "0" | "" => Some(AutoCrlf::False),
+                    _ => None,
+                };
+                if parsed.is_some() {
+                    config.autocrlf = parsed;
+                }
+            }
+            // Anything else, including "native", falls back to the platform default.
+            "core.eol" => {
+                config.eol = match value.as_str() {
+                    "lf" => Some(WorktreeEol::Lf),
+                    "crlf" => Some(WorktreeEol::Crlf),
+                    _ => None,
+                };
+            }
+            _ => {}
+        }
+    }
+    config
+}
+
+
 /// Backward-compatible alias for [`file_exists_in_current_head`].
 ///
 /// Kept for external callers and older code paths. Prefer the more explicit
@@ -1138,6 +1395,67 @@ pub(crate) fn format_blame_date(timestamp: i64, tz: &str) -> String {
 pub mod cache;
 
 // ─── Tests ──────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod line_ending_policy_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_crlf_applies_only_when_no_modern_attribute_is_set() {
+        let call = |text: &str, eol: &str, crlf: &str| {
+            apply_legacy_crlf_attribute(text.to_string(), eol.to_string(), crlf.to_string())
+        };
+
+        // Alone, the legacy attribute maps per gitattributes(5).
+        assert_eq!(call("unspecified", "unspecified", "set"), ("set".into(), "unspecified".into()));
+        assert_eq!(call("unspecified", "unspecified", "unset"), ("unset".into(), "unspecified".into()));
+        assert_eq!(call("unspecified", "unspecified", "input"), ("unspecified".into(), "lf".into()));
+
+        // A modern attribute suppresses it entirely. `git ls-files --eol` reports
+        // the effective attribute as `text`, `-text`, `text eol=crlf` and
+        // `text=auto` for these four combinations.
+        assert_eq!(call("set", "unspecified", "unset"), ("set".into(), "unspecified".into()));
+        assert_eq!(call("unset", "unspecified", "set"), ("unset".into(), "unspecified".into()));
+        assert_eq!(call("unspecified", "crlf", "input"), ("unspecified".into(), "crlf".into()));
+        assert_eq!(call("auto", "unspecified", "input"), ("auto".into(), "unspecified".into()));
+
+        // No legacy rule at all.
+        assert_eq!(call("auto", "unspecified", "unspecified"), ("auto".into(), "unspecified".into()));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_disk_and_unc_prefixes_become_usable_working_directories() {
+        use std::path::PathBuf;
+
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\C:\repo\src")),
+            PathBuf::from(r"C:\repo\src")
+        );
+        assert_eq!(
+            strip_verbatim_prefix(PathBuf::from(r"\\?\UNC\server\share\repo")),
+            PathBuf::from(r"\\server\share\repo")
+        );
+    }
+
+    /// A Volume GUID path has no ordinary equivalent: stripping the prefix would
+    /// turn it into a relative path, so it must be returned untouched.
+    #[cfg(windows)]
+    #[test]
+    fn other_verbatim_prefixes_are_left_untouched() {
+        use std::path::PathBuf;
+
+        let volume = PathBuf::from(r"\\?\Volume{11111111-2222-3333-4444-555555555555}\repo");
+        assert_eq!(strip_verbatim_prefix(volume.clone()), volume);
+
+        let device = PathBuf::from(r"\\.\PIPE\name");
+        assert_eq!(strip_verbatim_prefix(device.clone()), device);
+
+        let ordinary = PathBuf::from(r"C:\repo\src");
+        assert_eq!(strip_verbatim_prefix(ordinary.clone()), ordinary);
+    }
+}
+
 
 #[cfg(test)]
 #[path = "git_tests.rs"]

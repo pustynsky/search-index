@@ -671,8 +671,8 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "lineEnding": {
                         "type": "string",
-                        "enum": ["preserve", "lf", "crlf"],
-                        "description": "Line endings written: 'preserve' (default for an existing file; error if the file is new), 'lf', 'crlf'. Newlines inside `content` never override it. Converting an existing file counts as a change. New file defaults to LF. Per-file for 'paths'. Response fields: see xray_help."
+                        "enum": ["preserve", "auto", "lf", "crlf"],
+                        "description": "Line endings written: 'auto' (default for a new file) follows the line ending Git would put in the working tree, so the file survives 'git add' under core.safecrlf; 'preserve' (default for an existing file; error if the file is new); 'lf'; 'crlf'. Newlines inside `content` never override it. Converting an existing file counts as a change. Per-file for 'paths'. Response fields: see xray_help."
                     }
                 },
                 "required": []

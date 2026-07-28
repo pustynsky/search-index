@@ -8991,7 +8991,7 @@ fn test_line_ending_new_file_defaults_to_lf() {
 
     assert!(!result.is_error, "{:?}", result);
     let parsed = parse_edit_response(&result);
-    assert_eq!(parsed["requestedLineEnding"], "lf");
+    assert_eq!(parsed["requestedLineEnding"], "auto");
     assert_eq!(parsed["resultLineEnding"], "LF");
     assert_eq!(parsed["lineEndingDecisionSource"], "fallback-lf");
     assert_pure_lf(&tmp.path().join("new.txt"));
@@ -9380,5 +9380,467 @@ fn test_line_ending_preserve_aborts_batch_before_any_write() {
     assert_eq!(std::fs::read(tmp.path().join("one.txt")).unwrap(), b"a\nb\n",
         "first file must be untouched when a later path aborts the batch");
     assert!(!tmp.path().join("missing.txt").exists());
+}
+
+
+// ─── `lineEnding: auto` — Git working-tree policy ────────────────────────
+
+/// Init a repo and neutralize every attribute and config source outside the
+/// repository `.gitattributes`, so the host machine cannot decide the outcome.
+/// A system-level gitattributes file is out of reach here — it is disabled only
+/// by `GIT_ATTR_NOSYSTEM`, which is process-global — but Git ships none.
+fn init_eol_repo(dir: &std::path::Path, config: &[(&str, &str)]) {
+    let run = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("git must be installed to run line-ending policy tests");
+        assert!(status.success(), "git {:?} failed", args);
+    };
+    run(&["init"]);
+    // An init template may have installed .git/info/attributes.
+    let _ = std::fs::remove_file(dir.join(".git").join("info").join("attributes"));
+    // Point the global attributes file at a known-empty one for this repo only.
+    let empty_attributes = dir.join(".git").join("empty-attributes");
+    std::fs::write(&empty_attributes, b"").unwrap();
+    let empty_attributes = empty_attributes.to_string_lossy().replace('\\', "/");
+    run(&["config", "core.attributesFile", &empty_attributes]);
+    run(&["config", "core.autocrlf", "false"]);
+    run(&["config", "core.eol", "native"]);
+    for (key, value) in config {
+        run(&["config", key, value]);
+    }
+}
+
+fn create_new_file_with_auto(tmp: &tempfile::TempDir) -> serde_json::Value {
+    let ctx = make_ctx(tmp.path());
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "new.txt",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "first\nsecond" }]
+    }));
+    assert!(!result.is_error, "{:?}", result);
+    parse_edit_response(&result)
+}
+
+#[test]
+fn test_auto_uses_gitattributes_eol_crlf() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* text eol=crlf\n").unwrap();
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "CRLF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "gitattributes-eol");
+    assert_pure_crlf(&tmp.path().join("new.txt"));
+}
+
+#[test]
+fn test_auto_uses_gitattributes_eol_lf_over_autocrlf() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.autocrlf", "true")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* text eol=lf\n").unwrap();
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "LF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "gitattributes-eol");
+    assert_pure_lf(&tmp.path().join("new.txt"));
+}
+
+#[test]
+fn test_auto_uses_autocrlf_with_text_auto() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.autocrlf", "true")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* text=auto\n").unwrap();
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "CRLF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "git-worktree-policy");
+    assert_pure_crlf(&tmp.path().join("new.txt"));
+}
+
+/// The most common Windows shape: no `.gitattributes` at all, `core.autocrlf=true`.
+#[test]
+fn test_auto_uses_autocrlf_without_gitattributes() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.autocrlf", "true")]);
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "CRLF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "git-worktree-policy");
+    assert_pure_crlf(&tmp.path().join("new.txt"));
+}
+
+#[test]
+fn test_auto_autocrlf_input_resolves_to_lf() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.autocrlf", "input")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* text=auto\n").unwrap();
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "LF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "git-worktree-policy");
+    assert_pure_lf(&tmp.path().join("new.txt"));
+}
+
+#[test]
+fn test_auto_core_eol_crlf_with_declared_text() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.eol", "crlf")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* text\n").unwrap();
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "CRLF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "git-worktree-policy");
+    assert_pure_crlf(&tmp.path().join("new.txt"));
+}
+
+/// Declared `text` with no explicit `core.eol` follows the platform default,
+/// which is CRLF on Windows and LF everywhere else.
+#[test]
+fn test_auto_declared_text_uses_platform_default() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* text\n").unwrap();
+
+    let parsed = create_new_file_with_auto(&tmp);
+    let path = tmp.path().join("new.txt");
+    assert_eq!(parsed["lineEndingDecisionSource"], "git-worktree-policy");
+    if cfg!(windows) {
+        assert_eq!(parsed["resultLineEnding"], "CRLF");
+        assert_pure_crlf(&path);
+    } else {
+        assert_eq!(parsed["resultLineEnding"], "LF");
+        assert_pure_lf(&path);
+    }
+}
+
+/// gitattributes(5) backwards compatibility: `crlf=input` maps to `eol=lf`,
+/// which must win over `core.autocrlf=true`. `git check-attr text eol` does not
+/// surface the legacy attribute, so this is a real divergence risk.
+#[test]
+fn test_auto_honors_legacy_crlf_input_attribute() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.autocrlf", "true")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* crlf=input\n").unwrap();
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "LF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "gitattributes-eol");
+    assert_pure_lf(&tmp.path().join("new.txt"));
+}
+
+/// Legacy `crlf` maps to `text`, so `core.eol` decides the working-tree format.
+#[test]
+fn test_auto_honors_legacy_crlf_set_attribute() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.eol", "crlf")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* crlf\n").unwrap();
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "CRLF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "git-worktree-policy");
+    assert_pure_crlf(&tmp.path().join("new.txt"));
+}
+
+/// A modern attribute suppresses the legacy one entirely: Git resolves
+/// `text=auto crlf=input` to `text=auto` with no `eol`, so `core.autocrlf=true`
+/// still yields CRLF. Mapping the legacy `input` here would produce LF and
+/// re-create the `core.safecrlf` failure this feature exists to prevent.
+#[test]
+fn test_auto_modern_attribute_suppresses_legacy_crlf() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.autocrlf", "true")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* text=auto crlf=input\n").unwrap();
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "CRLF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "git-worktree-policy");
+    assert_pure_crlf(&tmp.path().join("new.txt"));
+}
+
+
+/// Legacy `-crlf` maps to `-text`: Git converts nothing.
+#[test]
+fn test_auto_honors_legacy_negated_crlf_attribute() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.autocrlf", "true")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* -crlf\n").unwrap();
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "LF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "fallback-lf");
+    assert_pure_lf(&tmp.path().join("new.txt"));
+}
+
+/// The binary probe only reads the first 8 KiB, so a NUL further into a file
+/// has always been editable. The write-side NUL guard inspects request text
+/// only and must not retroactively reject such a file.
+#[test]
+fn test_existing_file_with_late_nul_stays_editable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("late-nul.txt");
+    let mut content = "a\n".repeat(5000); // 10 KB before the NUL
+    content.push_str("marker\u{0}tail\n");
+    std::fs::write(&path, content.as_bytes()).unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "late-nul.txt",
+        "edits": [{ "search": "marker", "replace": "MARKER" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let written = std::fs::read(&path).unwrap();
+    assert!(written.contains(&0), "the pre-existing NUL must survive the edit");
+    assert!(String::from_utf8_lossy(&written).contains("MARKER"));
+}
+
+
+/// A NUL byte would make the file unreadable by xray_edit and would flip Git's
+/// `text=auto` detection to binary, invalidating the resolved format.
+#[test]
+fn test_nul_in_content_is_rejected_before_any_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "binary.txt",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "a\u{0}b" }]
+    }));
+
+    assert!(result.is_error, "{:?}", result);
+    assert!(result.content[0].text.contains("NUL byte"), "{}", result.content[0].text);
+    assert!(!tmp.path().join("binary.txt").exists(), "nothing must be written");
+}
+
+
+/// `-text` means Git writes the bytes through untouched, so there is no policy
+/// to follow even with `core.autocrlf=true`.
+#[test]
+fn test_auto_binary_attribute_falls_back_to_lf() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.autocrlf", "true")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "*.txt -text\n").unwrap();
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "LF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "fallback-lf");
+    assert_pure_lf(&tmp.path().join("new.txt"));
+}
+
+/// A pattern that does not match the target must not leak into the decision.
+#[test]
+fn test_auto_ignores_non_matching_gitattributes_pattern() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[]);
+    std::fs::write(tmp.path().join(".gitattributes"), "*.ps1 text eol=crlf\n").unwrap();
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "LF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "fallback-lf");
+    assert_pure_lf(&tmp.path().join("new.txt"));
+}
+
+#[test]
+fn test_auto_no_policy_falls_back_to_lf() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[]);
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "LF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "fallback-lf");
+    assert_pure_lf(&tmp.path().join("new.txt"));
+}
+
+#[test]
+fn test_auto_outside_git_worktree_falls_back_to_lf() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "LF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "fallback-lf");
+    assert_pure_lf(&tmp.path().join("new.txt"));
+}
+
+/// Nested directories still resolve against the worktree root above them.
+#[test]
+fn test_auto_resolves_for_nested_new_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.autocrlf", "true")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* text=auto\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "deep/nested/new.txt",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "a\nb" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["resultLineEnding"], "CRLF");
+    assert_eq!(parsed["lineEndingDecisionSource"], "git-worktree-policy");
+    assert_pure_crlf(&tmp.path().join("deep").join("nested").join("new.txt"));
+}
+
+/// The write follows a directory symlink, so the policy must come from the
+/// repository the bytes actually land in — not from the lexical path.
+#[test]
+fn test_auto_follows_directory_symlink_into_another_repository() {
+    let lf_repo = tempfile::tempdir().unwrap();
+    init_eol_repo(lf_repo.path(), &[]);
+
+    let crlf_repo = tempfile::tempdir().unwrap();
+    init_eol_repo(crlf_repo.path(), &[("core.autocrlf", "true")]);
+    std::fs::write(crlf_repo.path().join(".gitattributes"), "* text=auto\n").unwrap();
+    let destination = crlf_repo.path().join("nested");
+    std::fs::create_dir(&destination).unwrap();
+
+    if !create_test_dir_symlink(&destination, &lf_repo.path().join("linked")) {
+        return; // Windows without the symlink privilege
+    }
+
+    let ctx = make_ctx(lf_repo.path());
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "linked/new.txt",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "a\nb" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(
+        parsed["resultLineEnding"], "CRLF",
+        "policy must come from the repository the symlink points into, not the one containing the link"
+    );
+    assert_eq!(parsed["lineEndingDecisionSource"], "git-worktree-policy");
+    assert_pure_crlf(&destination.join("new.txt"));
+}
+
+/// `auto` on an existing file is `preserve` — the repository policy must not
+/// silently rewrite a file that already has a format.
+#[test]
+fn test_auto_on_existing_file_preserves_format() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.autocrlf", "true")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* text=auto\n").unwrap();
+    let path = tmp.path().join("lf.txt");
+    std::fs::write(&path, b"a\nb\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "lf.txt",
+        "lineEnding": "auto",
+        "edits": [{ "search": "a", "replace": "A" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["requestedLineEnding"], "auto");
+    assert_eq!(parsed["lineEndingDecisionSource"], "preserve");
+    assert_eq!(parsed["resultLineEnding"], "LF");
+    assert_eq!(parsed["lineEndingChanged"], false);
+    assert_pure_lf(&path);
+}
+
+#[test]
+fn test_auto_dry_run_matches_real_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.autocrlf", "true")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* text=auto\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+    let args = json!({
+        "path": "new.txt",
+        "lineEnding": "auto",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "a\nb" }]
+    });
+
+    let mut preview_args = args.clone();
+    preview_args["dryRun"] = json!(true);
+    let preview = handle_xray_edit(&ctx, &preview_args);
+    assert!(!preview.is_error, "{:?}", preview);
+    let preview_parsed = parse_edit_response(&preview);
+    assert!(!tmp.path().join("new.txt").exists(), "dryRun must not write");
+
+    let real = handle_xray_edit(&ctx, &args);
+    assert!(!real.is_error, "{:?}", real);
+    let real_parsed = parse_edit_response(&real);
+
+    for field in ["requestedLineEnding", "resultLineEnding", "lineEndingDecisionSource"] {
+        assert_eq!(preview_parsed[field], real_parsed[field], "field {} diverged", field);
+    }
+    assert_eq!(real_parsed["resultLineEnding"], "CRLF");
+    assert_pure_crlf(&tmp.path().join("new.txt"));
+}
+
+/// An explicit format still wins over the repository policy.
+#[test]
+fn test_explicit_lf_overrides_repository_policy() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.autocrlf", "true")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* text=auto\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "new.txt",
+        "lineEnding": "lf",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "a\nb" }]
+    }));
+
+    assert!(!result.is_error, "{:?}", result);
+    let parsed = parse_edit_response(&result);
+    assert_eq!(parsed["lineEndingDecisionSource"], "explicit");
+    assert_pure_lf(&tmp.path().join("new.txt"));
+}
+
+/// The acceptance case the whole feature exists for: a file created by
+/// xray_edit must survive `git add` under core.safecrlf without any override.
+#[test]
+fn test_auto_created_file_passes_git_add_under_safecrlf() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.autocrlf", "true"), ("core.safecrlf", "true")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* text=auto\n").unwrap();
+
+    let parsed = create_new_file_with_auto(&tmp);
+    assert_eq!(parsed["resultLineEnding"], "CRLF");
+
+    let output = std::process::Command::new("git")
+        .current_dir(tmp.path())
+        .args(["add", "new.txt"])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git add must succeed without disabling safecrlf: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// Control for the test above: the same repository rejects an LF file, which is
+/// the failure the `auto` policy removes.
+#[test]
+fn test_safecrlf_still_rejects_an_lf_file_in_a_crlf_repository() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_eol_repo(tmp.path(), &[("core.autocrlf", "true"), ("core.safecrlf", "true")]);
+    std::fs::write(tmp.path().join(".gitattributes"), "* text=auto\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "forced.txt",
+        "lineEnding": "lf",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "a\nb" }]
+    }));
+    assert!(!result.is_error, "{:?}", result);
+
+    let output = std::process::Command::new("git")
+        .current_dir(tmp.path())
+        .args(["add", "forced.txt"])
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "an LF file in this repository is exactly what safecrlf is meant to reject"
+    );
 }
 

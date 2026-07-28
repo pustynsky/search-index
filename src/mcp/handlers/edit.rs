@@ -38,6 +38,8 @@ struct EditRequestOptions {
 enum LineEndingRequest {
     /// Keep the existing format. Rejected when the file does not exist yet.
     Preserve,
+    /// Keep the existing format; for a new file follow the Git working-tree policy.
+    Auto,
     Lf,
     Crlf,
 }
@@ -46,10 +48,11 @@ impl LineEndingRequest {
     fn parse(value: &str) -> Result<Self, String> {
         match value.to_ascii_lowercase().as_str() {
             "preserve" => Ok(Self::Preserve),
+            "auto" => Ok(Self::Auto),
             "lf" => Ok(Self::Lf),
             "crlf" => Ok(Self::Crlf),
             _ => Err(format!(
-                "Parameter 'lineEnding' must be one of \"preserve\", \"lf\", \"crlf\"; got \"{}\".",
+                "Parameter 'lineEnding' must be one of \"preserve\", \"auto\", \"lf\", \"crlf\"; got \"{}\".",
                 value
             )),
         }
@@ -58,6 +61,7 @@ impl LineEndingRequest {
     fn as_str(self) -> &'static str {
         match self {
             Self::Preserve => "preserve",
+            Self::Auto => "auto",
             Self::Lf => "lf",
             Self::Crlf => "crlf",
         }
@@ -787,6 +791,21 @@ fn eol_name(line_ending: &str) -> &'static str {
     if line_ending == "\r\n" { "CRLF" } else { "LF" }
 }
 
+/// Reject a NUL byte in text the request asks to write. xray_edit refuses to
+/// READ a binary file, so it must not introduce one; a NUL would also flip
+/// Git's `text=auto` detection to binary and invalidate the format `auto`
+/// resolved. Only request-supplied text is checked — bytes already present in
+/// the file are left alone, so no previously-accepted edit starts failing.
+fn reject_nul_in_written_text(value: &str, label: &str) -> Result<(), String> {
+    match value.find('\0') {
+        Some(offset) => Err(format!(
+            "{} contains a NUL byte at offset {}; xray_edit writes text files only.",
+            label, offset
+        )),
+        None => Ok(()),
+    }
+}
+
 /// Emit the line-ending decision. `lineEnding` stays as an alias of
 /// `resultLineEnding` for clients that already read it. `bytes_changed` keeps
 /// the report byte-truthful: a file with no line terminators is byte-identical
@@ -799,19 +818,16 @@ fn apply_line_ending_fields(
 ) {
     let result = eol_name(target.line_ending);
     let original = target.original_line_ending.map(eol_name);
-    let (requested_name, source) = match requested {
-        Some(explicit @ (LineEndingRequest::Lf | LineEndingRequest::Crlf)) => {
-            (explicit.as_str(), "explicit")
-        }
-        Some(LineEndingRequest::Preserve) => ("preserve", "preserve"),
-        None if target.file_existed => ("preserve", "default-preserve"),
-        None => ("lf", "fallback-lf"),
+    let requested_name = match requested {
+        Some(value) => value.as_str(),
+        None if target.file_existed => "preserve",
+        None => "auto",
     };
     response["lineEnding"] = json!(result);
     response["requestedLineEnding"] = json!(requested_name);
     response["originalLineEnding"] = json!(original);
     response["resultLineEnding"] = json!(result);
-    response["lineEndingDecisionSource"] = json!(source);
+    response["lineEndingDecisionSource"] = json!(target.line_ending_source);
     response["lineEndingChanged"] =
         json!(bytes_changed && original.is_some_and(|o| o != result));
 }
@@ -828,6 +844,68 @@ fn line_ending_only_diff(target: &PreparedEditTarget, bytes_changed: bool) -> Op
         eol_name(original),
         eol_name(target.line_ending)
     ))
+}
+
+/// Apply the caller's `lineEnding` request and record how it was decided.
+/// Runs after mixed-EOL rejection and after `normalized_content` was derived
+/// from the format actually on disk, so normalization cannot be corrupted.
+fn resolve_line_ending_request(
+    target: &mut PreparedEditTarget,
+    requested: Option<LineEndingRequest>,
+    path_str: &str,
+) -> Result<(), String> {
+    match requested {
+        Some(LineEndingRequest::Lf) => {
+            target.line_ending = "\n";
+            target.line_ending_source = "explicit";
+        }
+        Some(LineEndingRequest::Crlf) => {
+            target.line_ending = "\r\n";
+            target.line_ending_source = "explicit";
+        }
+        Some(LineEndingRequest::Preserve) => {
+            if !target.file_existed {
+                return Err(format!(
+                    "Parameter 'lineEnding' is \"preserve\", but '{}' does not exist yet — there is no format to preserve. Use \"auto\", \"lf\" or \"crlf\".",
+                    path_str
+                ));
+            }
+            target.line_ending_source = "preserve";
+        }
+        // An existing file already carries the format to keep, so `auto` only
+        // has work to do when the file is being created.
+        Some(LineEndingRequest::Auto) if target.file_existed => {
+            target.line_ending_source = "preserve";
+        }
+        None if target.file_existed => {
+            target.line_ending_source = "default-preserve";
+        }
+        Some(LineEndingRequest::Auto) | None => apply_worktree_line_ending(target),
+    }
+    Ok(())
+}
+
+/// New file with no explicit format: follow the line ending Git would put in
+/// the working tree, so the result survives `git add` under `core.safecrlf`.
+/// Falls back to LF whenever Git has no opinion — which is also the behavior
+/// outside a worktree and on machines without Git.
+fn apply_worktree_line_ending(target: &mut PreparedEditTarget) {
+    match crate::git::worktree_line_ending(&target.write_path) {
+        Some((eol, source)) => {
+            target.line_ending = match eol {
+                crate::git::WorktreeEol::Crlf => "\r\n",
+                crate::git::WorktreeEol::Lf => "\n",
+            };
+            target.line_ending_source = match source {
+                crate::git::EolSource::GitattributesEol => "gitattributes-eol",
+                crate::git::EolSource::WorktreePolicy => "git-worktree-policy",
+            };
+        }
+        None => {
+            target.line_ending = "\n";
+            target.line_ending_source = "fallback-lf";
+        }
+    }
 }
 
 // Test-only injection point for simulating a filesystem mutation between the initial
@@ -1072,6 +1150,8 @@ struct PreparedEditTarget {
     /// Format detected on disk before any caller override. `None` for a new file
     /// and for an existing file with no line terminators.
     original_line_ending: Option<&'static str>,
+    /// How `line_ending` was decided; echoed as `lineEndingDecisionSource`.
+    line_ending_source: &'static str,
     file_existed: bool,
     symlink_followed: bool,
     hard_link_count: u64,
@@ -1290,17 +1370,7 @@ fn read_and_validate_requested_file(
     ensure_git_internal_edit_allowed(&logical_path, path_str, allow_git_internals)?;
     let mut target = read_and_validate_file(server_dir, path_str, dry_run, allow_break_hard_links)?;
     ensure_git_internal_edit_allowed(&target.write_path, path_str, allow_git_internals)?;
-    match requested_line_ending {
-        Some(LineEndingRequest::Lf) => target.line_ending = "\n",
-        Some(LineEndingRequest::Crlf) => target.line_ending = "\r\n",
-        Some(LineEndingRequest::Preserve) if !target.file_existed => {
-            return Err(format!(
-                "Parameter 'lineEnding' is \"preserve\", but '{}' does not exist yet — there is no format to preserve. Use \"lf\" or \"crlf\".",
-                path_str
-            ));
-        }
-        Some(LineEndingRequest::Preserve) | None => {}
-    }
+    resolve_line_ending_request(&mut target, requested_line_ending, path_str)?;
     Ok(target)
 }
 
@@ -1327,6 +1397,7 @@ fn read_and_validate_file(
             source_bytes: Vec::new(),
             line_ending: "\n",
             original_line_ending: None,
+            line_ending_source: "fallback-lf",
             file_existed: false,
             symlink_followed: false,
             hard_link_count: 0,
@@ -1398,6 +1469,7 @@ fn read_and_validate_file(
         normalized_content,
         line_ending,
         original_line_ending,
+        line_ending_source: "default-preserve",
         file_existed: true,
         symlink_followed,
         hard_link_count,
@@ -3088,6 +3160,7 @@ fn parse_line_operations(ops_array: &[Value]) -> Result<Vec<LineOperation>, Stri
             .ok_or_else(|| format!("operations[{}]: missing or invalid 'content'", i))?
             .to_string();
         let content = normalize_crlf(&content);
+        reject_nul_in_written_text(&content, &format!("operations[{}]: 'content'", i))?;
 
         if start_line == 0 {
             return Err(format!("operations[{}]: startLine must be >= 1", i));
@@ -3506,9 +3579,15 @@ fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
         // instead of the silent drop / misleading downstream error.
         let search = expect_string_field(obj, "search", i)?.map(|s| normalize_crlf(&s));
         let replace = expect_string_field(obj, "replace", i)?.map(|s| normalize_crlf(&s));
+        if let Some(value) = replace.as_deref() {
+            reject_nul_in_written_text(value, &format!("edits[{}]: 'replace'", i))?;
+        }
         let insert_after = expect_string_field(obj, "insertAfter", i)?.map(|s| normalize_crlf(&s));
         let insert_before = expect_string_field(obj, "insertBefore", i)?.map(|s| normalize_crlf(&s));
         let content = expect_string_field(obj, "content", i)?.map(|s| normalize_crlf(&s));
+        if let Some(value) = content.as_deref() {
+            reject_nul_in_written_text(value, &format!("edits[{}]: 'content'", i))?;
+        }
         let occurrence = expect_u64_field(obj, "occurrence", i)?.unwrap_or(0) as usize;
         let expected_context = expect_string_field(obj, "expectedContext", i)?.map(|s| normalize_crlf(&s));
         let expected_match_count = expect_u64_field(obj, "expectedMatchCount", i)?.map(|value| value as usize);
