@@ -1247,7 +1247,7 @@ fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let t = Instant::now();
     let current_branch = match run_git_command(repo, &["rev-parse", "--abbrev-ref", "HEAD"]) {
         Ok(b) => b,
-        Err(e) => return ToolCallResult::error(format!("Failed to get current branch: {}", e)),
+        Err(e) => return ToolCallResult::error(e),
     };
     let current_branch_ms = t.elapsed().as_secs_f64() * 1000.0;
 
@@ -1416,11 +1416,16 @@ fn run_git_command(repo: &str, args: &[&str]) -> Result<String, String> {
         .args(args)
         .current_dir(repo)
         .output()
-        .map_err(|e| format!("Failed to run git: {}", e))?;
+        .map_err(|e| git::git_spawn_error(repo, &e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git {} failed: {}", args.join(" "), stderr.trim()));
+        return Err(git::git_command_error(
+            repo,
+            &args.join(" "),
+            &stderr,
+            output.status.code(),
+        ));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())

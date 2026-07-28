@@ -1316,3 +1316,207 @@ fn test_shallow_fingerprint_resolves_path_for_real_worktree() {
     );
 }
 
+
+#[test]
+fn test_git_spawn_error_names_the_fix_when_the_path_is_fine() {
+    let err = std::io::Error::new(std::io::ErrorKind::NotFound, "program not found");
+    let msg = git_spawn_error(".", &err);
+    assert!(msg.contains("git is not available"), "got: {msg}");
+    assert!(msg.contains("PATH"), "message must carry the remedy, got: {msg}");
+}
+
+#[test]
+fn test_git_spawn_error_blames_the_path_not_the_binary() {
+    let err = std::io::Error::new(std::io::ErrorKind::NotFound, "program not found");
+    let msg = git_spawn_error("/nonexistent/repo/path/xyz", &err);
+    assert!(
+        msg.starts_with("Not a git repository: '/nonexistent/repo/path/xyz'"),
+        "an unusable working dir must not be reported as a missing git, got: {msg}"
+    );
+    assert!(!msg.contains("PATH"), "got: {msg}");
+}
+
+#[test]
+fn test_git_spawn_error_without_repo_falls_back_to_binary_diagnosis() {
+    let err = std::io::Error::new(std::io::ErrorKind::NotFound, "program not found");
+    let msg = git_spawn_error("", &err);
+    assert!(msg.contains("git is not available"), "got: {msg}");
+}
+
+#[test]
+fn test_git_spawn_error_stays_neutral_when_the_failure_is_inconclusive() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let err = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "access is denied");
+    let msg = git_spawn_error(&dir.path().display().to_string(), &err);
+    assert!(msg.starts_with("Failed to start git in "), "got: {msg}");
+    assert!(!msg.contains("Install git"), "a denied spawn is not a missing git, got: {msg}");
+    assert!(!msg.contains("Not a git repository"), "got: {msg}");
+}
+
+#[test]
+fn test_git_command_error_maps_missing_repo_to_actionable_message() {
+    let msg = git_command_error(
+        "C:/tmp/not-a-repo",
+        "rev-parse --abbrev-ref HEAD",
+        "fatal: not a git repository (or any of the parent directories): .git\n",
+        Some(128),
+    );
+    assert!(
+        msg.starts_with("Not a git repository: 'C:/tmp/not-a-repo'"),
+        "got: {msg}"
+    );
+    assert!(!msg.contains("fatal:"), "raw git stderr must not leak, got: {msg}");
+}
+
+#[test]
+fn test_git_command_error_keeps_subcommand_context() {
+    let msg = git_command_error("C:/repo", "blame", "fatal: no such path 'nope.rs'\n", Some(128));
+    assert_eq!(msg, "git blame failed: fatal: no such path 'nope.rs'");
+}
+
+#[test]
+fn test_git_command_error_without_subcommand() {
+    let msg = git_command_error("C:/repo", "", "boom", Some(128));
+    assert_eq!(msg, "git command failed: boom");
+}
+
+#[test]
+fn test_spawn_and_stderr_paths_agree_on_the_repo_message() {
+    let err = std::io::Error::new(std::io::ErrorKind::NotFound, "program not found");
+    assert_eq!(
+        git_spawn_error("/nonexistent/repo/path/xyz", &err),
+        git_command_error(
+            "/nonexistent/repo/path/xyz",
+            "rev-parse",
+            "fatal: not a git repository (or any of the parent directories): .git",
+            Some(128)
+        )
+    );
+}
+
+#[test]
+fn test_run_git_reports_non_repository_directory() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let mut cmd = Command::new("git");
+    cmd.current_dir(dir.path()).args(["rev-parse", "--abbrev-ref", "HEAD"]);
+
+    let err = super::run_git(&mut cmd).expect_err("a non-repository directory must fail");
+    assert_eq!(err, not_a_git_repo_error(&dir.path().display().to_string()));
+}
+
+#[test]
+fn test_run_git_names_the_failing_subcommand() {
+    let repo = make_real_git_repo();
+    let mut cmd = Command::new("git");
+    cmd.current_dir(repo.path()).args(["log", "--", "no-such-file-here.txt", "--bogus-flag"]);
+
+    let err = super::run_git(&mut cmd).expect_err("a bad flag must fail");
+    assert!(err.starts_with("git log failed: "), "got: {err}");
+}
+
+#[test]
+fn test_git_command_error_ignores_a_path_that_quotes_the_fatal_text() {
+    let repo = make_real_git_repo();
+    let msg = git_command_error(
+        &repo.path().display().to_string(),
+        "blame",
+        "fatal: no such path 'not a git repository' in HEAD",
+        Some(128),
+    );
+    assert_eq!(
+        msg,
+        "git blame failed: fatal: no such path 'not a git repository' in HEAD"
+    );
+}
+
+#[test]
+fn test_git_command_error_detects_non_repository_without_english_stderr() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path().display().to_string();
+    let msg = git_command_error(&repo, "rev-parse", "fatal: ce n'est pas un dépôt git", Some(128));
+    assert_eq!(msg, not_a_git_repo_error(&repo));
+}
+
+#[test]
+fn test_git_command_error_skips_the_probe_for_non_fatal_exits() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path().display().to_string();
+    // `git config --get-regexp` exits 1 for "key not set" — a routine outcome
+    // read_eol_config relies on, not a broken `repo` argument.
+    let msg = git_command_error(&repo, "config", "", Some(1));
+    assert_eq!(msg, "git config failed: ");
+}
+
+#[test]
+fn test_git_command_error_does_not_claim_a_bare_repository_is_no_repository() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let status = Command::new("git")
+        .args(["init", "--bare", "-q"])
+        .current_dir(dir.path())
+        .env_remove("GIT_DIR")
+        .status()
+        .expect("git init --bare");
+    assert!(status.success(), "git init --bare failed");
+
+    // Asserted directly so the test cannot pass vacuously through the wrapper.
+    assert!(
+        !no_repository_below(dir.path(), false),
+        "a bare repository must never be reported as a non-repository"
+    );
+
+    let msg = git_command_error(
+        &dir.path().display().to_string(),
+        "log",
+        "fatal: quelque chose a échoué",
+        Some(128),
+    );
+    assert_eq!(msg, "git log failed: fatal: quelque chose a échoué");
+}
+
+#[test]
+fn test_no_repository_below_accepts_a_linked_worktree() {
+    let parent = make_real_git_repo();
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(parent.path())
+            .env_remove("GIT_DIR")
+            .env("GIT_AUTHOR_NAME", "Test Author")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test Author")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {:?} failed", args);
+    };
+    run(&["commit", "-q", "--allow-empty", "-m", "init"]);
+
+    let wt_path = parent.path().join("linked-worktree");
+    let status = Command::new("git")
+        .args(["worktree", "add", "-q", "-b", "probe-branch"])
+        .arg(&wt_path)
+        .current_dir(parent.path())
+        .env_remove("GIT_DIR")
+        .status()
+        .expect("git worktree add");
+    assert!(status.success(), "git worktree add failed");
+
+    // A worktree's `.git` is a FILE; the walk must still count it as a repo.
+    assert!(
+        !no_repository_below(&wt_path, false),
+        "a linked worktree must never be reported as a non-repository"
+    );
+}
+
+#[test]
+fn test_git_dir_override_suppresses_the_filesystem_probe() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    assert!(
+        no_repository_below(dir.path(), false),
+        "the walk itself sees no repository here"
+    );
+    assert!(
+        !no_repository_below(dir.path(), true),
+        "GIT_DIR redirects discovery, so the walk must not return a verdict"
+    );
+}

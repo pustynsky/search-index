@@ -337,6 +337,47 @@ fn test_branch_status_bad_repo() {
     let args = json!({ "repo": "/nonexistent/repo/path/xyz" });
     let result = handle_branch_status(&ctx, &args);
     assert!(result.is_error, "Should fail with bad repo path");
+    assert!(
+        result.content[0].text.starts_with("Not a git repository: '/nonexistent/repo/path/xyz'"),
+        "got: {}",
+        result.content[0].text
+    );
+    assert!(
+        !result.content[0].text.contains("Failed to get current branch"),
+        "the redundant prefix must be gone, got: {}",
+        result.content[0].text
+    );
+}
+
+#[test]
+fn test_branch_status_non_repo_directory_blames_the_repo_argument() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path().display().to_string();
+    let ctx = make_git_test_ctx();
+
+    let result = handle_branch_status(&ctx, &json!({ "repo": repo }));
+
+    assert!(result.is_error, "a directory without .git must fail");
+    assert_eq!(
+        result.content[0].text,
+        format!(
+            "Not a git repository: '{}'. xray_git_* tools need the 'repo' argument to point at a git working tree.",
+            repo
+        )
+    );
+}
+
+#[test]
+fn test_git_history_and_branch_status_agree_on_non_repo_wording() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path().display().to_string();
+    let ctx = make_git_test_ctx();
+
+    let history = handle_git_history(&ctx, &json!({ "repo": repo, "file": "a.rs" }), false);
+    let status = handle_branch_status(&ctx, &json!({ "repo": repo }));
+
+    assert!(history.is_error && status.is_error);
+    assert_eq!(history.content[0].text, status.content[0].text);
 }
 
 #[test]
