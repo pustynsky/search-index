@@ -1249,6 +1249,38 @@ On Windows, edits to an existing file preserve named NTFS data streams, includin
 | `allowGitInternals` | boolean | false | Permit writes inside `.git/` |
 | `allowBreakHardLinks` | boolean | false | Permit an edit that would break an existing hard link |
 
+### Line endings
+
+| Parameter | Type | Default | Description |
+| --- | --- | --- | --- |
+| `lineEnding` | string | `preserve` for an existing file, LF for a new one | `preserve` \| `lf` \| `crlf`. Resolved per file for `paths` |
+
+`preserve` keeps the format detected on disk. It is an error for a file that
+does not exist yet, because there is nothing to preserve — pass `lf` or `crlf`
+instead. `\n` and `\r\n` inside `content` never override the parameter: input is
+always parsed into logical lines and re-serialized with the selected format.
+Files with mixed LF and CRLF are still rejected before any write.
+
+Asking for a format the file does not have is a real change — the file is
+rewritten, `resultHash` differs from `sourceHash`, and the unified diff (which
+is computed over LF-normalized text and would otherwise render as empty) is
+replaced by `(line endings: LF -> CRLF)`. A conversion with no text edit is
+`operations: []` plus `lineEnding`. A file with no line terminators at all is
+byte-identical under either format, so it reports `originalLineEnding: null`,
+`lineEndingChanged: false` and `writeStatus: "unchanged"`.
+
+| Response field | Description |
+| --- | --- |
+| `lineEnding` | Alias of `resultLineEnding`, kept for existing clients |
+| `requestedLineEnding` | The requested value, or the default that was applied |
+| `originalLineEnding` | `LF` / `CRLF` detected on disk; `null` for a new file or a file with no line terminators |
+| `resultLineEnding` | `LF` / `CRLF` actually written or planned |
+| `lineEndingDecisionSource` | `explicit` (`lf`/`crlf` requested), `preserve` (requested), `default-preserve` (omitted, existing file), `fallback-lf` (omitted, new file) |
+| `lineEndingChanged` | Whether the byte-level line-ending format actually changed |
+
+All six fields are present on `dryRun` responses too, and report the same
+decision the subsequent real write makes.
+
 ### Response Fields
 
 | Response field     | When present                              | Description                                              |
