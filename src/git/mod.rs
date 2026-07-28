@@ -168,15 +168,121 @@ fn add_date_args(cmd: &mut Command, filter: &DateFilter) {
     }
 }
 
+/// Missing directory and "no .git here" need the identical fix, so they share
+/// one sentence.
+fn not_a_git_repo_error(repo: &str) -> String {
+    format!(
+        "Not a git repository: '{}'. xray_git_* tools need the 'repo' argument to point at a git working tree.",
+        repo
+    )
+}
+
+pub(crate) fn git_spawn_error(repo: &str, err: &std::io::Error) -> String {
+    let repo = if repo.is_empty() { "." } else { repo };
+    // A missing binary and an unusable working directory produce the same spawn
+    // failure, so only a conclusive verdict about the path may pick a message.
+    match Path::new(repo).metadata() {
+        Ok(meta) if !meta.is_dir() => not_a_git_repo_error(repo),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => not_a_git_repo_error(repo),
+        Err(_) => format!("Failed to start git in '{}': {}", repo, err),
+        Ok(_) if err.kind() == std::io::ErrorKind::NotFound => format!(
+            "git is not available: {}. Install git and make sure it is in PATH.",
+            err
+        ),
+        Ok(_) => format!("Failed to start git in '{}': {}", repo, err),
+    }
+}
+
+/// Filesystem answer to "is there a repository here", used when git's stderr is
+/// localized and the English matcher cannot see it.
+fn no_repository_at(repo: &str) -> bool {
+    no_repository_below(Path::new(repo), std::env::var_os("GIT_DIR").is_some())
+}
+
+/// `Ok(false)` is the only conclusive "nothing here"; an I/O or ACL failure means
+/// the filesystem cannot answer.
+fn conclusively_absent(path: &Path) -> bool {
+    matches!(path.try_exists(), Ok(false))
+}
+
+/// `git_dir_override` is a parameter rather than an inner `var_os` read so tests
+/// can cover the GIT_DIR case without mutating process environment.
+fn no_repository_below(repo: &Path, git_dir_override: bool) -> bool {
+    // GIT_DIR redirects discovery, so a filesystem walk cannot answer.
+    if git_dir_override {
+        return false;
+    }
+    let Ok(start) = repo.canonicalize() else {
+        return false;
+    };
+    // A bare repo IS its own git dir, so it has no `.git` to find below.
+    if !conclusively_absent(&start.join("HEAD")) && !conclusively_absent(&start.join("objects")) {
+        return false;
+    }
+    let mut dir = start.as_path();
+    loop {
+        // Anything but a proven absence — a gitfile worktree, a submodule, an
+        // unreadable ancestor — means we must not claim there is no repository.
+        if !conclusively_absent(&dir.join(".git")) {
+            return false;
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return true,
+        }
+    }
+}
+
+pub(crate) fn git_command_error(
+    repo: &str,
+    command: &str,
+    stderr: &str,
+    exit_code: Option<i32>,
+) -> String {
+    let stderr = stderr.trim();
+    // Anchored: an unanchored match fires on any diagnostic that echoes a
+    // user-supplied path. 128 is git's fatal exit, so a routine non-zero status
+    // never pays for the probe.
+    let not_a_repo = stderr
+        .lines()
+        .any(|line| line.trim_start().starts_with("fatal: not a git repository"))
+        || (exit_code == Some(128) && no_repository_at(repo));
+    if not_a_repo {
+        return not_a_git_repo_error(repo);
+    }
+    let command = if command.is_empty() { "command" } else { command };
+    format!("git {} failed: {}", command, stderr)
+}
+
+/// Working directory of a builder, defaulting to the inherited process cwd.
+fn command_repo(cmd: &Command) -> String {
+    cmd.get_current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| ".".to_string())
+}
+
 /// Run a git command and return stdout as String.
 fn run_git(cmd: &mut Command) -> Result<String, String> {
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to execute git: {}. Is git installed and in PATH?", e))?;
+    let output = match cmd.output() {
+        Ok(output) => output,
+        Err(e) => return Err(git_spawn_error(&command_repo(cmd), &e)),
+    };
 
     if !output.status.success() {
+        // Only the subcommand: the full arg list carries the RECORD_SEP/FIELD_SEP
+        // control chars from --format and is unreadable in an error string.
+        let subcommand = cmd
+            .get_args()
+            .next()
+            .map(|a| a.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git command failed: {}", stderr.trim()));
+        return Err(git_command_error(
+            &command_repo(cmd),
+            &subcommand,
+            &stderr,
+            output.status.code(),
+        ));
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
