@@ -1,0 +1,7 @@
+<ServiceConfiguration>
+  <MaxRetries>3</MaxRetries>
+  <RetryDelayMs>250</RetryDelayMs>
+  <CacheEntryTtlSeconds>900</CacheEntryTtlSeconds>
+  <TokenIssuer>example-local</TokenIssuer>
+  <InventoryEndpoint>http://localhost/inventory</InventoryEndpoint>
+</ServiceConfiguration>

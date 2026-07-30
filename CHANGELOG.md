@@ -3,6 +3,8 @@
 
 ## Unreleased
 
+- **Added a checked `xray_grep` relevance evaluation harness without changing production ranking.** A versioned 18-file neutral corpus and 40 graded queries now measure NDCG@10 and MRR@10 ranking quality, grade-3 Success@1, and a Recall@50 matching canary through the real MCP dispatch path. CI checks all-query and 35-query scorer-only aggregates, per-class quality, query-level rankings, and corpus bytes/extensions against a deterministic TF-IDF baseline; an explicit ignored test writes machine-local latency and query details under `target/relevance/`.
+
 - **`xray_grep` now ignores duplicate search terms instead of treating them as hidden ranking boosts.** Case-equivalent token, substring, phrase, and token-regex terms are deduplicated while line-regex patterns use exact-string identity, preserving meaningful case and whitespace differences. Duplicate inputs no longer inflate scores or occurrence counts, distort `mode=and`, or change `autoBalance` caps; the first unique spelling remains in diagnostics. If phrase deduplication leaves one effective phrase, `searchMode` reports `phrase` rather than a multi-phrase mode.
 
 - **`xray_grep` now returns deterministic results when relevance scores tie.** Token and substring results are ordered by path after TF-IDF, and `autoBalance` uses the same path tie-break before applying its cap, so equal-score and zero-IDF queries return a stable top-k across runs. Results with different scores keep their existing relevance order.

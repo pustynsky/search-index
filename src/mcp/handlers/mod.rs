@@ -2831,6 +2831,10 @@ mod tests;
 mod tests_grep;
 
 #[cfg(test)]
+#[path = "relevance_eval_tests.rs"]
+mod relevance_eval_tests;
+
+#[cfg(test)]
 #[path = "handlers_tests_line_regex.rs"]
 mod tests_line_regex;
 

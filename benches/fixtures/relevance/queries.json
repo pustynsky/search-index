@@ -1,0 +1,450 @@
+{
+  "schemaVersion": 1,
+  "corpusVersion": "xray-relevance-v1",
+  "extensions": ["rs", "cs", "ts", "json", "xml", "md"],
+  "globalNegatives": [],
+  "queries": [
+    {
+      "id": "exact-order-processor",
+      "queryClass": "exact_identifier",
+      "request": { "terms": ["OrderProcessor"], "substring": false },
+      "judgments": [
+        { "path": "src/order_processor.rs", "grade": 3, "reason": "primary implementation" },
+        { "path": "tests/order_processor_tests.rs", "grade": 2, "reason": "direct tests" },
+        { "path": "src/OrderController.cs", "grade": 2, "reason": "direct API consumer" },
+        { "path": "legacy/order_adapter.rs", "grade": 1, "reason": "legacy consumer" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "weak generated type binding" }
+      ]
+    },
+    {
+      "id": "exact-inventory-manager",
+      "queryClass": "exact_identifier",
+      "request": { "terms": ["InventoryManager"], "substring": false },
+      "judgments": [
+        { "path": "src/inventory_manager.rs", "grade": 3, "reason": "primary implementation" },
+        { "path": "src/order_processor.rs", "grade": 2, "reason": "direct consumer" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "weak generated type binding" }
+      ]
+    },
+    {
+      "id": "exact-retry-policy",
+      "queryClass": "exact_identifier",
+      "request": { "terms": ["RetryPolicy"], "substring": false },
+      "judgments": [
+        { "path": "src/retry_policy.rs", "grade": 3, "reason": "primary implementation" },
+        { "path": "src/order_processor.rs", "grade": 2, "reason": "direct consumer" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "weak generated type binding" }
+      ]
+    },
+    {
+      "id": "exact-config-loader",
+      "queryClass": "exact_identifier",
+      "request": { "terms": ["ConfigLoader"], "substring": false },
+      "judgments": [
+        { "path": "src/config_loader.rs", "grade": 3, "reason": "primary implementation" },
+        { "path": "tests/config_loader_tests.rs", "grade": 2, "reason": "direct tests" }
+      ]
+    },
+    {
+      "id": "exact-session-token-store",
+      "queryClass": "exact_identifier",
+      "request": { "terms": ["SessionTokenStore"], "substring": false },
+      "judgments": [
+        { "path": "src/session_token_store.rs", "grade": 3, "reason": "primary implementation" },
+        { "path": "tests/session_token_store_tests.rs", "grade": 2, "reason": "direct tests" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "weak generated type binding" }
+      ]
+    },
+
+    {
+      "id": "partial-process-order-snake",
+      "queryClass": "partial_identifier",
+      "request": { "terms": ["process_order"], "substring": true },
+      "judgments": [
+        { "path": "src/order_processor.rs", "grade": 3, "reason": "primary implementation" },
+        { "path": "tests/order_processor_tests.rs", "grade": 2, "reason": "direct tests" },
+        { "path": "legacy/order_adapter.rs", "grade": 1, "reason": "legacy variant" }
+      ]
+    },
+    {
+      "id": "partial-process-order-camel",
+      "queryClass": "partial_identifier",
+      "request": { "terms": ["processorder"], "substring": true },
+      "judgments": [
+        { "path": "src/OrderController.cs", "grade": 3, "reason": "camel-case API implementation" }
+      ]
+    },
+    {
+      "id": "partial-reserve-inventory",
+      "queryClass": "partial_identifier",
+      "request": { "terms": ["reserve_inven"], "substring": true },
+      "judgments": [
+        { "path": "src/inventory_manager.rs", "grade": 3, "reason": "primary implementation" },
+        { "path": "src/order_processor.rs", "grade": 2, "reason": "direct caller" }
+      ]
+    },
+    {
+      "id": "partial-cache-entry",
+      "queryClass": "partial_identifier",
+      "request": { "terms": ["cache_entry"], "substring": true },
+      "judgments": [
+        { "path": "src/cache_store.rs", "grade": 3, "reason": "cache implementation" },
+        { "path": "src/config_loader.rs", "grade": 2, "reason": "runtime setting" }
+      ]
+    },
+    {
+      "id": "partial-session-token",
+      "queryClass": "partial_identifier",
+      "request": { "terms": ["session_token"], "substring": true },
+      "judgments": [
+        { "path": "src/session_token_store.rs", "grade": 3, "reason": "primary implementation" },
+        { "path": "tests/session_token_store_tests.rs", "grade": 2, "reason": "direct tests" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "weak generated token binding" }
+      ]
+    },
+
+    {
+      "id": "multi-order-inventory",
+      "queryClass": "multi_term_concept",
+      "request": { "terms": ["order", "inventory"], "mode": "and" },
+      "judgments": [
+        { "path": "src/order_processor.rs", "grade": 3, "reason": "coordinates order and inventory" },
+        { "path": "src/inventory_manager.rs", "grade": 2, "reason": "inventory operation with order id" },
+        { "path": "tests/order_processor_tests.rs", "grade": 2, "reason": "direct order and inventory test" },
+        { "path": "src/order_client.ts", "grade": 2, "reason": "order request carries inventory endpoint" },
+        { "path": "docs/operations.md", "grade": 2, "reason": "operational flow" },
+        { "path": "generated/order_models.rs", "grade": 1, "reason": "weak generated model context" },
+        { "path": "docs/troubleshooting.md", "grade": 1, "reason": "separate order and inventory diagnostics" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "weak generated order and inventory binding" }
+      ]
+    },
+    {
+      "id": "multi-retry-order",
+      "queryClass": "multi_term_concept",
+      "request": { "terms": ["retry", "order"], "mode": "and" },
+      "judgments": [
+        { "path": "src/order_processor.rs", "grade": 3, "reason": "order flow using retry policy" },
+        { "path": "src/order_client.ts", "grade": 2, "reason": "order client carries retry delay" },
+        { "path": "docs/operations.md", "grade": 2, "reason": "operational retry context" },
+        { "path": "generated/order_models.rs", "grade": 1, "reason": "weak generated retry model context" },
+        { "path": "docs/troubleshooting.md", "grade": 1, "reason": "separate order and retry diagnostics" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "weak generated retry and order binding" }
+      ]
+    },
+    {
+      "id": "multi-cache-ttl",
+      "queryClass": "multi_term_concept",
+      "request": { "terms": ["cache", "ttl"], "mode": "and" },
+      "judgments": [
+        { "path": "src/cache_store.rs", "grade": 3, "reason": "cache TTL implementation" },
+        { "path": "src/config_loader.rs", "grade": 2, "reason": "runtime setting" },
+        { "path": "config/appsettings.json", "grade": 2, "reason": "JSON configuration" },
+        { "path": "config/service.config.xml", "grade": 2, "reason": "XML configuration" },
+        { "path": "docs/operations.md", "grade": 1, "reason": "operational context" }
+      ]
+    },
+    {
+      "id": "multi-session-revoke",
+      "queryClass": "multi_term_concept",
+      "request": { "terms": ["session", "revoke"], "mode": "and" },
+      "judgments": [
+        { "path": "src/session_token_store.rs", "grade": 3, "reason": "primary implementation" },
+        { "path": "tests/session_token_store_tests.rs", "grade": 2, "reason": "direct tests" }
+      ]
+    },
+    {
+      "id": "multi-config-retry-delay",
+      "queryClass": "multi_term_concept",
+      "request": { "terms": ["config", "retry", "delay"], "mode": "and" },
+      "judgments": [
+        { "path": "src/config_loader.rs", "grade": 3, "reason": "loads retry delay configuration" },
+        { "path": "config/service.config.xml", "grade": 3, "reason": "XML retry-delay configuration" },
+        { "path": "docs/troubleshooting.md", "grade": 2, "reason": "diagnostic context" }
+      ]
+    },
+
+    {
+      "id": "phrase-order-validation-failed",
+      "queryClass": "exact_phrase_error",
+      "request": { "terms": ["order validation failed"], "phrase": true },
+      "judgments": [
+        { "path": "src/order_processor.rs", "grade": 3, "reason": "error source" },
+        { "path": "tests/order_processor_tests.rs", "grade": 2, "reason": "regression test" },
+        { "path": "docs/troubleshooting.md", "grade": 2, "reason": "diagnostic guidance" }
+      ]
+    },
+    {
+      "id": "phrase-retry-budget-exceeded",
+      "queryClass": "exact_phrase_error",
+      "request": { "terms": ["retry budget exceeded"], "phrase": true },
+      "judgments": [
+        { "path": "src/retry_policy.rs", "grade": 3, "reason": "error source" },
+        { "path": "docs/operations.md", "grade": 2, "reason": "operational context" },
+        { "path": "docs/troubleshooting.md", "grade": 2, "reason": "diagnostic guidance" }
+      ]
+    },
+    {
+      "id": "phrase-config-parse-failed",
+      "queryClass": "exact_phrase_error",
+      "request": { "terms": ["config parse failed"], "phrase": true },
+      "judgments": [
+        { "path": "src/config_loader.rs", "grade": 3, "reason": "error source" },
+        { "path": "tests/config_loader_tests.rs", "grade": 2, "reason": "regression test" },
+        { "path": "docs/troubleshooting.md", "grade": 2, "reason": "diagnostic guidance" }
+      ]
+    },
+    {
+      "id": "phrase-service-unavailable",
+      "queryClass": "exact_phrase_error",
+      "request": { "terms": ["service unavailable"], "phrase": true },
+      "judgments": [
+        { "path": "src/order_client.ts", "grade": 3, "reason": "error source" },
+        { "path": "docs/troubleshooting.md", "grade": 2, "reason": "diagnostic guidance" }
+      ]
+    },
+    {
+      "id": "phrase-authentication-pipeline",
+      "queryClass": "exact_phrase_error",
+      "request": { "terms": ["authentication pipeline"], "phrase": true },
+      "judgments": [
+        { "path": "src/session_token_store.rs", "grade": 3, "reason": "primary implementation context" },
+        { "path": "tests/session_token_store_tests.rs", "grade": 2, "reason": "direct test" },
+        { "path": "docs/operations.md", "grade": 2, "reason": "operational context" },
+        { "path": "docs/troubleshooting.md", "grade": 2, "reason": "diagnostic guidance" }
+      ]
+    },
+
+    {
+      "id": "config-max-retries",
+      "queryClass": "config_api_key",
+      "request": { "terms": ["MaxRetries", "max_retries"], "mode": "or", "substring": false },
+      "judgments": [
+        { "path": "config/appsettings.json", "grade": 3, "reason": "JSON source" },
+        { "path": "config/service.config.xml", "grade": 3, "reason": "XML source" },
+        { "path": "src/config_loader.rs", "grade": 2, "reason": "typed setting" },
+        { "path": "tests/config_loader_tests.rs", "grade": 2, "reason": "config test" },
+        { "path": "src/retry_policy.rs", "grade": 1, "reason": "runtime consumer" },
+        { "path": "docs/troubleshooting.md", "grade": 1, "reason": "configuration guidance" }
+      ]
+    },
+    {
+      "id": "config-retry-delay-ms",
+      "queryClass": "config_api_key",
+      "request": { "terms": ["RetryDelayMs", "retry_delay_ms"], "mode": "or", "substring": false },
+      "judgments": [
+        { "path": "config/appsettings.json", "grade": 3, "reason": "JSON source" },
+        { "path": "config/service.config.xml", "grade": 3, "reason": "XML source" },
+        { "path": "src/config_loader.rs", "grade": 2, "reason": "typed setting" },
+        { "path": "src/order_client.ts", "grade": 2, "reason": "runtime consumer" },
+        { "path": "src/retry_policy.rs", "grade": 2, "reason": "runtime policy" },
+        { "path": "generated/order_models.rs", "grade": 1, "reason": "weak generated runtime model" },
+        { "path": "docs/troubleshooting.md", "grade": 1, "reason": "configuration guidance" }
+      ]
+    },
+    {
+      "id": "config-cache-entry-ttl-seconds",
+      "queryClass": "config_api_key",
+      "request": { "terms": ["CacheEntryTtlSeconds", "cache_entry_ttl_seconds"], "mode": "or", "substring": false },
+      "judgments": [
+        { "path": "config/appsettings.json", "grade": 3, "reason": "JSON source" },
+        { "path": "config/service.config.xml", "grade": 3, "reason": "XML source" },
+        { "path": "src/config_loader.rs", "grade": 2, "reason": "typed setting" }
+      ]
+    },
+    {
+      "id": "config-token-issuer",
+      "queryClass": "config_api_key",
+      "request": { "terms": ["TokenIssuer", "token_issuer"], "mode": "or", "substring": false },
+      "judgments": [
+        { "path": "config/appsettings.json", "grade": 3, "reason": "JSON source" },
+        { "path": "config/service.config.xml", "grade": 3, "reason": "XML source" },
+        { "path": "src/session_token_store.rs", "grade": 2, "reason": "runtime consumer" },
+        { "path": "src/config_loader.rs", "grade": 2, "reason": "typed setting" },
+        { "path": "docs/operations.md", "grade": 1, "reason": "operational context" }
+      ]
+    },
+    {
+      "id": "config-inventory-endpoint",
+      "queryClass": "config_api_key",
+      "request": { "terms": ["InventoryEndpoint"], "substring": false },
+      "judgments": [
+        { "path": "config/appsettings.json", "grade": 3, "reason": "JSON source" },
+        { "path": "config/service.config.xml", "grade": 3, "reason": "XML source" },
+        { "path": "src/order_client.ts", "grade": 2, "reason": "runtime consumer" },
+        { "path": "docs/troubleshooting.md", "grade": 1, "reason": "diagnostic context" }
+      ]
+    },
+
+    {
+      "id": "broad-order",
+      "queryClass": "broad_common_term",
+      "request": { "terms": ["order"], "substring": true },
+      "judgments": [
+        { "path": "src/order_processor.rs", "grade": 3, "reason": "primary order flow" },
+        { "path": "src/OrderController.cs", "grade": 2, "reason": "API entry" },
+        { "path": "src/order_client.ts", "grade": 2, "reason": "client entry" },
+        { "path": "legacy/order_adapter.rs", "grade": 2, "reason": "legacy flow" },
+        { "path": "tests/order_processor_tests.rs", "grade": 2, "reason": "direct tests" },
+        { "path": "src/inventory_manager.rs", "grade": 2, "reason": "order-scoped inventory context" },
+        { "path": "src/cache_store.rs", "grade": 1, "reason": "weak cached-order context" },
+        { "path": "generated/order_models.rs", "grade": 1, "reason": "weak generated order model context" },
+        { "path": "docs/operations.md", "grade": 1, "reason": "operational context" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "weak generated order binding" }
+      ]
+    },
+    {
+      "id": "broad-service",
+      "queryClass": "broad_common_term",
+      "request": { "terms": ["service"], "substring": true },
+      "judgments": [
+        { "path": "src/order_client.ts", "grade": 3, "reason": "service call implementation" },
+        { "path": "docs/troubleshooting.md", "grade": 2, "reason": "service diagnostics" },
+        { "path": "config/service.config.xml", "grade": 1, "reason": "weak service configuration context" },
+        { "path": "docs/operations.md", "grade": 1, "reason": "service operations" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "weak generated service binding" }
+      ]
+    },
+    {
+      "id": "broad-config",
+      "queryClass": "broad_common_term",
+      "request": { "terms": ["config"], "substring": true },
+      "judgments": [
+        { "path": "src/config_loader.rs", "grade": 3, "reason": "configuration implementation" },
+        { "path": "tests/config_loader_tests.rs", "grade": 2, "reason": "configuration tests" },
+        { "path": "config/service.config.xml", "grade": 2, "reason": "configuration source" },
+        { "path": "docs/troubleshooting.md", "grade": 1, "reason": "diagnostic context" },
+        { "path": "docs/operations.md", "grade": 1, "reason": "runtime configuration context" }
+      ]
+    },
+    {
+      "id": "broad-token",
+      "queryClass": "broad_common_term",
+      "request": { "terms": ["token"], "substring": true },
+      "judgments": [
+        { "path": "src/session_token_store.rs", "grade": 3, "reason": "token implementation" },
+        { "path": "tests/session_token_store_tests.rs", "grade": 2, "reason": "token tests" },
+        { "path": "config/appsettings.json", "grade": 1, "reason": "token configuration" },
+        { "path": "config/service.config.xml", "grade": 1, "reason": "token configuration" },
+        { "path": "src/config_loader.rs", "grade": 2, "reason": "typed token setting" },
+        { "path": "docs/operations.md", "grade": 1, "reason": "operational context" },
+        { "path": "docs/troubleshooting.md", "grade": 1, "reason": "diagnostic context" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "weak generated token binding" }
+      ]
+    },
+    {
+      "id": "broad-cache",
+      "queryClass": "broad_common_term",
+      "request": { "terms": ["cache"], "substring": true },
+      "judgments": [
+        { "path": "src/cache_store.rs", "grade": 3, "reason": "cache implementation" },
+        { "path": "src/config_loader.rs", "grade": 2, "reason": "cache settings" },
+        { "path": "config/appsettings.json", "grade": 1, "reason": "cache configuration" },
+        { "path": "config/service.config.xml", "grade": 1, "reason": "cache configuration" },
+        { "path": "generated/order_models.rs", "grade": 1, "reason": "weak generated cache model context" },
+        { "path": "docs/operations.md", "grade": 1, "reason": "operational context" }
+      ],
+      "negatives": [
+        { "path": "generated/service_client.rs", "reason": "generated type binding is irrelevant to broad cache search" }
+      ]
+    },
+
+    {
+      "id": "impl-validate-order",
+      "queryClass": "implementation_vs_test",
+      "request": { "terms": ["validate_order"], "substring": true },
+      "judgments": [
+        { "path": "src/order_processor.rs", "grade": 3, "reason": "implementation" },
+        { "path": "tests/order_processor_tests.rs", "grade": 2, "reason": "direct test" }
+      ]
+    },
+    {
+      "id": "impl-load-runtime-settings",
+      "queryClass": "implementation_vs_test",
+      "request": { "terms": ["load_runtime_settings"], "substring": false },
+      "judgments": [
+        { "path": "src/config_loader.rs", "grade": 3, "reason": "implementation" },
+        { "path": "tests/config_loader_tests.rs", "grade": 2, "reason": "direct test" }
+      ]
+    },
+    {
+      "id": "impl-issue-session-token",
+      "queryClass": "implementation_vs_test",
+      "request": { "terms": ["issue_session_token"], "substring": false },
+      "judgments": [
+        { "path": "src/session_token_store.rs", "grade": 3, "reason": "implementation" },
+        { "path": "tests/session_token_store_tests.rs", "grade": 2, "reason": "direct test" }
+      ]
+    },
+    {
+      "id": "impl-reserve-inventory",
+      "queryClass": "implementation_vs_test",
+      "request": { "terms": ["reserve_inventory"], "substring": false },
+      "judgments": [
+        { "path": "src/inventory_manager.rs", "grade": 3, "reason": "implementation" },
+        { "path": "src/order_processor.rs", "grade": 2, "reason": "direct caller" }
+      ]
+    },
+    {
+      "id": "impl-execute-with-retry",
+      "queryClass": "implementation_vs_test",
+      "request": { "terms": ["execute_with_retry"], "substring": false },
+      "judgments": [
+        { "path": "src/retry_policy.rs", "grade": 3, "reason": "implementation" },
+        { "path": "src/order_processor.rs", "grade": 2, "reason": "direct caller" }
+      ]
+    },
+
+    {
+      "id": "noise-order-processing-binding",
+      "queryClass": "generated_noise",
+      "request": { "terms": ["process_order_async", "OrderProcessor"], "mode": "or", "substring": false },
+      "judgments": [
+        { "path": "src/order_processor.rs", "grade": 3, "reason": "method and type implementation" },
+        { "path": "tests/order_processor_tests.rs", "grade": 2, "reason": "direct tests" },
+        { "path": "src/OrderController.cs", "grade": 2, "reason": "API consumer with the same method and type" },
+        { "path": "legacy/order_adapter.rs", "grade": 2, "reason": "legacy consumer with the same method and type" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "type-only generated binding" }
+      ]
+    },
+    {
+      "id": "noise-inventory-release-binding",
+      "queryClass": "generated_noise",
+      "request": { "terms": ["release_inventory", "InventoryManager"], "mode": "or", "substring": false },
+      "judgments": [
+        { "path": "src/inventory_manager.rs", "grade": 3, "reason": "method and type implementation" },
+        { "path": "src/order_processor.rs", "grade": 1, "reason": "type-only direct consumer" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "type-only generated binding" }
+      ]
+    },
+    {
+      "id": "noise-retry-operation-binding",
+      "queryClass": "generated_noise",
+      "request": { "terms": ["try_operation", "RetryPolicy"], "mode": "or", "substring": false },
+      "judgments": [
+        { "path": "src/retry_policy.rs", "grade": 3, "reason": "method and type implementation" },
+        { "path": "src/order_processor.rs", "grade": 1, "reason": "type-only direct consumer" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "type-only generated binding" }
+      ]
+    },
+    {
+      "id": "noise-cache-eviction-binding",
+      "queryClass": "generated_noise",
+      "request": { "terms": ["evict_expired_entries", "CacheStore"], "mode": "or", "substring": false },
+      "judgments": [
+        { "path": "src/cache_store.rs", "grade": 3, "reason": "method and type implementation" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "type-only generated binding" }
+      ]
+    },
+    {
+      "id": "noise-session-token-issuer-binding",
+      "queryClass": "generated_noise",
+      "request": { "terms": ["token_issuer", "SessionTokenStore"], "mode": "or", "substring": false },
+      "judgments": [
+        { "path": "src/session_token_store.rs", "grade": 3, "reason": "setting and type implementation" },
+        { "path": "src/config_loader.rs", "grade": 2, "reason": "typed token issuer setting" },
+        { "path": "tests/session_token_store_tests.rs", "grade": 1, "reason": "type-only direct tests" },
+        { "path": "generated/service_client.rs", "grade": 1, "reason": "type-only generated binding" }
+      ]
+    }
+  ]
+}

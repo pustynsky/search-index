@@ -916,9 +916,28 @@ fn make_grep_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&str>, 
         trigram,
         ..Default::default()
     };
-    HandlerContextBuilder::new()
+    let ctx = HandlerContextBuilder::new()
         .with_content_index(content_index)
-        .build()
+        .build();
+    // Keep scoped coverage checks from loading the live workspace file index.
+    *ctx.file_index.write().unwrap() = Some(crate::FileIndex {
+        root: ".".to_string(),
+        format_version: crate::FILE_INDEX_VERSION,
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        max_age_secs: 3600,
+        entries: files.iter().map(|path| crate::FileEntry {
+            path: path.to_string(),
+            size: 0,
+            modified: 0,
+            is_dir: false,
+        }).collect(),
+        respect_git_exclude: false,
+    });
+    ctx.file_index_dirty.store(false, std::sync::atomic::Ordering::Relaxed);
+    ctx
 }
 
 #[test]
