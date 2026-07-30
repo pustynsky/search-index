@@ -1618,11 +1618,17 @@ fn test_xray_grep_max_results_zero_means_unlimited() {
             .push(Posting { file_id: i as u32, lines: vec![10] });
     }
 
+    let trigram = crate::index::build_trigram_index_from_tokens(
+        idx.keys().cloned().collect(),
+        1,
+    );
+
     let index = ContentIndex {
         root: ".".to_string(),
         files,
         index: idx,
         total_tokens: 1000,
+        trigram,
         extensions: vec!["cs".to_string()],
         file_token_counts,
         ..Default::default()
@@ -1656,6 +1662,30 @@ fn test_xray_grep_max_results_zero_means_unlimited() {
     let files_capped = output_capped["files"].as_array().unwrap();
     assert_eq!(files_capped.len(), 5,
         "maxResults=5 should return exactly 5 files, got {}", files_capped.len());
+
+    let expected_paths: Vec<String> = (0..5)
+        .map(|index| format!("C:\\src\\Module_{:02}\\Service.cs", index))
+        .collect();
+    let capped_paths: Vec<String> = files_capped.iter()
+        .map(|file| file["path"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(capped_paths, expected_paths);
+
+    let result_substring_capped = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["commontoken"],
+        "maxResults": 5,
+        "substring": true
+    }));
+    assert!(!result_substring_capped.is_error);
+    let output_substring_capped: Value =
+        serde_json::from_str(&result_substring_capped.content[0].text).unwrap();
+    let substring_capped_paths: Vec<String> = output_substring_capped["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(substring_capped_paths, expected_paths);
 
     let result_default = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": ["commontoken"],

@@ -2090,6 +2090,36 @@ fn test_auto_balance_keeps_multi_term_files_above_cap() {
 }
 
 #[test]
+fn test_auto_balance_ties_select_paths_ascending() {
+    let raw = vec!["rare".to_string(), "dominant".to_string()];
+    let mut results = vec![entry("rare.rs", 5.0, 1, vec![1, 0])];
+    for index in (0..30).rev() {
+        results.push(entry(
+            &format!("dom{index:02}.rs"),
+            1.0,
+            1,
+            vec![0, 1],
+        ));
+    }
+
+    let info = apply_auto_balance(&mut results, 2, &raw, Some(10))
+        .expect("should balance equal-score dominant files");
+    assert_eq!(info.dropped_files, 20);
+
+    let mut kept_paths: Vec<String> = results
+        .iter()
+        .filter(|result| result.file_path.starts_with("dom"))
+        .map(|result| result.file_path.clone())
+        .collect();
+    kept_paths.sort_unstable();
+    let expected_paths: Vec<String> = (0..10)
+        .map(|index| format!("dom{index:02}.rs"))
+        .collect();
+    assert_eq!(kept_paths, expected_paths);
+}
+
+
+#[test]
 fn test_auto_balance_returns_none_when_nothing_to_drop() {
     // Even with extreme imbalance, if there are zero dominant-only files
     // (every dominant match co-occurs with the rare term), nothing to trim.
