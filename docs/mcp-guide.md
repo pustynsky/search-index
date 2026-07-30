@@ -61,7 +61,7 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 
 | Tool                         | Description                                                                                                                             |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `xray_grep`                | Search content index with TF-IDF ranking, regex, phrase, AND/OR                                                                         |
+| `xray_grep`                | Search content index with TF-IDF ranking, single exact-token file-stem signal, regex, phrase, AND/OR                                                                         |
 | `xray_definitions`         | Search code definitions (classes, methods, interfaces, etc.). Supports C#, TypeScript/TSX, Rust (tree-sitter) and SQL (regex). `containsLine`, `includeBody`, `audit`. Relevance-ranked when name filter is active. Requires `--definitions` |
 | `xray_callers`             | Find callers / callees and build recursive call tree. Supports C#, TypeScript/TSX, and SQL (EXEC call chains). Requires `--definitions`  |
 | `xray_fast`                | Search pre-built file name index (instant). `pattern` is an array of strings (multi-pattern OR). Results ranked: exact stem → prefix → contains        |
@@ -190,7 +190,7 @@ AND mode, regex, phrase, lineRegex, or single-term queries.
 
 ## `xray_grep` — Content Search
 
-Search content index with TF-IDF ranking. Supports multi-term (AND/OR), regex, phrase, and substring search. **Language-agnostic** — works with any text file indexed via `--ext` (C#, Rust, Python, JS/TS, XML, JSON, config, etc.).
+Search content index with TF-IDF ranking. A single exact-token request (`substring: false`) also uses a normalized file-stem signal; multi-term and other search modes keep their existing scoring. Supports multi-term (AND/OR), regex, phrase, and substring search. **Language-agnostic** — works with any text file indexed via `--ext` (C#, Rust, Python, JS/TS, XML, JSON, config, etc.).
 
 Substring search is **on by default** in MCP mode — compound identifiers like `IUserService`, `m_userService`, `UserServiceFactory` are automatically found when searching for `UserService`. Auto-disabled when `regex` or `phrase` is used. Use `"substring": false` for exact-token-only matching.
 

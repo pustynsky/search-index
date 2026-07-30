@@ -223,7 +223,7 @@ VS CODE CONFIGURATION (.vscode/mcp.json):
   }
 
 AVAILABLE TOOLS (exposed via MCP):
-  xray_grep        -- Search content index (TF-IDF ranked, regex, phrase, multi-term)
+  xray_grep        -- Search content index (relevance ranked, exact-stem signal, regex, phrase, multi-term)
   xray_definitions -- Search code definitions: classes, methods, interfaces, enums, SPs,
                         functions, type aliases, variables. Supports C#, TypeScript/TSX,
                         and SQL (.sql files: stored procedures, tables, views, functions,
@@ -358,11 +358,11 @@ impl Default for ServeArgs {
 NOTES:
   - Requires a content index. Build one first:
       xray content-index -d C:\Projects -e cs,rs,py
-  - Results sorted by TF-IDF relevance (most relevant files first)
+  - Results use TF-IDF relevance; one exact token can also receive a normalized file-stem signal
   - Multi-term: comma-separated, OR by default, AND with --all
   - Regex: pattern matched against all indexed tokens (e.g. 754K unique tokens)
   - Default: substring search via trigram index (finds IUserService, m_userService)
-  - Use --exact to search for exact tokens only (disables substring matching)
+  - Use --exact to search for exact tokens only; one term can receive the file-stem signal
   - Use --show-lines to see actual source code lines from matching files
   - --exclude-dir and --exclude filter results by path substring (case-insensitive)
   - Context lines (-C/-B/-A) show surrounding code, like grep -C
@@ -430,7 +430,7 @@ pub struct GrepArgs {
     /// Exact token matching only (disables default substring search).
     /// By default, grep uses trigram-based substring matching that finds
     /// compound identifiers (e.g. "UserService" matches IUserService, m_userService).
-    /// Use --exact to search for exact tokens only.
+    /// A single exact term can also receive the normalized file-stem ranking signal.
     #[arg(long)]
     pub exact: bool,
 

@@ -90,36 +90,38 @@ Every architectural decision has alternatives. This document captures what was c
 
 **When to reconsider:** If we add fuzzy/typo-tolerant search, an FST or Levenshtein automaton would be much more efficient than regex scanning all keys.
 
-## 4. Ranking: TF-IDF vs BM25
+## 4. Ranking: TF-IDF with an exact file-stem signal vs BM25
 
-### Chosen: Classic TF-IDF
+### Chosen: TF-IDF plus one bounded path signal
 
 ```
-score = (occurrences / file_token_count) × ln(total_files / files_with_term)
+score = (occurrences / file_token_count + file_stem_bonus) × ln(total_files / files_with_term)
+
+file_stem_bonus = 0.02 for one exact token matching the normalized file stem; otherwise 0
 ```
 
 **Why:**
 
-- Simple: one formula, no tunable parameters.
-- Effective for code search: code is more structured than natural language, and simple TF-IDF works well.
-- Fast: single pass over postings, no normalization constants to precompute.
-- Predictable: developers can reason about why a result ranks higher.
+- Simple: one content formula plus one bounded, checked relevance parameter.
+- Effective for code search: TF-IDF finds relevant content, while the stem signal promotes the likely implementation for exact identifier queries.
+- Fast: single pass over postings, no document-length constants to precompute.
+- Predictable: the signal applies only to one exact token; substring, regex, phrase, and multi-term searches retain their prior scoring.
 
 **Rejected alternatives:**
 
 | Alternative         | Why Not                                                                                                                                                                                                                                                                                      |
 | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **BM25**            | Adds two tunable parameters (k1, b) that require corpus-specific tuning. Marginal improvement for code search where documents (files) have similar structure. BM25's document length normalization helps with variable-length prose documents but code files are already relatively uniform. |
+| **BM25**            | Adds two interacting document-length parameters (k1, b) and a different saturation model. The checked relevance harness should justify that extra complexity before replacing the current single bounded path signal. |
 | **PageRank-style**  | Would require call graph analysis. Expensive to compute, unclear benefit for code search.                                                                                                                                                                                                    |
 | **Embedding-based** | Requires ML model, GPU/large CPU, ~100x slower per query. Out of scope for a CLI tool.                                                                                                                                                                                                       |
 
 **Known limitations:**
 
-- No field boosting: a match in class name vs. method body has equal weight.
+- No in-content field boosting: class names and method bodies have equal content weight. Only a matching normalized file stem gets a separate signal.
 - No position proximity: `HttpClient` on line 1 and line 500 contribute equally.
 - TF normalization by file size means a 10-line file mentioning `HttpClient` once will rank above a 1000-line file mentioning it 5 times.
 
-**When to reconsider:** If user feedback shows ranking quality issues, BM25 with default parameters (k1=1.2, b=0.75) would be a minimal-effort upgrade.
+**When to reconsider:** If checked public and large private corpora still show document-length failures, evaluate BM25 against this baseline before changing the production model.
 
 ## 5. Concurrency: RwLock vs Lock-Free
 

@@ -323,6 +323,61 @@ fn test_parse_grep_args_show_lines_explicit() {
 // ─── score_normal_token_search with filter test ─────────────────
 
 #[test]
+fn test_score_normal_token_search_boosts_normalized_exact_file_stem() {
+    use crate::Posting;
+    let mut index = ContentIndex::default();
+    index.files = vec![
+        "src/widget_service.rs".to_string(),
+        "test/WidgetServiceTests.rs".to_string(),
+        "src/other.rs".to_string(),
+    ];
+    index.file_token_counts = vec![1000, 100, 100];
+    index.index.insert("widgetservice".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![1] },
+    ]);
+
+    let terms = vec!["widgetservice".to_string()];
+    let regex_params = GrepSearchParams {
+        requested_mode: "regex",
+        ..make_params_default()
+    };
+    let (unboosted_scores, _) = score_normal_token_search(
+        &terms,
+        &index,
+        &regex_params,
+        &resolve_grep_file_scope(&index, &regex_params),
+    );
+    assert!(unboosted_scores[&1].tf_idf > unboosted_scores[&0].tf_idf);
+
+    let token_params = GrepSearchParams {
+        requested_mode: "token",
+        ..make_params_default()
+    };
+    let (boosted_scores, _) = score_normal_token_search(
+        &terms,
+        &index,
+        &token_params,
+        &resolve_grep_file_scope(&index, &token_params),
+    );
+    assert!(boosted_scores[&0].tf_idf > boosted_scores[&1].tf_idf);
+    let expected_bonus = 0.02 * (3.0_f64 / 2.0).ln();
+    assert!(
+        (boosted_scores[&0].tf_idf - unboosted_scores[&0].tf_idf - expected_bonus).abs()
+            < 1e-12
+    );
+
+    let multi_terms = vec!["widgetservice".to_string(), "missing".to_string()];
+    let (multi_term_scores, _) = score_normal_token_search(
+        &multi_terms,
+        &index,
+        &token_params,
+        &resolve_grep_file_scope(&index, &token_params),
+    );
+    assert!(multi_term_scores[&1].tf_idf > multi_term_scores[&0].tf_idf);
+}
+
+#[test]
 fn test_score_normal_token_search_with_ext_filter() {
     use crate::Posting;
     let mut index = ContentIndex::default();

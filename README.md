@@ -61,7 +61,7 @@ Built on the same [`ignore`](https://crates.io/crates/ignore) crate that backs [
 - **Parallel filesystem walk**: uses every CPU core for max throughput.
 - **File name index**: pre-built index for instant file lookups, like [Everything](https://www.voidtools.com/).
 - **Inverted content index**: language-agnostic tokenizer maps tokens to files for full-text search across any text file, like a small Elasticsearch.
-- **TF-IDF ranking**: content search results are sorted by relevance, most relevant files first.
+- **Content relevance ranking**: TF-IDF orders matches, with a normalized file-stem signal for single exact-token searches.
 - **Relevance ranking for symbols**: `xray_definitions` and `xray_fast` rank by match quality. Exact > prefix > contains, with kind and name length as tiebreakers.
 - **Regex support**: full Rust regex syntax.
 - **Respects `.gitignore`**: ignored files are skipped automatically.
@@ -240,7 +240,7 @@ Test files are split by language module to stay maintainable. See [Architecture]
 
 | Category | Coverage |
 |---|---|
-| Unit tests | Tokenizer, path normalization, staleness, serialization roundtrips, TF-IDF ranking |
+| Unit tests | Tokenizer, path normalization, staleness, serialization roundtrips, content relevance ranking |
 | Integration | Build + search ContentIndex, build FileIndex, MCP server end-to-end |
 | MCP protocol | JSON-RPC parsing, initialize, tools/list, tools/call, notifications, errors |
 | Substring/Trigram | Trigram generation, index build, substring search, integration tests |
