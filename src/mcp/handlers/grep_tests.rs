@@ -201,6 +201,30 @@ fn test_finalize_or_mode_passes_all() {
 }
 
 #[test]
+fn test_finalize_ties_sort_by_path() {
+    let mut scores = HashMap::new();
+    for index in 0..32 {
+        let path = format!("{:02}.cs", 31 - index);
+        scores.insert(index, FileScoreEntry {
+            file_path: path,
+            lines: vec![1],
+            tf_idf: 0.0,
+            occurrences: 1,
+            terms_matched: 1,
+            per_term_occurrences: vec![1],
+        });
+    }
+
+    let (results, _, _) = finalize_grep_results(scores, false, 1);
+    let paths: Vec<&str> = results.iter().map(|result| result.file_path.as_str()).collect();
+    let mut expected = paths.clone();
+    expected.sort_unstable();
+
+    assert_eq!(paths, expected);
+}
+
+
+#[test]
 fn test_finalize_and_mode_filters() {
     let mut scores = HashMap::new();
     scores.insert(0, FileScoreEntry { file_path: "a.cs".into(), lines: vec![1], tf_idf: 1.0, occurrences: 1, terms_matched: 2, per_term_occurrences: vec![1, 1] });

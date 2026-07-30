@@ -223,7 +223,12 @@ pub(crate) fn apply_auto_balance(
             (i, r.tf_idf, dom_only)
         })
         .collect();
-    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    indexed.sort_by(|left, right| {
+        right
+            .1
+            .total_cmp(&left.1)
+            .then_with(|| results[left.0].file_path.cmp(&results[right.0].file_path))
+    });
 
     let mut keep = vec![true; results.len()];
     let mut kept_dominant_only = 0usize;
@@ -1710,8 +1715,12 @@ fn finalize_grep_results(
         result.lines.dedup();
     }
 
-    // Sort by TF-IDF descending
-    results.sort_by(|a, b| b.tf_idf.partial_cmp(&a.tf_idf).unwrap_or(std::cmp::Ordering::Equal));
+    // Sort by TF-IDF descending, then path for deterministic ties.
+    results.sort_by(|a, b| {
+        b.tf_idf
+            .total_cmp(&a.tf_idf)
+            .then_with(|| a.file_path.cmp(&b.file_path))
+    });
 
     let total_files = results.len();
     let total_occurrences: usize = results.iter().map(|r| r.occurrences).sum();
