@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 2,
+  "corpusVersion": "xray-relevance-v1",
+  "model": "tfidf-production-defaults",
+  "metrics": {
+    "queryCount": 40,
+    "ndcgAt10": 0.906323,
+    "mrrAt10": 0.975,
+    "recallAt50": 1.0,
+    "successAt1": 0.55
+  },
+  "scoredMetrics": {
+    "queryCount": 35,
+    "ndcgAt10": 0.916867,
+    "mrrAt10": 0.971429,
+    "recallAt50": 1.0,
+    "successAt1": 0.628571
+  },
+  "perClass": {
+    "broad_common_term": {
+      "queryCount": 5,
+      "ndcgAt10": 0.862921,
+      "mrrAt10": 0.9,
+      "recallAt50": 1.0,
+      "successAt1": 0.4
+    },
+    "config_api_key": {
+      "queryCount": 5,
+      "ndcgAt10": 0.99675,
+      "mrrAt10": 1.0,
+      "recallAt50": 1.0,
+      "successAt1": 1.0
+    },
+    "exact_identifier": {
+      "queryCount": 5,
+      "ndcgAt10": 0.81254,
+      "mrrAt10": 0.9,
+      "recallAt50": 1.0,
+      "successAt1": 0.2
+    },
+    "exact_phrase_error": {
+      "queryCount": 5,
+      "ndcgAt10": 0.832512,
+      "mrrAt10": 1.0,
+      "recallAt50": 1.0,
+      "successAt1": 0.0
+    },
+    "generated_noise": {
+      "queryCount": 5,
+      "ndcgAt10": 0.94976,
+      "mrrAt10": 1.0,
+      "recallAt50": 1.0,
+      "successAt1": 0.8
+    },
+    "implementation_vs_test": {
+      "queryCount": 5,
+      "ndcgAt10": 0.933596,
+      "mrrAt10": 1.0,
+      "recallAt50": 1.0,
+      "successAt1": 0.6
+    },
+    "multi_term_concept": {
+      "queryCount": 5,
+      "ndcgAt10": 0.958828,
+      "mrrAt10": 1.0,
+      "recallAt50": 1.0,
+      "successAt1": 0.8
+    },
+    "partial_identifier": {
+      "queryCount": 5,
+      "ndcgAt10": 0.903677,
+      "mrrAt10": 1.0,
+      "recallAt50": 1.0,
+      "successAt1": 0.6
+    }
+  },
+  "queryDigest": "9691919d3178d0a7",
+  "corpusDigest": "c2c9440af4c1fffe"
+}

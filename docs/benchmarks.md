@@ -333,6 +333,48 @@ Three distinct indexes, each built independently:
 - Content indexing: read file → split tokens (simple string operations)
 - Definition indexing: read file → parse full AST with tree-sitter → walk AST tree → extract definitions with modifiers, attributes, base types → extract call sites from method bodies
 
+## Search relevance evaluation
+
+The checked relevance corpus under `benches/fixtures/relevance/` contains 18 neutral source/config/doc files and 40 graded queries across eight query classes. Every top-10 result must be graded or covered by an explicit query- or corpus-level negative policy, and every graded path must be lexically reachable. Five exact-phrase queries exercise matching and occurrence-count ranking as a scorer-independent canary; the other 35 queries exercise the TF-IDF path used for scorer comparisons. The test-only runner calls the production `xray_grep` MCP dispatch path; it does not duplicate the scoring implementation.
+
+Run the deterministic quality gate:
+
+```powershell
+cargo test --bin xray current_tfidf_matches_checked_relevance_baseline -- --nocapture
+```
+
+Generate a machine-local quality and latency report:
+
+```powershell
+cargo test --bin xray write_tfidf_relevance_report -- --ignored --nocapture
+```
+
+By default, the report is written to `target/relevance/tfidf-report.json` and the ready-to-review aggregate candidate to `target/relevance/tfidf-baseline-candidate.json`; the five slowest queries are included after one full warmup pass. With `XRAY_RELEVANCE_REPORT`, both files are written next to that override path. An override inside this repository must remain under `target/`; an external private path is allowed. Checked quality lives in `benches/fixtures/relevance/baseline-tfidf.json`; latency is intentionally excluded because it is machine-dependent.
+
+For a private local corpus, keep the same JSON schema and override the ignored runner inputs without adding them to Git. Corpus symlinks are rejected so indexed files and the corpus digest cannot diverge:
+
+```powershell
+$env:XRAY_RELEVANCE_SPEC = 'C:\local\relevance\queries.json'
+$env:XRAY_RELEVANCE_CORPUS = 'C:\local\relevance\corpus'
+$env:XRAY_RELEVANCE_REPORT = 'C:\local\relevance\tfidf-report.json'
+cargo test --bin xray write_tfidf_relevance_report -- --ignored --nocapture
+```
+
+NDCG uses grades 1–3, MRR@10 treats grades 2–3 as useful, and Success@1 requires a grade-3 primary result at rank 1. Recall@50 counts every judged path (grades 1–3), but with the checked 18-file corpus it is a matching/tokenizer regression canary, not a ranking metric.
+
+Current production-default baseline:
+
+| Metric | All 40 queries | 35 TF-IDF-ranked queries |
+| --- | ---: | ---: |
+| NDCG@10 | 0.906323 | 0.916867 |
+| MRR@10 | 0.975000 | 0.971429 |
+| Recall@50 (matching canary) | 1.000000 | 1.000000 |
+| Success@1 (grade 3) | 0.550000 | 0.628571 |
+
+Use the 35-query scorer aggregate when comparing TF-IDF, BM25, or boosts. The all-40 aggregate additionally guards phrase matching and occurrence-count ordering, but its five phrase queries cannot move when only the TF-IDF formula changes. The generated-noise class now uses distinct method-plus-type requests with method-specific judgments and grades type-only generated bindings as weak context rather than as false negatives (`NDCG@10 = 0.949760`, `Success@1 = 0.8`). Exact identifiers remain the weakest TF-IDF-ranked class (`NDCG@10 = 0.812540`, `Success@1 = 0.2`). A private large-repository corpus should remain local; only anonymized aggregate results belong in the repository.
+
+The schema-v2 baseline stores both query and corpus digests. Query changes, judgments, ranked top paths, any file name or bytes under the corpus root, or indexed extensions therefore require explicit baseline review. After an intentional ranking or corpus change, run the ignored report, review `target/relevance/tfidf-baseline-candidate.json`, explain every moved aggregate and per-class metric in the PR, then replace `benches/fixtures/relevance/baseline-tfidf.json` with that generated candidate. Do not hand-edit metric literals or either digest.
+
 ## Criterion Benchmarks (synthetic, reproducible)
 
 Run with `cargo bench`. Uses synthetic data for cross-machine reproducibility.
