@@ -49,6 +49,17 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
     ctx
 }
 
+fn make_common_token_ctx(file_count: usize) -> HandlerContext {
+    let paths: Vec<String> = (0..file_count)
+        .map(|index| format!("C:\\src\\Module_{index:02}\\Service.cs"))
+        .collect();
+    let file_refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+    let postings = (0..file_count)
+        .map(|index| ("commontoken", index as u32, vec![10]))
+        .collect();
+    make_substring_ctx(postings, file_refs)
+}
+
 #[test] fn test_substring_xray_finds_partial_match() {
     let ctx = make_substring_ctx(vec![("databaseconnectionfactory", 0, vec![10])], vec!["C:\\test\\Activity.cs"]);
     let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["databaseconn"], "substring": true}));
@@ -1084,6 +1095,36 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
 }
 
 #[test]
+fn test_token_regex_case_duplicates_are_idempotent_in_and_mode() {
+    let ctx = make_substring_ctx(
+        vec![("foo", 0, vec![1])],
+        vec!["C:\\test\\Program.cs"],
+    );
+    let single_result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["^Foo$"],
+        "regex": true,
+        "mode": "and"
+    }));
+    let duplicate_result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["^Foo$", "^FOO$"],
+        "regex": true,
+        "mode": "and"
+    }));
+    assert!(!single_result.is_error);
+    assert!(!duplicate_result.is_error);
+
+    let single_output: Value = serde_json::from_str(&single_result.content[0].text).unwrap();
+    let duplicate_output: Value =
+        serde_json::from_str(&duplicate_result.content[0].text).unwrap();
+    assert_eq!(single_output["summary"]["totalFiles"], 1);
+    assert_eq!(duplicate_output["files"], single_output["files"]);
+    assert_eq!(
+        duplicate_output["summary"]["termsSearched"],
+        single_output["summary"]["termsSearched"]
+    );
+}
+
+#[test]
 fn test_token_regex_anchors_are_described_as_token_boundaries() {
     let ctx = make_substring_ctx(
         vec![("foo", 0, vec![1])],
@@ -1605,38 +1646,7 @@ fn test_xray_grep_phrase_preserves_one_character_words() {
 /// T82 — xray_grep maxResults=0 semantics.
 #[test]
 fn test_xray_grep_max_results_zero_means_unlimited() {
-    let mut idx = HashMap::new();
-    let mut files = Vec::new();
-    let mut file_token_counts = Vec::new();
-
-    for i in 0..25 {
-        let path = format!("C:\\src\\Module_{:02}\\Service.cs", i);
-        files.push(path);
-        file_token_counts.push(50u32);
-        idx.entry("commontoken".to_string())
-            .or_insert_with(Vec::new)
-            .push(Posting { file_id: i as u32, lines: vec![10] });
-    }
-
-    let trigram = crate::index::build_trigram_index_from_tokens(
-        idx.keys().cloned().collect(),
-        1,
-    );
-
-    let index = ContentIndex {
-        root: ".".to_string(),
-        files,
-        index: idx,
-        total_tokens: 1000,
-        trigram,
-        extensions: vec!["cs".to_string()],
-        file_token_counts,
-        ..Default::default()
-    };
-
-    let ctx = HandlerContextBuilder::new()
-        .with_content_index(index)
-        .build();
+    let ctx = make_common_token_ctx(25);
 
     let result_unlimited = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": ["commontoken"],
@@ -1697,6 +1707,158 @@ fn test_xray_grep_max_results_zero_means_unlimited() {
     assert_eq!(files_default.len(), 25,
         "Default maxResults=50 should return all 25 files when total < 50, got {}", files_default.len());
 }
+
+#[test]
+fn test_xray_grep_duplicate_terms_are_idempotent_across_token_modes() {
+    let ctx = make_common_token_ctx(25);
+
+    let result_direct_single = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["commontoken"],
+        "maxResults": 5,
+        "substring": false
+    }));
+    let result_direct_duplicate = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["commontoken", "COMMONTOKEN"],
+        "maxResults": 5,
+        "substring": false
+    }));
+    assert!(!result_direct_single.is_error);
+    assert!(!result_direct_duplicate.is_error);
+    let output_direct_single: Value =
+        serde_json::from_str(&result_direct_single.content[0].text).unwrap();
+    let output_direct_duplicate: Value =
+        serde_json::from_str(&result_direct_duplicate.content[0].text).unwrap();
+    assert_eq!(output_direct_duplicate["files"], output_direct_single["files"]);
+    assert_eq!(
+        output_direct_duplicate["summary"]["termsSearched"],
+        output_direct_single["summary"]["termsSearched"]
+    );
+
+    let result_duplicate_and = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["commontoken", "COMMONTOKEN"],
+        "maxResults": 5,
+        "substring": false,
+        "mode": "and"
+    }));
+    assert!(!result_duplicate_and.is_error);
+    let output_duplicate_and: Value =
+        serde_json::from_str(&result_duplicate_and.content[0].text).unwrap();
+    assert_eq!(output_duplicate_and["files"], output_direct_single["files"]);
+    assert_eq!(
+        output_duplicate_and["summary"]["termsSearched"],
+        output_direct_single["summary"]["termsSearched"]
+    );
+
+    let result_substring_single = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["commontoken"],
+        "maxResults": 5,
+        "substring": true
+    }));
+    let result_substring_duplicate = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["commontoken", "COMMONTOKEN"],
+        "maxResults": 5,
+        "substring": true
+    }));
+    assert!(!result_substring_single.is_error);
+    assert!(!result_substring_duplicate.is_error);
+    let output_substring_single: Value =
+        serde_json::from_str(&result_substring_single.content[0].text).unwrap();
+    let output_substring_duplicate: Value =
+        serde_json::from_str(&result_substring_duplicate.content[0].text).unwrap();
+    assert_eq!(
+        output_substring_duplicate["files"],
+        output_substring_single["files"]
+    );
+    assert_eq!(
+        output_substring_duplicate["summary"]["termsSearched"],
+        output_substring_single["summary"]["termsSearched"]
+    );
+
+    let result_count_single = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["commontoken"],
+        "substring": true,
+        "countOnly": true
+    }));
+    let result_count_duplicate = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["commontoken", "COMMONTOKEN"],
+        "substring": true,
+        "countOnly": true
+    }));
+    assert!(!result_count_single.is_error);
+    assert!(!result_count_duplicate.is_error);
+    let output_count_single: Value =
+        serde_json::from_str(&result_count_single.content[0].text).unwrap();
+    let output_count_duplicate: Value =
+        serde_json::from_str(&result_count_duplicate.content[0].text).unwrap();
+    assert_eq!(
+        output_count_duplicate["summary"]["totalOccurrences"],
+        output_count_single["summary"]["totalOccurrences"]
+    );
+    assert_eq!(
+        output_count_duplicate["summary"]["totalFiles"],
+        output_count_single["summary"]["totalFiles"]
+    );
+}
+
+#[test]
+fn test_xray_grep_duplicate_terms_do_not_change_auto_balance() {
+    let mut index_map = HashMap::new();
+    let mut files = vec!["C:\\src\\rare.rs".to_string()];
+    index_map.insert(
+        "rareterm".to_string(),
+        vec![Posting { file_id: 0, lines: vec![1, 2, 3, 4, 5] }],
+    );
+
+    let mut common_postings = Vec::new();
+    for index in 0..100 {
+        files.push(format!("C:\\src\\common_{index:03}.rs"));
+        common_postings.push(Posting {
+            file_id: index + 1,
+            lines: vec![1],
+        });
+    }
+    index_map.insert("commonterm".to_string(), common_postings);
+
+    let trigram = crate::index::build_trigram_index_from_tokens(
+        index_map.keys().cloned().collect(),
+        1,
+    );
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files,
+        index: index_map,
+        total_tokens: 1010,
+        extensions: vec!["rs".to_string()],
+        file_token_counts: vec![10; 101],
+        trigram,
+        ..Default::default()
+    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .build();
+
+    let unique_result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["rareterm", "commonterm"],
+        "maxResults": 0
+    }));
+    let duplicate_result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["rareterm", "commonterm", "COMMONTERM"],
+        "maxResults": 0
+    }));
+    assert!(!unique_result.is_error);
+    assert!(!duplicate_result.is_error);
+
+    let unique_output: Value = serde_json::from_str(&unique_result.content[0].text).unwrap();
+    let duplicate_output: Value = serde_json::from_str(&duplicate_result.content[0].text).unwrap();
+    assert_eq!(unique_output["files"].as_array().unwrap().len(), 21);
+    assert_eq!(duplicate_output["files"], unique_output["files"]);
+    assert_eq!(
+        duplicate_output["summary"]["autoBalance"],
+        unique_output["summary"]["autoBalance"]
+    );
+}
+
+
 /// xray_grep phrase mode: results sorted by number of occurrences descending.
 #[test]
 fn test_xray_grep_phrase_sort_by_occurrences() {
@@ -1761,6 +1923,34 @@ fn test_xray_grep_phrase_sort_by_occurrences() {
             "Phrase results should be sorted by occurrences descending: file at pos {} has {} occurrences, file at pos {} has {}",
             i, occ_a, i + 1, occ_b);
     }
+
+    cleanup_tmp(&tmp_dir);
+}
+
+#[test]
+fn test_xray_grep_duplicate_phrases_are_idempotent() {
+    let (ctx, tmp_dir) = make_phrase_postfilter_ctx();
+    let single_result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["pub fn"],
+        "phrase": true
+    }));
+    let duplicate_result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["pub fn", "PUB FN"],
+        "phrase": true
+    }));
+    assert!(!single_result.is_error);
+    assert!(!duplicate_result.is_error);
+
+    let single_output: Value = serde_json::from_str(&single_result.content[0].text).unwrap();
+    let duplicate_output: Value =
+        serde_json::from_str(&duplicate_result.content[0].text).unwrap();
+    assert_eq!(duplicate_output["files"], single_output["files"]);
+    assert_eq!(single_output["summary"]["searchMode"], "phrase");
+    assert_eq!(duplicate_output["summary"]["searchMode"], "phrase");
+    assert_eq!(
+        duplicate_output["summary"]["termsSearched"],
+        single_output["summary"]["termsSearched"]
+    );
 
     cleanup_tmp(&tmp_dir);
 }
