@@ -367,6 +367,41 @@ fn test_parse_grep_args_basic() {
 }
 
 #[test]
+fn test_parse_grep_args_deduplicates_terms_by_mode() {
+    let token_args = json!({"terms": ["Alpha", "alpha", "BETA", "beta"]});
+    let token_result = parse_grep_args(&token_args, "C:/project").unwrap();
+    assert_eq!(token_result.terms, vec!["Alpha".to_string(), "BETA".to_string()]);
+
+    let phrase_args = json!({
+        "terms": ["User Service", "user service", "Other Service"],
+        "phrase": true
+    });
+    let phrase_result = parse_grep_args(&phrase_args, "C:/project").unwrap();
+    assert_eq!(
+        phrase_result.terms,
+        vec!["User Service".to_string(), "Other Service".to_string()]
+    );
+
+    let regex_args = json!({"terms": ["^Foo$", "^Foo$", "^foo$"], "regex": true});
+    let regex_result = parse_grep_args(&regex_args, "C:/project").unwrap();
+    assert_eq!(regex_result.terms, vec!["^Foo$".to_string()]);
+
+    let line_regex_args = json!({
+        "terms": ["^Foo$", "^FOO$", "^Foo$", " ^Foo$"],
+        "lineRegex": true
+    });
+    let line_regex_result = parse_grep_args(&line_regex_args, "C:/project").unwrap();
+    assert_eq!(
+        line_regex_result.terms,
+        vec![
+            "^Foo$".to_string(),
+            "^FOO$".to_string(),
+            " ^Foo$".to_string()
+        ]
+    );
+}
+
+#[test]
 fn test_parse_grep_args_substring_mutually_exclusive_with_regex() {
     let args = json!({"terms": ["hello"], "regex": true, "substring": true});
     let result = parse_grep_args(&args, "C:/project");

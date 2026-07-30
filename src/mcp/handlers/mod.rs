@@ -77,7 +77,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "terms": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Search terms. Each array entry is one term. Multi-term OR/AND via `mode`. Literal commas inside an entry are preserved (e.g. regex `^[^,]+,[^,]+$`)."
+                        "description": "Search terms. Each array entry is one term. Multi-term OR/AND via `mode`. Duplicate terms are ignored (case-insensitive for token/substring/phrase/token-regex; exact for lineRegex). Literal commas inside an entry are preserved (e.g. regex `^[^,]+,[^,]+$`)."
                     },
                     "dir": {
                         "type": "string",

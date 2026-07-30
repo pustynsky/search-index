@@ -2260,7 +2260,7 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
     // mode can drive entirely off non-token patterns where any element of
     // the array is a valid regex (and an empty array is rejected below in the
     // `lineRegex` branch).
-    let terms: Vec<String> = match utils::read_string_array(args, "terms") {
+    let mut terms: Vec<String> = match utils::read_string_array(args, "terms") {
         Ok(v) => v,
         Err(e) => return Err(ToolCallResult::error(e)),
     };
@@ -2404,6 +2404,19 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
     } else {
         args.get("substring").and_then(|v| v.as_bool()).unwrap_or(true)
     };
+
+    if terms.len() > 1 {
+        let case_insensitive_terms = !use_line_regex;
+        let mut seen_terms = HashSet::with_capacity(terms.len());
+        terms.retain(|term| {
+            let key = if case_insensitive_terms {
+                term.to_lowercase()
+            } else {
+                term.clone()
+            };
+            seen_terms.insert(key)
+        });
+    }
 
     // GREP-007: bound user-supplied integers instead of `as usize` truncation.
     // Without these caps a hostile/buggy client can request `maxResults=10_000_000`
