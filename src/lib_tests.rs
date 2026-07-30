@@ -7,6 +7,30 @@ fn test_tokenize_basic() {
 }
 
 #[test]
+fn test_normalize_identifier_for_file_stem_conventions_and_unicode() {
+    assert_eq!(normalize_identifier_for_file_stem("OrderProcessor"), "orderprocessor");
+    assert_eq!(normalize_identifier_for_file_stem("order_processor"), "orderprocessor");
+    assert_eq!(normalize_identifier_for_file_stem("Über-service_v2"), "überservicev2");
+    assert_eq!(normalize_identifier_for_file_stem("ΟΣ"), "ος");
+    assert_eq!(normalize_identifier_for_file_stem("ΟΣ_Χ"), normalize_identifier_for_file_stem("ΟΣΧ"));
+}
+
+#[test]
+fn test_score_token_tf_idf_applies_exact_file_stem_bonus() {
+    let normalized_term = normalize_identifier_for_file_stem("ÜberServiceV2");
+    let idf = (3.0_f64 / 2.0).ln();
+    let unboosted = score_token_tf_idf(0.001, idf, "src/Über-service_v2.rs", None);
+    let boosted = score_token_tf_idf(
+        0.001,
+        idf,
+        "src/Über-service_v2.rs",
+        Some(&normalized_term),
+    );
+
+    assert!((boosted - unboosted - 0.02 * idf).abs() < 1e-12);
+}
+
+#[test]
 fn test_tokenize_code() {
     let tokens = tokenize("private readonly HttpClient _client;", 2);
     assert_eq!(

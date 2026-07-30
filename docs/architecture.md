@@ -385,7 +385,7 @@ sequenceDiagram
 
 | # | Tool | Index/Source | Purpose |
 |---|------|-------------|---------|
-| 1 | `xray_grep` | ContentIndex | Full-text search with TF-IDF, substring, phrase, regex |
+| 1 | `xray_grep` | ContentIndex | Full-text relevance search with TF-IDF, exact-token file-stem signal, substring, phrase, regex |
 | 2 | `xray_fast` | FileIndex | Pre-built file name search (~35ms) |
 | 3 | `xray_definitions` | DefinitionIndex | Structural code search (classes, methods, etc.) |
 | 4 | `xray_callers` | DefinitionIndex + ContentIndex | Call tree analysis (up/down), DI-aware |
@@ -469,21 +469,22 @@ graph LR
     A[Search Terms] -->|split + lowercase| B[Tokens]
     B -->|HashMap lookup| C[Postings per token]
     C -->|merge by mode| D[File candidates]
-    D -->|TF-IDF score| E[Ranked results]
+    D -->|relevance score| E[Ranked results]
     E -->|apply filters| F[Filtered results]
     F -->|optional: read lines| G[Results with context]
 ```
 
-**TF-IDF scoring:**
+**Token relevance scoring:**
 
 ```
-score(term, file) = TF(term, file) × IDF(term)
+score(term, file) = (TF(term, file) + file_stem_bonus) × IDF(term)
 
-TF  = occurrences_in_file / total_tokens_in_file
-IDF = ln(total_files / files_containing_term)
+TF              = occurrences_in_file / total_tokens_in_file
+IDF             = ln(total_files / files_containing_term)
+file_stem_bonus = 0.02 when a single exact-token query matches the normalized file stem; otherwise 0
 ```
 
-Multi-term: scores are summed across matching terms. Files matching more terms rank higher naturally.
+File-stem normalization case-folds identifiers and removes separators, so `OrderProcessor` matches `order_processor.rs`. The bonus is disabled for substring, phrase, regex, line-regex, and multi-term searches. Multi-term scores are the sum of ordinary TF-IDF contributions across matching terms.
 
 ### Relevance ranking
 
@@ -522,7 +523,7 @@ For comma-separated multi-term queries, the **best** (lowest) tier across all te
 
 **`xray_grep` phrase mode:** sorted by occurrence count (descending).
 
-**Not ranked:** `xray_grep` token/substring mode (uses TF-IDF), regex mode in `xray_definitions` (no "exact match" semantics).
+**Not ranked by symbol-name tiers:** `xray_grep` token/substring mode uses content relevance scoring; regex mode in `xray_definitions` has no "exact match" semantics.
 
 #### Design decisions
 

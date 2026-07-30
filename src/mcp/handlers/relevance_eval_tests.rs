@@ -650,7 +650,7 @@ fn run_evaluation(spec: &RelevanceSpec, corpus_root: &Path, warm_up: bool) -> Of
     let quality = QualityReport {
         schema_version: REPORT_SCHEMA_VERSION,
         corpus_version: spec.corpus_version.clone(),
-        model: "tfidf-production-defaults".to_string(),
+        model: "tfidf-file-stem-v1".to_string(),
         metrics: summarize(&query_reports),
         scored_metrics,
         per_class,

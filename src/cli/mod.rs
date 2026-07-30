@@ -712,11 +712,26 @@ fn expand_grep_terms(
     } else if use_regex {
         expand_regex_terms(raw_terms, &index.index)
     } else {
-        Ok(raw_terms.to_vec())
+        let mut seen = std::collections::HashSet::new();
+        Ok(raw_terms
+            .iter()
+            .filter(|term| seen.insert((*term).clone()))
+            .cloned()
+            .collect())
     }
 }
 
 struct FileScore { file_path: String, lines: Vec<u32>, tf_idf: f64, occurrences: usize, terms_matched: usize }
+
+struct GrepScoreOptions {
+    require_all: bool,
+    raw_term_count: usize,
+    boost_exact_file_stem: bool,
+}
+
+fn exact_file_stem_boost_enabled(exact: bool, regex: bool) -> bool {
+    exact && !regex
+}
 
 /// Compute TF-IDF scores per file for expanded terms.
 fn score_grep_results(
@@ -725,11 +740,12 @@ fn score_grep_results(
     ext: &Option<String>,
     exclude_dir: &[String],
     exclude: &[String],
-    require_all: bool,
-    raw_term_count: usize,
+    options: GrepScoreOptions,
 ) -> Vec<FileScore> {
     let total_docs = index.files.len() as f64;
     let mut file_scores: HashMap<u32, FileScore> = HashMap::new();
+    let normalized_file_stem_term = (options.boost_exact_file_stem && terms.len() == 1)
+        .then(|| code_xray::normalize_identifier_for_file_stem(&terms[0]));
 
     for term in terms {
         if let Some(postings) = index.index.get(term.as_str()) {
@@ -747,7 +763,12 @@ fn score_grep_results(
                     index.file_token_counts[posting.file_id as usize] as f64
                 } else { 1.0 };
                 let tf = occurrences as f64 / file_total;
-                let tf_idf = tf * idf;
+                let tf_idf = code_xray::score_token_tf_idf(
+                    tf,
+                    idf,
+                    file_path,
+                    normalized_file_stem_term.as_deref(),
+                );
 
                 let entry = file_scores.entry(posting.file_id).or_insert(FileScore {
                     file_path: file_path.clone(), lines: Vec::new(), tf_idf: 0.0, occurrences: 0, terms_matched: 0,
@@ -761,7 +782,7 @@ fn score_grep_results(
     }
 
     let mut results: Vec<FileScore> = file_scores.into_values()
-        .filter(|fs| !require_all || fs.terms_matched >= raw_term_count).collect();
+        .filter(|fs| !options.require_all || fs.terms_matched >= options.raw_term_count).collect();
 
     for result in &mut results { result.lines.sort(); result.lines.dedup(); }
     results.sort_by(|a, b| b.tf_idf.partial_cmp(&a.tf_idf).unwrap_or(std::cmp::Ordering::Equal));
@@ -795,8 +816,16 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
 
     let raw_term_count = if args.regex || use_substring { raw_terms.len() } else { terms.len() };
     let results = score_grep_results(
-        &index, &terms, &args.ext, &args.exclude_dir, &args.exclude,
-        args.all, raw_term_count,
+        &index,
+        &terms,
+        &args.ext,
+        &args.exclude_dir,
+        &args.exclude,
+        GrepScoreOptions {
+            require_all: args.all,
+            raw_term_count,
+            boost_exact_file_stem: exact_file_stem_boost_enabled(args.exact, args.regex),
+        },
     );
 
     let match_count = results.len();

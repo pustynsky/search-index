@@ -291,10 +291,14 @@ fn test_expand_grep_terms_exact_mode() {
         vec![("httpclient", vec![Posting { file_id: 0, lines: vec![1] }])],
         vec![10],
     );
-    // Exact mode: terms returned as-is, no expansion
-    let raw = vec!["myterm".to_string()];
+    // Exact mode preserves first-seen order without duplicate weighting.
+    let raw = vec![
+        "myterm".to_string(),
+        "myterm".to_string(),
+        "other".to_string(),
+    ];
     let result = expand_grep_terms(&raw, &index, false, false).unwrap();
-    assert_eq!(result, vec!["myterm"]);
+    assert_eq!(result, vec!["myterm", "other"]);
 }
 
 #[test]
@@ -437,6 +441,22 @@ fn test_find_phrase_candidates_empty_tokens() {
 //  score_grep_results() tests
 // ═══════════════════════════════════════════════════════════════════
 
+fn grep_score_options(
+    require_all: bool,
+    raw_term_count: usize,
+    boost_exact_file_stem: bool,
+) -> GrepScoreOptions {
+    GrepScoreOptions { require_all, raw_term_count, boost_exact_file_stem }
+}
+
+#[test]
+fn test_exact_file_stem_boost_enabled_only_for_exact_non_regex() {
+    assert!(exact_file_stem_boost_enabled(true, false));
+    assert!(!exact_file_stem_boost_enabled(false, false));
+    assert!(!exact_file_stem_boost_enabled(false, true));
+    assert!(!exact_file_stem_boost_enabled(true, true));
+}
+
 #[test]
 fn test_score_grep_results_single_term() {
     // Need 3+ files so IDF > 0 (term appears in 2 of 3 files → IDF = ln(3/2) > 0)
@@ -454,7 +474,7 @@ fn test_score_grep_results_single_term() {
         vec![10, 20, 10],
     );
     let terms = vec!["httpclient".to_string()];
-    let results = score_grep_results(&index, &terms, &None, &[], &[], false, 1);
+    let results = score_grep_results(&index, &terms, &None, &[], &[], grep_score_options(false, 1, false));
     assert_eq!(results.len(), 2);
     // File 0 has 2 occurrences in 10 tokens (higher TF) → should rank higher
     assert_eq!(results[0].file_path, "src/a.cs");
@@ -481,7 +501,7 @@ fn test_score_grep_results_require_all_filters() {
     let terms = vec!["httpclient".to_string(), "ilogger".to_string()];
 
     // require_all = true, raw_term_count = 2 → only files with both terms
-    let results = score_grep_results(&index, &terms, &None, &[], &[], true, 2);
+    let results = score_grep_results(&index, &terms, &None, &[], &[], grep_score_options(true, 2, false));
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].file_path, "src/both.cs");
     assert_eq!(results[0].terms_matched, 2);
@@ -505,7 +525,7 @@ fn test_score_grep_results_require_all_false() {
     let terms = vec!["httpclient".to_string(), "ilogger".to_string()];
 
     // require_all = false → both files returned (OR)
-    let results = score_grep_results(&index, &terms, &None, &[], &[], false, 2);
+    let results = score_grep_results(&index, &terms, &None, &[], &[], grep_score_options(false, 2, false));
     assert_eq!(results.len(), 2);
 }
 
@@ -523,7 +543,7 @@ fn test_score_grep_results_with_ext_filter() {
     );
     let ext = Some("cs".to_string());
     let terms = vec!["httpclient".to_string()];
-    let results = score_grep_results(&index, &terms, &ext, &[], &[], false, 1);
+    let results = score_grep_results(&index, &terms, &ext, &[], &[], grep_score_options(false, 1, false));
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].file_path, "src/a.cs");
 }
@@ -542,7 +562,7 @@ fn test_score_grep_results_with_exclude() {
     );
     let exclude = vec!["mock".to_string()];
     let terms = vec!["httpclient".to_string()];
-    let results = score_grep_results(&index, &terms, &None, &[], &exclude, false, 1);
+    let results = score_grep_results(&index, &terms, &None, &[], &exclude, grep_score_options(false, 1, false));
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].file_path, "src/Service.cs");
 }
@@ -555,7 +575,7 @@ fn test_score_grep_results_empty_terms() {
         vec![10],
     );
     let terms: Vec<String> = vec![];
-    let results = score_grep_results(&index, &terms, &None, &[], &[], false, 0);
+    let results = score_grep_results(&index, &terms, &None, &[], &[], grep_score_options(false, 0, false));
     assert!(results.is_empty());
 }
 
@@ -571,10 +591,57 @@ fn test_score_grep_results_lines_deduped_and_sorted() {
         vec![10],
     );
     let terms = vec!["termx".to_string(), "termy".to_string()];
-    let results = score_grep_results(&index, &terms, &None, &[], &[], false, 2);
+    let results = score_grep_results(&index, &terms, &None, &[], &[], grep_score_options(false, 2, false));
     assert_eq!(results.len(), 1);
     // Lines should be sorted and deduped: [3, 5, 7]
     assert_eq!(results[0].lines, vec![3, 5, 7]);
+}
+
+#[test]
+fn test_score_grep_results_boosts_normalized_exact_file_stem() {
+    let index = make_test_index(
+        vec!["src/widget_service.rs", "test/WidgetServiceTests.rs", "src/other.rs"],
+        vec![("widgetservice", vec![
+            Posting { file_id: 0, lines: vec![1] },
+            Posting { file_id: 1, lines: vec![1] },
+        ])],
+        vec![1000, 100, 100],
+    );
+    let terms = vec!["widgetservice".to_string()];
+    let unboosted = score_grep_results(
+        &index,
+        &terms,
+        &None,
+        &[],
+        &[],
+        grep_score_options(false, 1, false),
+    );
+    let boosted = score_grep_results(
+        &index,
+        &terms,
+        &None,
+        &[],
+        &[],
+        grep_score_options(false, 1, true),
+    );
+
+    assert_eq!(unboosted[0].file_path, "test/WidgetServiceTests.rs");
+    assert_eq!(boosted[0].file_path, "src/widget_service.rs");
+    let expected_bonus = 0.02 * (3.0_f64 / 2.0).ln();
+    assert!(
+        (boosted[0].tf_idf - unboosted[1].tf_idf - expected_bonus).abs() < 1e-12
+    );
+
+    let multi_terms = vec!["widgetservice".to_string(), "missing".to_string()];
+    let multi_term = score_grep_results(
+        &index,
+        &multi_terms,
+        &None,
+        &[],
+        &[],
+        grep_score_options(false, 2, true),
+    );
+    assert_eq!(multi_term[0].file_path, "test/WidgetServiceTests.rs");
 }
 
 #[test]
@@ -596,7 +663,7 @@ fn test_score_grep_results_tf_idf_ranking() {
         vec![5, 500, 10], // small file has 5 tokens, large has 500, unrelated has 10
     );
     let terms = vec!["targetterm".to_string()];
-    let results = score_grep_results(&index, &terms, &None, &[], &[], false, 1);
+    let results = score_grep_results(&index, &terms, &None, &[], &[], grep_score_options(false, 1, false));
     assert_eq!(results.len(), 2);
     // Small file should rank first (higher TF-IDF)
     assert_eq!(results[0].file_path, "small.cs");
@@ -611,7 +678,7 @@ fn test_score_grep_results_nonexistent_term() {
         vec![10],
     );
     let terms = vec!["nonexistent".to_string()];
-    let results = score_grep_results(&index, &terms, &None, &[], &[], false, 1);
+    let results = score_grep_results(&index, &terms, &None, &[], &[], grep_score_options(false, 1, false));
     assert!(results.is_empty());
 }
 

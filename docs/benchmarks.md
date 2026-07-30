@@ -335,7 +335,7 @@ Three distinct indexes, each built independently:
 
 ## Search relevance evaluation
 
-The checked relevance corpus under `benches/fixtures/relevance/` contains 18 neutral source/config/doc files and 40 graded queries across eight query classes. Every top-10 result must be graded or covered by an explicit query- or corpus-level negative policy, and every graded path must be lexically reachable. Five exact-phrase queries exercise matching and occurrence-count ranking as a scorer-independent canary; the other 35 queries exercise the TF-IDF path used for scorer comparisons. The test-only runner calls the production `xray_grep` MCP dispatch path; it does not duplicate the scoring implementation.
+The checked relevance corpus under `benches/fixtures/relevance/` contains 18 neutral source/config/doc files and 40 graded queries across eight query classes. Every top-10 result must be graded or covered by an explicit query- or corpus-level negative policy, and every graded path must be lexically reachable. Five exact-phrase queries exercise matching and occurrence-count ranking as a scorer-independent canary; the other 35 queries exercise production scorer paths, including TF-IDF and the exact single-token file-stem signal. The test-only runner calls the production `xray_grep` MCP dispatch path; it does not duplicate the scoring implementation.
 
 Run the deterministic quality gate:
 
@@ -362,16 +362,16 @@ cargo test --bin xray write_tfidf_relevance_report -- --ignored --nocapture
 
 NDCG uses grades 1–3, MRR@10 treats grades 2–3 as useful, and Success@1 requires a grade-3 primary result at rank 1. Recall@50 counts every judged path (grades 1–3), but with the checked 18-file corpus it is a matching/tokenizer regression canary, not a ranking metric.
 
-Current production-default baseline:
+Current `tfidf-file-stem-v1` baseline:
 
-| Metric | All 40 queries | 35 TF-IDF-ranked queries |
+| Metric | All 40 queries | 35 production-scored queries |
 | --- | ---: | ---: |
-| NDCG@10 | 0.906323 | 0.916867 |
-| MRR@10 | 0.975000 | 0.971429 |
+| NDCG@10 | 0.914894 | 0.926663 |
+| MRR@10 | 0.987500 | 0.985714 |
 | Recall@50 (matching canary) | 1.000000 | 1.000000 |
-| Success@1 (grade 3) | 0.550000 | 0.628571 |
+| Success@1 (grade 3) | 0.575000 | 0.657143 |
 
-Use the 35-query scorer aggregate when comparing TF-IDF, BM25, or boosts. The all-40 aggregate additionally guards phrase matching and occurrence-count ordering, but its five phrase queries cannot move when only the TF-IDF formula changes. The generated-noise class now uses distinct method-plus-type requests with method-specific judgments and grades type-only generated bindings as weak context rather than as false negatives (`NDCG@10 = 0.949760`, `Success@1 = 0.8`). Exact identifiers remain the weakest TF-IDF-ranked class (`NDCG@10 = 0.812540`, `Success@1 = 0.2`). A private large-repository corpus should remain local; only anonymized aggregate results belong in the repository.
+Use the 35-query scorer aggregate when comparing TF-IDF, BM25, or boosts. The all-40 aggregate additionally guards phrase matching and occurrence-count ordering, but its five phrase queries cannot move when only token scoring changes. The generated-noise class uses distinct method-plus-type requests with method-specific judgments and grades type-only generated bindings as weak context rather than as false negatives (`NDCG@10 = 0.949760`, `Success@1 = 0.8`). The normalized file-stem signal raises the exact-identifier class to `NDCG@10 = 0.881110`, `MRR@10 = 1.0`, and `Success@1 = 0.4`; broad common terms are now the weakest production-scored class at `NDCG@10 = 0.862921`. A private large-repository corpus should remain local; only anonymized aggregate results belong in the repository.
 
 The schema-v2 baseline stores both query and corpus digests. Query changes, judgments, ranked top paths, any file name or bytes under the corpus root, or indexed extensions therefore require explicit baseline review. After an intentional ranking or corpus change, run the ignored report, review `target/relevance/tfidf-baseline-candidate.json`, explain every moved aggregate and per-class metric in the PR, then replace `benches/fixtures/relevance/baseline-tfidf.json` with that generated candidate. Do not hand-edit metric literals or either digest.
 

@@ -1,20 +1,20 @@
 {
   "schemaVersion": 2,
   "corpusVersion": "xray-relevance-v1",
-  "model": "tfidf-production-defaults",
+  "model": "tfidf-file-stem-v1",
   "metrics": {
     "queryCount": 40,
-    "ndcgAt10": 0.906323,
-    "mrrAt10": 0.975,
+    "ndcgAt10": 0.914894,
+    "mrrAt10": 0.9875,
     "recallAt50": 1.0,
-    "successAt1": 0.55
+    "successAt1": 0.575
   },
   "scoredMetrics": {
     "queryCount": 35,
-    "ndcgAt10": 0.916867,
-    "mrrAt10": 0.971429,
+    "ndcgAt10": 0.926663,
+    "mrrAt10": 0.985714,
     "recallAt50": 1.0,
-    "successAt1": 0.628571
+    "successAt1": 0.657143
   },
   "perClass": {
     "broad_common_term": {
@@ -33,10 +33,10 @@
     },
     "exact_identifier": {
       "queryCount": 5,
-      "ndcgAt10": 0.81254,
-      "mrrAt10": 0.9,
+      "ndcgAt10": 0.88111,
+      "mrrAt10": 1.0,
       "recallAt50": 1.0,
-      "successAt1": 0.2
+      "successAt1": 0.4
     },
     "exact_phrase_error": {
       "queryCount": 5,
@@ -74,6 +74,6 @@
       "successAt1": 0.6
     }
   },
-  "queryDigest": "9691919d3178d0a7",
+  "queryDigest": "571f7baa2fea088a",
   "corpusDigest": "c2c9440af4c1fffe"
 }

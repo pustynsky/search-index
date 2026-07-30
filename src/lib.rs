@@ -1103,6 +1103,52 @@ fn fast_lowercase(s: &str) -> String {
     }
 }
 
+/// Additive pseudo-TF calibrated by the checked relevance harness.
+#[doc(hidden)]
+pub const EXACT_FILE_STEM_TF_BONUS: f64 = 0.02;
+
+#[doc(hidden)]
+#[must_use]
+pub fn normalize_identifier_for_file_stem(value: &str) -> String {
+    value
+        .chars()
+        .filter(|character| character.is_alphanumeric())
+        .collect::<String>()
+        .to_lowercase()
+}
+
+fn normalized_file_stem_matches(stem: &str, normalized_term: &str) -> bool {
+    if stem.is_ascii() && normalized_term.is_ascii() {
+        stem.bytes()
+            .filter(|byte| byte.is_ascii_alphanumeric())
+            .map(|byte| byte.to_ascii_lowercase())
+            .eq(normalized_term.bytes())
+    } else {
+        normalize_identifier_for_file_stem(stem) == normalized_term
+    }
+}
+
+#[doc(hidden)]
+#[must_use]
+pub fn score_token_tf_idf(
+    tf: f64,
+    idf: f64,
+    file_path: &str,
+    normalized_file_stem_term: Option<&str>,
+) -> f64 {
+    let file_stem_tf = normalized_file_stem_term
+        .filter(|term| !term.is_empty())
+        .and_then(|term| {
+            std::path::Path::new(file_path)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(|stem| (stem, term))
+        })
+        .filter(|(stem, term)| normalized_file_stem_matches(stem, term))
+        .map_or(0.0, |_| EXACT_FILE_STEM_TF_BONUS);
+    (tf + file_stem_tf) * idf
+}
+
 /// Canonicalize a path and return it with `\\?\` prefix stripped + separators
 /// normalised to `/`. Intended for tests that need to compare paths against
 /// indexer/walker output, which always passes through `fs::canonicalize` +

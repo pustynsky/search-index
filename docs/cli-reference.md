@@ -116,7 +116,7 @@ xray content-index -d C:\Projects -e cs --hidden --no-ignore
 
 ## `xray grep` — Search Inverted Content Index
 
-Searches the inverted index for tokens. Results are ranked by TF-IDF score. Supports multi-term search (AND/OR) and regex pattern matching against indexed tokens.
+Searches the inverted index for tokens. Results use TF-IDF ranking; a single `--exact` term also receives a normalized file-stem signal when it matches the stem. Supports multi-term search (AND/OR) and regex pattern matching against indexed tokens.
 
 ```bash
 # Search for a single term (results ranked by relevance)
@@ -198,7 +198,7 @@ xray grep "HttpClient" -d C:\Projects -e cs
 | `-B, --before <N>`  | Show N lines before each match (with --show-lines)                                                                                                                                                                         |
 | `-A, --after <N>`   | Show N lines after each match (with --show-lines)                                                                                                                                                                          |
 | `--phrase`          | Phrase search: find exact phrase via index + verification. When the phrase contains punctuation (e.g., `</Property>`), a post-filter verifies matching lines against the raw untokenized text to eliminate false positives |
-| `--exact`           | Exact token matching only (disables default substring search)                                                                                                                                                              |
+| `--exact`           | Exact token matching only (disables default substring search); a single term can receive the normalized file-stem ranking signal                                                                                                                                                              |
 
 ---
 

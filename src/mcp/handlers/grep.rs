@@ -10,7 +10,7 @@ use tracing::{debug, info, warn};
 use crate::mcp::protocol::ToolCallResult;
 use crate::{read_file_lossy, tokenize, ContentIndex};
 use crate::index::build_trigram_index_from_tokens;
-use code_xray::generate_trigrams;
+use code_xray::{generate_trigrams, normalize_identifier_for_file_stem, score_token_tf_idf};
 
 #[allow(unused_imports)] // `self` needed by test submodules for utils::ExcludePatterns
 use super::utils::{self,
@@ -2545,17 +2545,20 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         invert_cap,
     })
 }
+
 /// Score files for normal (non-substring, non-phrase) token search.
 /// Iterates over terms, looks up postings, computes TF-IDF, accumulates file scores.
 fn score_normal_token_search(
     terms: &[String],
     index: &ContentIndex,
-    _params: &GrepSearchParams,
+    params: &GrepSearchParams,
     scope: &ResolvedFileScope,
 ) -> (HashMap<u32, FileScoreEntry>, TokenSearchTelemetry) {
     let total_docs = index.files.len() as f64;
     let mut file_scores: HashMap<u32, FileScoreEntry> = HashMap::new();
     let mut telemetry = TokenSearchTelemetry::default();
+    let normalized_file_stem_term = (params.requested_mode == "token" && terms.len() == 1)
+        .then(|| normalize_identifier_for_file_stem(&terms[0]));
 
     for term in terms {
         if let Some(postings) = index.index.get(term.as_str()) {
@@ -2583,7 +2586,12 @@ fn score_normal_token_search(
                     1.0
                 };
                 let tf = occurrences as f64 / file_total;
-                let tf_idf = tf * idf;
+                let tf_idf = score_token_tf_idf(
+                    tf,
+                    idf,
+                    file_path,
+                    normalized_file_stem_term.as_deref(),
+                );
 
                 let entry = file_scores.entry(posting.file_id).or_insert(FileScoreEntry {
                     file_path: file_path.clone(),
