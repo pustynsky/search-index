@@ -3,6 +3,8 @@
 
 ## 0.5.0 (2026-07-31)
 
+- **Release gates now pass on the current stable Rust toolchain.** File-stem scoring keeps path parsing lazy while satisfying the new lint, and adaptive-guidance coverage separates timing-sensitive truncation from full-budget cadence checks while retaining framed and unframed wire-metric assertions. Production scoring, truncation, and reminder cadence are unchanged.
+
 - **Make MCP policy reminders adaptive while keeping actionable guidance continuous.** The default emits the generic Xray policy on the first response, every 25 responses, and after 30 minutes of inactivity; `XRAY_POLICY_REMINDER=always|off` provides explicit compatibility and suppression modes. Tool-specific `nextStepHint` and unknown-argument warnings remain available on every applicable response, with compact unframed text when no policy reminder is due. `XRAY_GUIDANCE_PREFIX` remains a presentation-only switch.
 
 - **Added test-only lexical scorer matrices and completed locked BM25 and class-aware hybrid comparisons.** Candidate and quality runners can evaluate TF-IDF, smoothed TF-IDF, BM25, and a frozen BM25-for-OR/TF-IDF-for-AND policy without changing production behavior. Pure BM25 was rejected after repeatable `multi_term_and` regressions and lower holdout MRR@10. The hybrid then improved independent-holdout NDCG@10 by 0.134922, MRR@10 by 0.133061, and Success@1 by 0.142857 while its TF-IDF routing invariant kept all AND rankings identical, but failed the pre-frozen no-class-regression gate (`exact_identifier` NDCG@10: -0.010852). It was rejected without retuning, so production remains on `tfidf-file-stem-v1`.
