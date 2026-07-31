@@ -1,7 +1,7 @@
 # Changelog
 
 
-## Unreleased
+## 0.5.0 (2026-07-31)
 
 - **Make MCP policy reminders adaptive while keeping actionable guidance continuous.** The default emits the generic Xray policy on the first response, every 25 responses, and after 30 minutes of inactivity; `XRAY_POLICY_REMINDER=always|off` provides explicit compatibility and suppression modes. Tool-specific `nextStepHint` and unknown-argument warnings remain available on every applicable response, with compact unframed text when no policy reminder is due. `XRAY_GUIDANCE_PREFIX` remains a presentation-only switch.
 

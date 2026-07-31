@@ -1665,7 +1665,7 @@ $testBlocks += , {
         New-Item -ItemType Directory -Path $tmpDir | Out-Null
 
         # Create test file
-        Set-Content -Path (Join-Path $tmpDir "test.txt") -Value "line1`nline2`nline3`nline4`nline5"
+        Set-Content -Path (Join-Path $tmpDir "test.txt") -Value "line1`nline2`nline3`nline4`nline5" -NoNewline
 
         # Test 1: Mode A — replace line 2
         $msgs = @(
@@ -1794,7 +1794,7 @@ $testBlocks += , {
         if ($jsonLine -notmatch 'filesEdited') { $errors += "missing filesEdited in summary" }
 
         # Test 2: Insert after
-        Set-Content -Path (Join-Path $tmpDir "c.txt") -Value "using System;`nusing System.IO;`n`nclass Foo {}"
+        Set-Content -Path (Join-Path $tmpDir "c.txt") -Value "using System;`nusing System.IO;`n`nclass Foo {}" -NoNewline
         $pathC = ($tmpDir -replace '\\', '/') + '/c.txt'
         $msgs2 = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
@@ -1808,7 +1808,7 @@ $testBlocks += , {
         if ($cc -notmatch 'System\.Linq') { $errors += "insertAfter content missing" }
 
         # Test 3: expectedContext
-        Set-Content -Path (Join-Path $tmpDir "d.txt") -Value "var semaphore = new SemaphoreSlim(10);`nDoWork();"
+        Set-Content -Path (Join-Path $tmpDir "d.txt") -Value "var semaphore = new SemaphoreSlim(10);`nDoWork();" -NoNewline
         $pathD = ($tmpDir -replace '\\', '/') + '/d.txt'
         $msgs3 = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
