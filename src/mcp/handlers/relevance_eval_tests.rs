@@ -14,6 +14,7 @@ use super::{dispatch_tool, HandlerContext};
 const REPORT_SCHEMA_VERSION: u32 = 3;
 const CANDIDATE_REPORT_SCHEMA_VERSION: u32 = 1;
 const PRODUCTION_RELEVANCE_MODEL: &str = "tfidf-file-stem-v1";
+const HYBRID_RELEVANCE_MODEL: &str = "hybrid-bm25-or-tfidf-and-v1";
 const EXPECTED_QUERY_COUNT: usize = 40;
 const EXPECTED_TFIDF_QUERY_COUNT: usize = 35;
 const EXPECTED_CLASS_COUNT: usize = 8;
@@ -22,9 +23,44 @@ const QUALITY_CUTOFF: usize = 10;
 const RECALL_CUTOFF: usize = 50;
 const USEFUL_GRADE: u8 = 2;
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RelevanceScoringPolicy {
+    Fixed(LexicalScoringModel),
+    HybridBm25OrTfidfAnd,
+}
+
+impl From<LexicalScoringModel> for RelevanceScoringPolicy {
+    fn from(model: LexicalScoringModel) -> Self {
+        Self::Fixed(model)
+    }
+}
+
+impl RelevanceScoringPolicy {
+    fn model_for_request(self, request: &Value) -> LexicalScoringModel {
+        match self {
+            Self::Fixed(model) => model,
+            Self::HybridBm25OrTfidfAnd => {
+                let request = request.as_object().expect("validated request object");
+                let uses_and = request.get("mode").and_then(Value::as_str) == Some("and");
+                let uses_unvalidated_mode = ["phrase", "lineRegex", "regex"].iter()
+                    .any(|field| request.get(*field).and_then(Value::as_bool) == Some(true));
+                if uses_and || uses_unvalidated_mode {
+                    LexicalScoringModel::TfIdfFileStem
+                } else {
+                    LexicalScoringModel::Bm25 { k1: 2.0, b: 0.5 }
+                }
+            }
+        }
+    }
+
+    fn is_production(self) -> bool {
+        self == Self::Fixed(LexicalScoringModel::TfIdfFileStem)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct RelevanceScorerConfig {
-    scoring_model: LexicalScoringModel,
+    scoring_policy: RelevanceScoringPolicy,
     default_label: String,
 }
 
@@ -338,13 +374,16 @@ fn validate_query_request(id: &str, request: &Value) {
     assert!(terms.iter().all(Value::is_string), "{id} has a non-string term");
 }
 
-fn validate_model_sensitive_queries<'a>(
-    scoring_models: impl IntoIterator<Item = LexicalScoringModel>,
+fn validate_model_sensitive_queries<'a, P>(
+    scoring_policies: impl IntoIterator<Item = P>,
     queries: impl IntoIterator<Item = (&'a str, &'a Value)>,
-) {
-    if scoring_models.into_iter()
-        .all(|model| model == LexicalScoringModel::TfIdfFileStem)
-    {
+) where
+    P: Into<RelevanceScoringPolicy>,
+{
+    let has_experimental_policy = scoring_policies.into_iter()
+        .map(Into::into)
+        .any(|policy| !policy.is_production());
+    if !has_experimental_policy {
         return;
     }
     for (id, request) in queries {
@@ -358,10 +397,10 @@ fn validate_model_sensitive_queries<'a>(
 
 fn validate_model_sensitive_response(
     id: &str,
-    scoring_model: LexicalScoringModel,
+    scoring_policy: impl Into<RelevanceScoringPolicy>,
     output: &Value,
 ) {
-    if scoring_model == LexicalScoringModel::TfIdfFileStem {
+    if scoring_policy.into().is_production() {
         return;
     }
     assert_eq!(
@@ -627,8 +666,9 @@ fn evaluate_query(
     corpus_root: &Path,
     query: &RelevanceQuery,
     global_negative_paths: &HashSet<&str>,
-    scoring_model: LexicalScoringModel,
+    scoring_policy: RelevanceScoringPolicy,
 ) -> (QueryQuality, u128) {
+    let scoring_model = scoring_policy.model_for_request(&query.request);
     let mut request = query.request.clone();
     let request_object = request.as_object_mut().expect("validated request object");
     request_object.insert("maxResults".to_string(), Value::from(RECALL_CUTOFF));
@@ -642,7 +682,7 @@ fn evaluate_query(
     assert!(!result.is_error, "{} failed: {}", query.id, result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text)
         .unwrap_or_else(|error| panic!("{} returned invalid JSON: {error}", query.id));
-    validate_model_sensitive_response(&query.id, scoring_model, &output);
+    validate_model_sensitive_response(&query.id, scoring_policy, &output);
     let search_mode = output.pointer("/summary/searchMode")
         .and_then(Value::as_str)
         .unwrap_or_else(|| panic!("{} response has no searchMode: {output}", query.id))
@@ -709,8 +749,9 @@ fn collect_candidates(
     spec: &CandidateSpec,
     corpus_root: &Path,
     model: &str,
-    scoring_model: LexicalScoringModel,
+    scoring_policy: impl Into<RelevanceScoringPolicy>,
 ) -> CandidateReport {
+    let scoring_policy = scoring_policy.into();
     validate_candidate_spec(spec);
     let (context, corpus_root, _index_temp) = build_context(&spec.extensions, corpus_root);
     let digest = corpus_digest(&corpus_root, &spec.extensions);
@@ -719,7 +760,7 @@ fn collect_candidates(
         &context,
         &corpus_root,
         model,
-        scoring_model,
+        scoring_policy,
         &digest,
     )
 }
@@ -730,16 +771,17 @@ fn collect_candidates_with_context(
     context: &HandlerContext,
     corpus_root: &Path,
     model: &str,
-    scoring_model: LexicalScoringModel,
+    scoring_policy: RelevanceScoringPolicy,
     corpus_digest: &str,
 ) -> CandidateReport {
     assert!(!model.trim().is_empty(), "candidate model label cannot be empty");
     validate_model_sensitive_queries(
-        [scoring_model],
+        [scoring_policy],
         spec.queries.iter().map(|query| (query.id.as_str(), &query.request)),
     );
     let mut query_reports = Vec::with_capacity(spec.queries.len());
     for query in &spec.queries {
+        let scoring_model = scoring_policy.model_for_request(&query.request);
         let mut request = query.request.clone();
         let request_object = request.as_object_mut().expect("validated request object");
         request_object.insert("maxResults".to_string(), Value::from(RECALL_CUTOFF));
@@ -750,7 +792,7 @@ fn collect_candidates_with_context(
         assert!(!result.is_error, "{} failed: {}", query.id, result.content[0].text);
         let output: Value = serde_json::from_str(&result.content[0].text)
             .unwrap_or_else(|error| panic!("{} returned invalid JSON: {error}", query.id));
-        validate_model_sensitive_response(&query.id, scoring_model, &output);
+        validate_model_sensitive_response(&query.id, scoring_policy, &output);
         validate_complete_ranked_response(&output)
             .unwrap_or_else(|error| panic!("{} response is incomplete: {error}", query.id));
         let search_mode = output.pointer("/summary/searchMode")
@@ -795,12 +837,20 @@ fn collect_candidates_with_context(
 fn parse_relevance_scorer(value: &str) -> Result<RelevanceScorerConfig, String> {
     match value {
         "tfidf-file-stem-v1" => Ok(RelevanceScorerConfig {
-            scoring_model: LexicalScoringModel::TfIdfFileStem,
+            scoring_policy: RelevanceScoringPolicy::Fixed(
+                LexicalScoringModel::TfIdfFileStem,
+            ),
             default_label: "tfidf-file-stem-v1".to_string(),
         }),
         "smoothed-tfidf-file-stem-v2" => Ok(RelevanceScorerConfig {
-            scoring_model: LexicalScoringModel::SmoothedTfIdf,
+            scoring_policy: RelevanceScoringPolicy::Fixed(
+                LexicalScoringModel::SmoothedTfIdf,
+            ),
             default_label: "smoothed-tfidf-file-stem-v2".to_string(),
+        }),
+        HYBRID_RELEVANCE_MODEL => Ok(RelevanceScorerConfig {
+            scoring_policy: RelevanceScoringPolicy::HybridBm25OrTfidfAnd,
+            default_label: HYBRID_RELEVANCE_MODEL.to_string(),
         }),
         _ => {
             let parameters = value.strip_prefix("bm25:")
@@ -828,7 +878,9 @@ fn parse_relevance_scorer(value: &str) -> Result<RelevanceScorerConfig, String> 
                 return Err("BM25 b must be finite and between zero and one".to_string());
             }
             Ok(RelevanceScorerConfig {
-                scoring_model: LexicalScoringModel::Bm25 { k1, b },
+                scoring_policy: RelevanceScoringPolicy::Fixed(
+                    LexicalScoringModel::Bm25 { k1, b },
+                ),
                 default_label: format!("bm25-file-stem-v2-k1-{k1}-b-{b}"),
             })
         }
@@ -879,8 +931,7 @@ fn relevance_model_from_env_value(
     match value {
         Ok(model) => {
             assert!(
-                scorer.scoring_model == LexicalScoringModel::TfIdfFileStem
-                    || model == scorer.default_label,
+                scorer.scoring_policy.is_production() || model == scorer.default_label,
                 "XRAY_RELEVANCE_MODEL cannot override an experimental scorer label",
             );
             model
@@ -901,8 +952,9 @@ fn run_evaluation(
     corpus_root: &Path,
     warm_up: bool,
     model: &str,
-    scoring_model: LexicalScoringModel,
+    scoring_policy: impl Into<RelevanceScoringPolicy>,
 ) -> OfflineReport {
+    let scoring_policy = scoring_policy.into();
     validate_spec(spec, corpus_root);
     let (context, corpus_root, _index_temp) = build_context(&spec.extensions, corpus_root);
     let digest = corpus_digest(&corpus_root, &spec.extensions);
@@ -912,7 +964,7 @@ fn run_evaluation(
         &corpus_root,
         warm_up,
         model,
-        scoring_model,
+        scoring_policy,
         &digest,
     )
 }
@@ -923,12 +975,12 @@ fn run_evaluation_with_context(
     corpus_root: &Path,
     warm_up: bool,
     model: &str,
-    scoring_model: LexicalScoringModel,
+    scoring_policy: RelevanceScoringPolicy,
     corpus_digest: &str,
 ) -> OfflineReport {
     assert!(!model.trim().is_empty(), "relevance model label cannot be empty");
     validate_model_sensitive_queries(
-        [scoring_model],
+        [scoring_policy],
         spec.queries.iter().map(|query| (query.id.as_str(), &query.request)),
     );
     let global_negative_paths: HashSet<&str> = spec.global_negatives.iter()
@@ -941,7 +993,7 @@ fn run_evaluation_with_context(
                 corpus_root,
                 query,
                 &global_negative_paths,
-                scoring_model,
+                scoring_policy,
             );
         }
     }
@@ -955,7 +1007,7 @@ fn run_evaluation_with_context(
                 corpus_root,
                 query,
                 &global_negative_paths,
-                scoring_model,
+                scoring_policy,
             );
         query_reports.push(quality);
         query_latencies.push(QueryLatency {
@@ -1335,14 +1387,46 @@ fn relevance_candidate_report_is_rank_blind() {
 }
 
 #[test]
+fn relevance_hybrid_policy_routes_only_validated_or_modes_to_bm25() {
+    let policy = RelevanceScoringPolicy::HybridBm25OrTfidfAnd;
+    let bm25 = LexicalScoringModel::Bm25 { k1: 2.0, b: 0.5 };
+    assert_eq!(
+        policy.model_for_request(&serde_json::json!({"terms": ["needle"]})),
+        bm25,
+    );
+    assert_eq!(
+        policy.model_for_request(&serde_json::json!({
+            "terms": ["needle"],
+            "substring": false,
+        })),
+        bm25,
+    );
+    for request in [
+        serde_json::json!({"terms": ["needle", "marker"], "mode": "and"}),
+        serde_json::json!({"terms": ["needle.*"], "regex": true}),
+        serde_json::json!({"terms": ["needle marker"], "phrase": true}),
+        serde_json::json!({"terms": ["needle.*"], "lineRegex": true}),
+    ] {
+        assert_eq!(
+            policy.model_for_request(&request),
+            LexicalScoringModel::TfIdfFileStem,
+        );
+    }
+}
+
+#[test]
 fn relevance_scorer_override_changes_dispatch_ranking() {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::canonicalize_test_root(temp.path());
-    fs::write(root.join("a_short.rs"), "needle\n").unwrap();
+    fs::write(root.join("a_short.rs"), "needle marker\n").unwrap();
     fs::write(root.join("m_unrelated.rs"), "filler\n").unwrap();
     fs::write(
         root.join("z_long.rs"),
-        format!("{}{}\n", "needle ".repeat(20), "filler ".repeat(80)),
+        format!(
+            "{}marker {}\n",
+            "needle ".repeat(20),
+            "filler ".repeat(80),
+        ),
     ).unwrap();
     let extensions = vec!["rs".to_string()];
     let (context, corpus_root, _index_temp) = build_context(&extensions, &root);
@@ -1352,13 +1436,14 @@ fn relevance_scorer_override_changes_dispatch_ranking() {
         "maxResults": 2,
         "showLines": false,
     });
-    let ranked_paths = |model| {
+    let ranked_paths = |policy: RelevanceScoringPolicy, request: &Value| {
+        let model = policy.model_for_request(request);
         let result = with_test_lexical_scoring_model(model, || {
-            dispatch_tool(&context, "xray_grep", &request)
+            dispatch_tool(&context, "xray_grep", request)
         });
         assert!(!result.is_error, "{}", result.content[0].text);
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-        validate_model_sensitive_response("dispatch-ranking", model, &output);
+        validate_model_sensitive_response("dispatch-ranking", policy, &output);
         output["files"].as_array().unwrap().iter()
             .map(|file| {
                 relative_result_path(&corpus_root, file["path"].as_str().unwrap())
@@ -1367,12 +1452,34 @@ fn relevance_scorer_override_changes_dispatch_ranking() {
     };
 
     assert_eq!(
-        ranked_paths(LexicalScoringModel::TfIdfFileStem),
+        ranked_paths(
+            RelevanceScoringPolicy::Fixed(LexicalScoringModel::TfIdfFileStem),
+            &request,
+        ),
         vec!["a_short.rs", "z_long.rs"],
     );
     assert_eq!(
-        ranked_paths(LexicalScoringModel::Bm25 { k1: 2.0, b: 0.5 }),
+        ranked_paths(
+            RelevanceScoringPolicy::Fixed(
+                LexicalScoringModel::Bm25 { k1: 2.0, b: 0.5 },
+            ),
+            &request,
+        ),
         vec!["z_long.rs", "a_short.rs"],
+    );
+    let hybrid = RelevanceScoringPolicy::HybridBm25OrTfidfAnd;
+    assert_eq!(
+        ranked_paths(hybrid, &request),
+        vec!["z_long.rs", "a_short.rs"],
+    );
+    let and_request = serde_json::json!({
+        "terms": ["needle", "marker"],
+        "mode": "and",
+        "substring": false,
+    });
+    assert_eq!(
+        ranked_paths(hybrid, &and_request),
+        vec!["a_short.rs", "z_long.rs"],
     );
 }
 
@@ -1424,7 +1531,9 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 #[test]
 fn relevance_model_env_routing_is_explicit() {
     let production = RelevanceScorerConfig {
-        scoring_model: LexicalScoringModel::TfIdfFileStem,
+        scoring_policy: RelevanceScoringPolicy::Fixed(
+            LexicalScoringModel::TfIdfFileStem,
+        ),
         default_label: "fallback-model".to_string(),
     };
     assert_eq!(
@@ -1440,6 +1549,13 @@ fn relevance_model_env_routing_is_explicit() {
     let panic = std::panic::catch_unwind(|| relevance_model_from_env_value(
         Ok("tfidf-file-stem-v1".to_string()),
         &experimental,
+    )).unwrap_err();
+    assert!(panic_message(panic).contains("cannot override"));
+
+    let hybrid = parse_relevance_scorer(HYBRID_RELEVANCE_MODEL).unwrap();
+    let panic = std::panic::catch_unwind(|| relevance_model_from_env_value(
+        Ok("tfidf-file-stem-v1".to_string()),
+        &hybrid,
     )).unwrap_err();
     assert!(panic_message(panic).contains("cannot override"));
 
@@ -1460,13 +1576,18 @@ fn relevance_scorer_validation_rejects_model_insensitive_modes() {
             [LexicalScoringModel::TfIdfFileStem],
             std::iter::once(("query", &request)),
         );
-        let panic = std::panic::catch_unwind(|| {
-            validate_model_sensitive_queries(
-                [LexicalScoringModel::SmoothedTfIdf],
-                std::iter::once(("query", &request)),
-            );
-        }).unwrap_err();
-        assert!(panic_message(panic).contains(field));
+        for policy in [
+            RelevanceScoringPolicy::Fixed(LexicalScoringModel::SmoothedTfIdf),
+            RelevanceScoringPolicy::HybridBm25OrTfidfAnd,
+        ] {
+            let panic = std::panic::catch_unwind(|| {
+                validate_model_sensitive_queries(
+                    [policy],
+                    std::iter::once(("query", &request)),
+                );
+            }).unwrap_err();
+            assert!(panic_message(panic).contains(field));
+        }
     }
 
     let changed_output = serde_json::json!({"execution": {"modeChanged": true}});
@@ -1475,14 +1596,17 @@ fn relevance_scorer_validation_rejects_model_insensitive_modes() {
         LexicalScoringModel::TfIdfFileStem,
         &changed_output,
     );
-    let panic = std::panic::catch_unwind(|| {
-        validate_model_sensitive_response(
-            "query",
+    for policy in [
+        RelevanceScoringPolicy::Fixed(
             LexicalScoringModel::Bm25 { k1: 2.0, b: 0.5 },
-            &changed_output,
-        );
-    }).unwrap_err();
-    assert!(panic_message(panic).contains("changed search mode"));
+        ),
+        RelevanceScoringPolicy::HybridBm25OrTfidfAnd,
+    ] {
+        let panic = std::panic::catch_unwind(|| {
+            validate_model_sensitive_response("query", policy, &changed_output);
+        }).unwrap_err();
+        assert!(panic_message(panic).contains("changed search mode"));
+    }
 }
 
 #[test]
@@ -1490,24 +1614,38 @@ fn relevance_scorer_parsing_is_explicit() {
     assert_eq!(
         relevance_scorer_from_env_value(Err(std::env::VarError::NotPresent)),
         RelevanceScorerConfig {
-            scoring_model: LexicalScoringModel::TfIdfFileStem,
+            scoring_policy: RelevanceScoringPolicy::Fixed(
+                LexicalScoringModel::TfIdfFileStem,
+            ),
             default_label: PRODUCTION_RELEVANCE_MODEL.to_string(),
         },
     );
     assert_eq!(
         parse_relevance_scorer("smoothed-tfidf-file-stem-v2").unwrap(),
         RelevanceScorerConfig {
-            scoring_model: LexicalScoringModel::SmoothedTfIdf,
+            scoring_policy: RelevanceScoringPolicy::Fixed(
+                LexicalScoringModel::SmoothedTfIdf,
+            ),
             default_label: "smoothed-tfidf-file-stem-v2".to_string(),
         },
     );
     assert_eq!(
         parse_relevance_scorer("bm25:k1=1.2,b=0.75").unwrap(),
         RelevanceScorerConfig {
-            scoring_model: LexicalScoringModel::Bm25 { k1: 1.2, b: 0.75 },
+            scoring_policy: RelevanceScoringPolicy::Fixed(
+                LexicalScoringModel::Bm25 { k1: 1.2, b: 0.75 },
+            ),
             default_label: "bm25-file-stem-v2-k1-1.2-b-0.75".to_string(),
         },
     );
+    assert_eq!(
+        parse_relevance_scorer(HYBRID_RELEVANCE_MODEL).unwrap(),
+        RelevanceScorerConfig {
+            scoring_policy: RelevanceScoringPolicy::HybridBm25OrTfidfAnd,
+            default_label: HYBRID_RELEVANCE_MODEL.to_string(),
+        },
+    );
+
     assert!(parse_relevance_scorer("bm25:k1=1.2,b=1.1").is_err());
     assert!(parse_relevance_scorer("bm25:k1=0,b=0.75").is_err());
     assert!(parse_relevance_scorer("bm25:k1=1.2").is_err());
@@ -1617,7 +1755,7 @@ fn write_relevance_candidates() {
         &spec,
         &corpus_root,
         &model,
-        scorer.scoring_model,
+        scorer.scoring_policy,
     );
     write_candidate_report(&output_path, &report);
     println!("{}", output_path.display());
@@ -1652,7 +1790,7 @@ fn write_relevance_candidate_matrix() {
         .unwrap_or_else(|error| panic!("failed to parse {}: {error}", spec_path.display()));
     validate_candidate_spec(&spec);
     validate_model_sensitive_queries(
-        scorers.iter().map(|scorer| scorer.scoring_model),
+        scorers.iter().map(|scorer| scorer.scoring_policy),
         spec.queries.iter().map(|query| (query.id.as_str(), &query.request)),
     );
     let (context, corpus_root, _index_temp) = build_context(&spec.extensions, &corpus_root);
@@ -1664,7 +1802,7 @@ fn write_relevance_candidate_matrix() {
             &context,
             &corpus_root,
             &scorer.default_label,
-            scorer.scoring_model,
+            scorer.scoring_policy,
             &digest,
         );
         write_candidate_report(&output_path, &report);
@@ -1709,7 +1847,7 @@ fn write_relevance_quality_matrix() {
     let spec = load_spec_from(&spec_path);
     validate_spec(&spec, &corpus_root);
     validate_model_sensitive_queries(
-        scorers.iter().map(|scorer| scorer.scoring_model),
+        scorers.iter().map(|scorer| scorer.scoring_policy),
         spec.queries.iter().map(|query| (query.id.as_str(), &query.request)),
     );
     let (context, corpus_root, _index_temp) = build_context(&spec.extensions, &corpus_root);
@@ -1722,7 +1860,7 @@ fn write_relevance_quality_matrix() {
             &corpus_root,
             true,
             &scorer.default_label,
-            scorer.scoring_model,
+            scorer.scoring_policy,
             &digest,
         );
         write_offline_report(&output_path, &report);
@@ -1760,7 +1898,7 @@ fn write_tfidf_relevance_report() {
         &corpus_root,
         true,
         &model,
-        scorer.scoring_model,
+        scorer.scoring_policy,
     );
     write_offline_report(&output_path, &report);
     let baseline_candidate_name = format!("{}-baseline-candidate.json", scorer.default_label);
