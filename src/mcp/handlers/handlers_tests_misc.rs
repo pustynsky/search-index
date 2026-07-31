@@ -300,6 +300,9 @@ fn test_guidance_prefix_applies_to_previously_excluded_tools_through_dispatch() 
 fn test_guidance_prefix_dispatch_after_truncation_recomputes_wire_metrics() {
     let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
     let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
+    let _mode = PolicyReminderModeOverrideGuard::set(Some(
+        utils::PolicyReminderMode::Adaptive,
+    ));
 
     let mut idx = HashMap::new();
     let mut files = Vec::new();
@@ -313,7 +316,7 @@ fn test_guidance_prefix_dispatch_after_truncation_recomputes_wire_metrics() {
             .push(Posting { file_id: i as u32, lines });
     }
 
-    let index = ContentIndex {
+    let index = Arc::new(RwLock::new(ContentIndex {
         root: ".".to_string(),
         files,
         index: idx,
@@ -321,9 +324,9 @@ fn test_guidance_prefix_dispatch_after_truncation_recomputes_wire_metrics() {
         extensions: vec!["cs".to_string()],
         file_token_counts,
         ..Default::default()
-    };
+    }));
     let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(index)),
+        index: Arc::clone(&index),
         metrics: true,
         max_response_bytes: 2_000,
         ..Default::default()
@@ -346,19 +349,69 @@ fn test_guidance_prefix_dispatch_after_truncation_recomputes_wire_metrics() {
     assert!(summary["truncationReason"].as_str().is_some());
     assert_eq!(summary["responseBytes"].as_u64().unwrap(), text.len() as u64);
     assert_eq!(summary["estimatedTokens"].as_u64().unwrap(), text.len() as u64 / 4);
-    let second = dispatch_tool(&ctx, "xray_grep", &json!({
+    let off_cycle = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": ["targettoken"],
         "maxResults": 0,
         "substring": false
     }));
-    assert!(!second.is_error);
-    let second_text = &second.content[0].text;
-    let (second_prefix, second_output) = split_guidance_prefixed_response(second_text);
-    assert!(!second_prefix.starts_with("=== XRAY AGENT GUIDANCE ==="));
-    assert_eq!(second_output["files"], output["files"]);
+    assert!(!off_cycle.is_error);
+    let off_cycle_text = &off_cycle.content[0].text;
+    let (off_cycle_prefix, off_cycle_output) = split_guidance_prefixed_response(off_cycle_text);
+    assert!(!off_cycle_prefix.starts_with("=== XRAY AGENT GUIDANCE ==="));
+    assert_eq!(off_cycle_output["summary"]["responseTruncated"], true);
     assert_eq!(
-        second_output["summary"]["responseBytes"].as_u64().unwrap(),
-        second_text.len() as u64,
+        off_cycle_output["summary"]["responseBytes"].as_u64().unwrap(),
+        off_cycle_text.len() as u64,
+    );
+    assert_eq!(
+        off_cycle_output["summary"]["estimatedTokens"].as_u64().unwrap(),
+        off_cycle_text.len() as u64 / 4,
+    );
+
+    let cadence_ctx = HandlerContext {
+        index,
+        metrics: true,
+        max_response_bytes: 1_000_000,
+        ..Default::default()
+    };
+    let cadence_on = dispatch_tool(&cadence_ctx, "xray_grep", &json!({
+        "terms": ["targettoken"],
+        "maxResults": 0,
+        "substring": false
+    }));
+    assert!(!cadence_on.is_error);
+    let cadence_on_text = &cadence_on.content[0].text;
+    let (cadence_on_prefix, cadence_on_output) =
+        split_guidance_prefixed_response(cadence_on_text);
+    assert!(cadence_on_prefix.starts_with("=== XRAY AGENT GUIDANCE ==="));
+    assert_eq!(cadence_on_output["files"].as_array().unwrap().len(), 100);
+    assert_eq!(
+        cadence_on_output["summary"]["responseBytes"].as_u64().unwrap(),
+        cadence_on_text.len() as u64,
+    );
+    assert_eq!(
+        cadence_on_output["summary"]["estimatedTokens"].as_u64().unwrap(),
+        cadence_on_text.len() as u64 / 4,
+    );
+
+    let cadence_off = dispatch_tool(&cadence_ctx, "xray_grep", &json!({
+        "terms": ["targettoken"],
+        "maxResults": 0,
+        "substring": false
+    }));
+    assert!(!cadence_off.is_error);
+    let cadence_off_text = &cadence_off.content[0].text;
+    let (cadence_off_prefix, cadence_off_output) =
+        split_guidance_prefixed_response(cadence_off_text);
+    assert!(!cadence_off_prefix.starts_with("=== XRAY AGENT GUIDANCE ==="));
+    assert_eq!(cadence_off_output["files"], cadence_on_output["files"]);
+    assert_eq!(
+        cadence_off_output["summary"]["responseBytes"].as_u64().unwrap(),
+        cadence_off_text.len() as u64,
+    );
+    assert_eq!(
+        cadence_off_output["summary"]["estimatedTokens"].as_u64().unwrap(),
+        cadence_off_text.len() as u64 / 4,
     );
 
     assert!(output["files"].as_array().unwrap().len() < 100);

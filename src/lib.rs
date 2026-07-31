@@ -1142,9 +1142,8 @@ pub fn score_token_tf_idf(
             std::path::Path::new(file_path)
                 .file_stem()
                 .and_then(|stem| stem.to_str())
-                .map(|stem| (stem, term))
+                .filter(|stem| normalized_file_stem_matches(stem, term))
         })
-        .filter(|(stem, term)| normalized_file_stem_matches(stem, term))
         .map_or(0.0, |_| EXACT_FILE_STEM_TF_BONUS);
     (tf + file_stem_tf) * idf
 }
