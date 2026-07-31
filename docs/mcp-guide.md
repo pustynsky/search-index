@@ -94,21 +94,23 @@ AI:  "Found 1,082 files. The most relevant is CustomHttpClient.cs (score: 0.49).
 
 ## Response guidance fields
 
-Successful **JSON** MCP tool responses may include guidance fields inside `summary`:
+MCP tool responses can carry two independent guidance types:
 
 | Field | When present | Description |
 |---|---|---|
-| `policyReminder` | Successful JSON responses | Compact re-materialization of `XRAY_POLICY`, reminding the agent to prefer xray MCP tools over environment built-ins on the next step. Dynamically includes the indexed file extensions (from `--ext`) so the LLM knows which file types are searchable. Also includes an `INTENT->TOOL:` oneliner with the most common intent→xray-tool pairs (`context-around-match→xray_grep showLines`, `read-method-body→xray_definitions includeBody`, `replace-in-files→xray_edit`, etc.) — this provides re-entrancy of the tool-selection rules between tool calls, since LLMs tend to "forget" system-prompt rules as context grows |
-| `nextStepHint` | Selected successful JSON responses | Fixed-dictionary hint suggesting the most likely next xray tool |
+| `policyReminder` | According to the configured cadence | Compact re-materialization of `XRAY_POLICY`, including indexed extensions and an `INTENT->TOOL:` oneliner. The default `adaptive` cadence emits it on the first response, every 25 responses, and after 30 minutes without a response |
+| `nextStepHint` | Selected JSON responses | Fixed-dictionary hint suggesting the most likely next xray tool |
 
 Behavior rules:
 
-- Guidance is injected only into **successful JSON** responses
-- Error responses are unchanged
-- Successful non-JSON responses are unchanged
-- If a successful JSON response does not already have a `summary` object, the server creates one before injecting guidance
-- `xray_help` includes `policyReminder` but intentionally omits `nextStepHint`
-- Response truncation preserves `summary.policyReminder` and `summary.nextStepHint`
+- `XRAY_POLICY_REMINDER=adaptive|always|off` controls policy frequency independently of presentation; unset or unknown values use `adaptive`, while `1|true|yes|on` and `0|false|no` map to `always` and `off`
+- The mode is captured when the server context starts; restart Xray after changing it
+- `nextStepHint` and unknown-argument warnings remain available on every applicable response regardless of policy cadence
+- With the default text-prefix presentation, a policy reminder uses the framed `XRAY AGENT GUIDANCE` banner; hint/warning-only prefixes are compact unframed lines
+- Wire clients must not detect a prefix by the banner: if the first non-whitespace byte is not `{`, split once at the first blank line and parse the suffix as JSON
+- `XRAY_GUIDANCE_PREFIX=0|false|no|off` keeps present guidance fields inside `summary`; it does not change policy cadence
+- JSON error envelopes participate in the same guidance pipeline; successful non-JSON responses remain unchanged
+- Response truncation and metrics account for the final rendered response
 
 ### `nextStepHint` dictionary
 

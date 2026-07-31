@@ -673,6 +673,63 @@ fn split_guidance_prefixed_text(text: &str) -> (&str, Value) {
 }
 
 #[test]
+fn test_policy_reminder_mode_env_parsing() {
+    for value in ["always", "1", "true", "yes", "on", " ALWAYS "] {
+        assert_eq!(
+            policy_reminder_mode_from_env_value(Some(value)),
+            PolicyReminderMode::Always,
+        );
+    }
+    for value in ["off", "0", "false", "no", " OFF "] {
+        assert_eq!(
+            policy_reminder_mode_from_env_value(Some(value)),
+            PolicyReminderMode::Off,
+        );
+    }
+    for value in [None, Some("adaptive"), Some(""), Some("unknown")] {
+        assert_eq!(
+            policy_reminder_mode_from_env_value(value),
+            PolicyReminderMode::Adaptive,
+        );
+    }
+}
+
+#[test]
+fn test_policy_reminder_adaptive_cadence() {
+    let state = PolicyReminderState::new();
+    assert!(state.should_emit(PolicyReminderMode::Adaptive, 100));
+    for now in 101..124 {
+        assert!(!state.should_emit(PolicyReminderMode::Adaptive, now));
+    }
+    assert!(state.should_emit(PolicyReminderMode::Adaptive, 124));
+    assert!(!state.should_emit(PolicyReminderMode::Adaptive, 125));
+    assert!(state.should_emit(
+        PolicyReminderMode::Adaptive,
+        125 + POLICY_REMINDER_IDLE_SECS,
+    ));
+}
+
+#[test]
+fn test_policy_reminder_adaptive_repeats_every_interval() {
+    let state = PolicyReminderState::new();
+    let emitted: Vec<u64> = (1..=75)
+        .filter(|count| state.should_emit(PolicyReminderMode::Adaptive, *count))
+        .collect();
+    assert_eq!(emitted, vec![1, 25, 50, 75]);
+}
+
+#[test]
+fn test_policy_reminder_always_and_off_modes() {
+    let always = PolicyReminderState::new();
+    assert!(always.should_emit(PolicyReminderMode::Always, 100));
+    assert!(always.should_emit(PolicyReminderMode::Always, 101));
+
+    let off = PolicyReminderState::new();
+    assert!(!off.should_emit(PolicyReminderMode::Off, 100));
+    assert!(!off.should_emit(PolicyReminderMode::Off, 101));
+}
+
+#[test]
 fn test_guidance_prefix_enabled_env_parsing() {
     let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
 
@@ -779,8 +836,9 @@ fn test_guidance_prefix_emitted_for_unknown_args_warning_only() {
 
     let rendered = render_guidance_prefix_if_enabled(result, "xray_git_authors");
     let text = &rendered.content[0].text;
-    assert!(text.starts_with(GUIDANCE_PREFIX_HEADER),
-        "prefix must be emitted for unknown-args-only case, got: {text}");
+    assert!(text.starts_with("⚠ Unknown args"),
+        "compact prefix must be emitted for unknown-args-only case, got: {text}");
+    assert!(!text.starts_with(GUIDANCE_PREFIX_HEADER));
     let (prefix, output) = split_guidance_prefixed_text(text);
     assert!(prefix.contains("⚠ Unknown args"),
         "prefix must surface the warning, got prefix: {prefix}");

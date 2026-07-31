@@ -372,6 +372,10 @@ pub fn cmd_serve(args: ServeArgs) {
         file_index_build_gate: Arc::new(crate::mcp::handlers::utils::FileIndexBuildGate::new()),
         trigram_build_gate: Arc::clone(&trigram_build_gate),
         autosave_dirty: Arc::clone(&autosave_dirty),
+        policy_reminder_mode: crate::mcp::handlers::utils::policy_reminder_mode(),
+        policy_reminder_state: Arc::new(
+            crate::mcp::handlers::utils::PolicyReminderState::new(),
+        ),
     };
 
     // Periodic memory + cache-size snapshot for leak diagnosis.

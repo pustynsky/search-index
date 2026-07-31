@@ -67,6 +67,24 @@ impl Drop for GuidancePrefixOverrideGuard {
 }
 
 
+struct PolicyReminderModeOverrideGuard {
+    previous: Option<utils::PolicyReminderMode>,
+}
+
+impl PolicyReminderModeOverrideGuard {
+    fn set(value: Option<utils::PolicyReminderMode>) -> Self {
+        Self {
+            previous: utils::set_policy_reminder_mode_override_for_test(value),
+        }
+    }
+}
+
+impl Drop for PolicyReminderModeOverrideGuard {
+    fn drop(&mut self) {
+        utils::set_policy_reminder_mode_override_for_test(self.previous);
+    }
+}
+
 fn split_guidance_prefixed_response(text: &str) -> (&str, Value) {
     let (prefix, suffix) = text
         .split_once("\n\n")
@@ -159,9 +177,12 @@ fn test_guidance_prefix_dispatch_runs_after_warnings_and_metrics() {
 fn test_guidance_prefix_plain_text_error_dispatch_preserves_json_contract_and_warning() {
     let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
     let _strict_env = EnvVarGuard::remove("XRAY_STRICT_ARGS");
-    let ctx = HandlerContext { metrics: true, ..make_empty_ctx() };
 
     {
+        let _mode = PolicyReminderModeOverrideGuard::set(Some(
+            utils::PolicyReminderMode::Always,
+        ));
+        let ctx = HandlerContext { metrics: true, ..make_empty_ctx() };
         let _prefix = GuidancePrefixOverrideGuard::set(Some(false));
         let result = dispatch_tool(&ctx, "xray_grep", &json!({"includePattern": "*.cs"}));
         assert!(result.is_error);
@@ -175,12 +196,18 @@ fn test_guidance_prefix_plain_text_error_dispatch_preserves_json_contract_and_wa
     }
 
     {
+        let _mode = PolicyReminderModeOverrideGuard::set(Some(
+            utils::PolicyReminderMode::Always,
+        ));
+        let ctx = HandlerContext { metrics: true, ..make_empty_ctx() };
         let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
         let result = dispatch_tool(&ctx, "xray_grep", &json!({"includePattern": "*.cs"}));
         assert!(result.is_error);
         let (prefix, output) = split_guidance_prefixed_response(&result.content[0].text);
         assert!(prefix.starts_with("=== XRAY AGENT GUIDANCE ==="));
         assert!(prefix.contains("Use xray_* MCP tools for indexed files"));
+        assert!(prefix.contains("⚠ Unknown args"));
+        assert!(prefix.contains("→ "));
         assert!(output["error"].as_str().is_some());
         let summary = output["summary"].as_object().unwrap();
         assert!(!summary.contains_key("policyReminder"));
@@ -188,6 +215,42 @@ fn test_guidance_prefix_plain_text_error_dispatch_preserves_json_contract_and_wa
         assert!(summary["unknownArgsWarning"].as_str().unwrap().contains("includePattern"));
         assert_eq!(summary["unknownArgs"][0]["key"], "includePattern");
         assert!(summary["totalTimeMs"].as_f64().is_some());
+    }
+}
+
+#[test]
+fn test_policy_reminder_off_suppresses_json_field() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _mode = PolicyReminderModeOverrideGuard::set(Some(
+        utils::PolicyReminderMode::Off,
+    ));
+    let _prefix = GuidancePrefixOverrideGuard::set(Some(false));
+    let ctx = make_empty_ctx();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["needle"]}));
+    assert!(!result.is_error);
+    let output = assert_json_without_guidance_prefix(&result.content[0].text);
+    let summary = output["summary"].as_object().unwrap();
+    assert!(!summary.contains_key("policyReminder"));
+    assert!(summary["nextStepHint"].as_str().is_some());
+}
+
+#[test]
+fn test_policy_reminder_always_frames_consecutive_responses() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _mode = PolicyReminderModeOverrideGuard::set(Some(
+        utils::PolicyReminderMode::Always,
+    ));
+    let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
+    let ctx = make_empty_ctx();
+
+    for _ in 0..2 {
+        let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["needle"]}));
+        assert!(!result.is_error);
+        let (prefix, output) = split_guidance_prefixed_response(&result.content[0].text);
+        assert!(prefix.starts_with("=== XRAY AGENT GUIDANCE ==="));
+        assert!(prefix.contains("Use xray_* MCP tools for indexed files"));
+        assert!(output["summary"].get("policyReminder").is_none());
     }
 }
 
@@ -274,7 +337,8 @@ fn test_guidance_prefix_dispatch_after_truncation_recomputes_wire_metrics() {
     assert!(!result.is_error);
 
     let text = &result.content[0].text;
-    let (_prefix, output) = split_guidance_prefixed_response(text);
+    let (prefix, output) = split_guidance_prefixed_response(text);
+    assert!(prefix.starts_with("=== XRAY AGENT GUIDANCE ==="));
     let summary = output["summary"].as_object().unwrap();
     assert!(!summary.contains_key("policyReminder"));
     assert!(!summary.contains_key("nextStepHint"));
@@ -282,6 +346,21 @@ fn test_guidance_prefix_dispatch_after_truncation_recomputes_wire_metrics() {
     assert!(summary["truncationReason"].as_str().is_some());
     assert_eq!(summary["responseBytes"].as_u64().unwrap(), text.len() as u64);
     assert_eq!(summary["estimatedTokens"].as_u64().unwrap(), text.len() as u64 / 4);
+    let second = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["targettoken"],
+        "maxResults": 0,
+        "substring": false
+    }));
+    assert!(!second.is_error);
+    let second_text = &second.content[0].text;
+    let (second_prefix, second_output) = split_guidance_prefixed_response(second_text);
+    assert!(!second_prefix.starts_with("=== XRAY AGENT GUIDANCE ==="));
+    assert_eq!(second_output["files"], output["files"]);
+    assert_eq!(
+        second_output["summary"]["responseBytes"].as_u64().unwrap(),
+        second_text.len() as u64,
+    );
+
     assert!(output["files"].as_array().unwrap().len() < 100);
 }
 

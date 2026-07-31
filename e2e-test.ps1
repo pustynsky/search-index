@@ -1917,11 +1917,13 @@ $testBlocks += , {
 
 # --- Launch all parallel jobs ---
 
-# T-POLICY-REMINDER: verify policyReminder and nextStepHint in MCP tool response
+# T-POLICY-REMINDER: verify adaptive policy and next-step hint in first MCP response.
+# Later cadence positions are deterministic unit-test coverage.
 $testBlocks += , {
     param($Bin, $Dir, $Ext)
-    $name = "T-POLICY-REMINDER policy-reminder-in-response"
+    $name = "T-POLICY-REMINDER adaptive-first-response"
     try {
+        Remove-Item Env:XRAY_POLICY_REMINDER, Env:XRAY_GUIDANCE_PREFIX -ErrorAction SilentlyContinue
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
@@ -1930,9 +1932,16 @@ $testBlocks += , {
         $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
         if (-not $jsonLine) { return @{ Name = $name; Passed = $false; Output = "FAILED (no JSON-RPC response)" } }
+        $response = $jsonLine | ConvertFrom-Json
+        if (-not $response.result) {
+            return @{ Name = $name; Passed = $false; Output = "FAILED (JSON-RPC error: $($response.error.message))" }
+        }
+        $text = [string]$response.result.content[0].text
+        $prefix = ($text -split "\r?\n\r?\n", 2)[0]
         $errors = @()
-        if ($jsonLine -notmatch 'policyReminder') { $errors += "missing policyReminder" }
-        if ($jsonLine -notmatch 'nextStepHint') { $errors += "missing nextStepHint" }
+        if ($prefix -notmatch '^=== XRAY AGENT GUIDANCE ===') { $errors += "missing first-response policy banner" }
+        if ($prefix -notmatch 'built-in read/search/edit equivalents are policy violations') { $errors += "missing compact policy" }
+        if ($prefix -notmatch 'Next:') { $errors += "missing next-step hint" }
         if ($jsonLine -match '"isError"\s*:\s*true') { $errors += "isError=true" }
         if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
         return @{ Name = $name; Passed = $true; Output = "OK" }
