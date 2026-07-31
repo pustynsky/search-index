@@ -1,5 +1,7 @@
 //! xray_grep handler: token search, substring search, phrase search.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
@@ -28,6 +30,114 @@ use super::token_regex::{
     expand_compiled_token_regex, RegexExpansionDedup, TOKEN_REGEX_PREVIEW_MAX,
 };
 use super::HandlerContext;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum LexicalScoringModel {
+    TfIdfFileStem,
+    #[cfg(test)]
+    SmoothedTfIdf,
+    #[cfg(test)]
+    Bm25 { k1: f64, b: f64 },
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_LEXICAL_SCORING_MODEL: Cell<LexicalScoringModel> =
+        const { Cell::new(LexicalScoringModel::TfIdfFileStem) };
+}
+
+fn active_lexical_scoring_model() -> LexicalScoringModel {
+    #[cfg(test)]
+    {
+        TEST_LEXICAL_SCORING_MODEL.get()
+    }
+    #[cfg(not(test))]
+    {
+        LexicalScoringModel::TfIdfFileStem
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_lexical_scoring_model<T>(
+    model: LexicalScoringModel,
+    action: impl FnOnce() -> T,
+) -> T {
+    TEST_LEXICAL_SCORING_MODEL.with(|active| {
+        let previous = active.replace(model);
+        struct Reset<'a> {
+            active: &'a Cell<LexicalScoringModel>,
+            previous: LexicalScoringModel,
+        }
+        impl Drop for Reset<'_> {
+            fn drop(&mut self) {
+                self.active.set(self.previous);
+            }
+        }
+        let _reset = Reset { active, previous };
+        action()
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn score_lexical_term(
+    model: LexicalScoringModel,
+    occurrences: usize,
+    total_docs: f64,
+    doc_freq: f64,
+    tfidf_idf: f64,
+    file_len: f64,
+    #[cfg_attr(not(test), allow(unused_variables))]
+    average_file_len: f64,
+    file_path: &str,
+    normalized_file_stem_term: Option<&str>,
+) -> f64 {
+    if total_docs <= 0.0 || doc_freq <= 0.0 {
+        return 0.0;
+    }
+    let file_len = file_len.max(1.0);
+    let frequency = occurrences as f64;
+    match model {
+        LexicalScoringModel::TfIdfFileStem => {
+            score_token_tf_idf(
+                frequency / file_len,
+                tfidf_idf,
+                file_path,
+                normalized_file_stem_term,
+            )
+        }
+        #[cfg(test)]
+        LexicalScoringModel::SmoothedTfIdf => {
+            let idf = ((total_docs + 1.0) / (doc_freq + 1.0)).ln() + 1.0;
+            let average_file_len = average_file_len.max(1.0);
+            let average_single_occurrence_tf =
+                1.0_f64.ln_1p() / average_file_len.ln_1p();
+            let tf = frequency.ln_1p()
+                / file_len.ln_1p()
+                / average_single_occurrence_tf
+                / average_file_len;
+            score_token_tf_idf(tf, idf, file_path, normalized_file_stem_term)
+        }
+        #[cfg(test)]
+        LexicalScoringModel::Bm25 { k1, b } => {
+            let idf = (1.0 + (total_docs - doc_freq + 0.5).max(0.0) / (doc_freq + 0.5)).ln();
+            let average_file_len = average_file_len.max(1.0);
+            let denominator = frequency
+                + k1 * (1.0 - b + b * file_len / average_file_len);
+            let term_score = if denominator > 0.0 {
+                idf * frequency * (k1 + 1.0) / denominator / average_file_len
+            } else {
+                0.0
+            };
+            let file_stem_score = score_token_tf_idf(
+                0.0,
+                idf,
+                file_path,
+                normalized_file_stem_term,
+            );
+            term_score + file_stem_score
+        }
+    }
+}
 
 #[path = "grep_literal_extract.rs"]
 mod grep_literal_extract;
@@ -2555,6 +2665,8 @@ fn score_normal_token_search(
     scope: &ResolvedFileScope,
 ) -> (HashMap<u32, FileScoreEntry>, TokenSearchTelemetry) {
     let total_docs = index.files.len() as f64;
+    let average_file_len = index.total_tokens as f64 / total_docs.max(1.0);
+    let scoring_model = active_lexical_scoring_model();
     let mut file_scores: HashMap<u32, FileScoreEntry> = HashMap::new();
     let mut telemetry = TokenSearchTelemetry::default();
     let normalized_file_stem_term = (params.requested_mode == "token" && terms.len() == 1)
@@ -2565,7 +2677,7 @@ fn score_normal_token_search(
             telemetry.posting_lists_visited = telemetry.posting_lists_visited.saturating_add(1);
             let doc_freq = postings.len() as f64;
             if doc_freq == 0.0 { continue; }
-            let idf = (total_docs / doc_freq).ln();
+            let tfidf_idf = (total_docs / doc_freq).ln();
 
             for posting in postings {
                 telemetry.postings_checked = telemetry.postings_checked.saturating_add(1);
@@ -2585,10 +2697,14 @@ fn score_normal_token_search(
                 } else {
                     1.0
                 };
-                let tf = occurrences as f64 / file_total;
-                let tf_idf = score_token_tf_idf(
-                    tf,
-                    idf,
+                let tf_idf = score_lexical_term(
+                    scoring_model,
+                    occurrences,
+                    total_docs,
+                    doc_freq,
+                    tfidf_idf,
+                    file_total,
+                    average_file_len,
                     file_path,
                     normalized_file_stem_term.as_deref(),
                 );
@@ -3508,13 +3624,15 @@ fn score_token_postings(
     file_matched_terms: &mut HashMap<u32, HashSet<usize>>,
 ) {
     let lookup_start = Instant::now();
+    let average_file_len = index.total_tokens as f64 / total_docs.max(1.0);
+    let scoring_model = active_lexical_scoring_model();
     let mut term_postings_checked: usize = 0;
     let mut term_files_passed: usize = 0;
 
     for token in matched_tokens {
         if let Some(postings) = index.index.get(token.as_str()) {
             let doc_freq = postings.len() as f64;
-            let idf = if doc_freq > 0.0 { (total_docs / doc_freq).ln() } else { 0.0 };
+            let tfidf_idf = (total_docs / doc_freq).ln();
 
             for posting in postings {
                 term_postings_checked += 1;
@@ -3536,8 +3654,17 @@ fn score_token_postings(
                 } else {
                     1.0
                 };
-                let tf = occurrences as f64 / file_total;
-                let tf_idf = tf * idf;
+                let tf_idf = score_lexical_term(
+                    scoring_model,
+                    occurrences,
+                    total_docs,
+                    doc_freq,
+                    tfidf_idf,
+                    file_total,
+                    average_file_len,
+                    file_path,
+                    None,
+                );
 
                 let entry = file_scores.entry(posting.file_id).or_insert(FileScoreEntry {
                     file_path: file_path.clone(),

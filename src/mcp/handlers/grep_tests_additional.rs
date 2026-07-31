@@ -1,6 +1,7 @@
 #![allow(clippy::field_reassign_with_default)] // tests prefer mutate-after-default for readability
 use super::*;
 use super::super::handlers_test_utils::make_params_default;
+use code_xray::EXACT_FILE_STEM_TF_BONUS;
 use std::collections::{HashMap, HashSet};
 use super::super::token_regex::{
     expand_compiled_token_regex_for_scope_with_threshold, scoped_file_tokens_eligibility,
@@ -2273,4 +2274,134 @@ fn test_invert_partition_contract_forward_and_invert_partition_scope() {
     }
     // totalFilesInScope is invert-only; reflects the post-filter universe.
     assert_eq!(inverted["summary"]["totalFilesInScope"], json!(scope.len()));
+}
+
+#[test]
+fn test_lexical_scoring_production_model_matches_tfidf_helper() {
+    let normalized = normalize_identifier_for_file_stem("OrderProcessor");
+    let total_docs = 100.0;
+    let doc_freq = 10.0;
+    let file_len = 200.0;
+    let occurrences = 4;
+    let actual = score_lexical_term(
+        LexicalScoringModel::TfIdfFileStem,
+        occurrences,
+        total_docs,
+        doc_freq,
+        (total_docs / doc_freq).ln(),
+        file_len,
+        300.0,
+        "src/order-processor.rs",
+        Some(&normalized),
+    );
+    let expected = score_token_tf_idf(
+        occurrences as f64 / file_len,
+        (total_docs / doc_freq).ln(),
+        "src/order-processor.rs",
+        Some(&normalized),
+    );
+    assert!((actual - expected).abs() < 1e-12);
+}
+
+#[test]
+fn test_smoothed_tfidf_scores_ubiquitous_terms_finitely() {
+    let production = score_lexical_term(
+        LexicalScoringModel::TfIdfFileStem,
+        1,
+        100.0,
+        100.0,
+        0.0,
+        100.0,
+        100.0,
+        "src/common.rs",
+        None,
+    );
+    let smoothed = score_lexical_term(
+        LexicalScoringModel::SmoothedTfIdf,
+        1,
+        100.0,
+        100.0,
+        0.0,
+        100.0,
+        100.0,
+        "src/common.rs",
+        None,
+    );
+    assert_eq!(production, 0.0);
+    assert!(smoothed.is_finite());
+    assert!(smoothed > 0.0);
+}
+
+#[test]
+fn test_bm25_saturates_frequency_and_penalizes_long_files() {
+    let model = LexicalScoringModel::Bm25 { k1: 1.2, b: 0.75 };
+    let low_frequency = score_lexical_term(
+        model, 1, 100.0, 10.0, 0.0, 100.0, 100.0, "src/file.rs", None,
+    );
+    let medium_frequency = score_lexical_term(
+        model, 10, 100.0, 10.0, 0.0, 100.0, 100.0, "src/file.rs", None,
+    );
+    let high_frequency = score_lexical_term(
+        model, 100, 100.0, 10.0, 0.0, 100.0, 100.0, "src/file.rs", None,
+    );
+    assert!(medium_frequency > low_frequency);
+    assert!(high_frequency > medium_frequency);
+    assert!(medium_frequency - low_frequency > high_frequency - medium_frequency);
+
+    let short_file = score_lexical_term(
+        model, 3, 100.0, 10.0, 0.0, 50.0, 100.0, "src/file.rs", None,
+    );
+    let long_file = score_lexical_term(
+        model, 3, 100.0, 10.0, 0.0, 500.0, 100.0, "src/file.rs", None,
+    );
+    assert!(short_file > long_file);
+}
+
+#[test]
+fn test_candidate_models_preserve_file_stem_influence() {
+    let average_file_len = 400.0;
+    let normalized = normalize_identifier_for_file_stem("OrderProcessor");
+    for model in [
+        LexicalScoringModel::SmoothedTfIdf,
+        LexicalScoringModel::Bm25 { k1: 1.2, b: 0.75 },
+    ] {
+        let unboosted = score_lexical_term(
+            model,
+            1,
+            100.0,
+            10.0,
+            0.0,
+            average_file_len,
+            average_file_len,
+            "src/order-processor.rs",
+            None,
+        );
+        let boosted = score_lexical_term(
+            model,
+            1,
+            100.0,
+            10.0,
+            0.0,
+            average_file_len,
+            average_file_len,
+            "src/order-processor.rs",
+            Some(&normalized),
+        );
+        let actual_ratio = (boosted - unboosted) / unboosted;
+        let expected_ratio = EXACT_FILE_STEM_TF_BONUS * average_file_len;
+        assert!((actual_ratio - expected_ratio).abs() < 1e-12, "{model:?}");
+    }
+}
+
+#[test]
+fn test_lexical_scoring_override_resets_after_panic() {
+    assert_eq!(active_lexical_scoring_model(), LexicalScoringModel::TfIdfFileStem);
+    let panic = std::panic::catch_unwind(|| {
+        with_test_lexical_scoring_model(LexicalScoringModel::SmoothedTfIdf, || {
+            assert_eq!(active_lexical_scoring_model(), LexicalScoringModel::SmoothedTfIdf);
+            panic!("stop");
+        });
+    });
+    assert!(panic.is_err());
+    assert_eq!(active_lexical_scoring_model(), LexicalScoringModel::TfIdfFileStem);
 }
