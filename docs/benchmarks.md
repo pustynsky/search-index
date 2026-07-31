@@ -335,7 +335,7 @@ Three distinct indexes, each built independently:
 
 ## Search relevance evaluation
 
-The checked relevance corpus under `benches/fixtures/relevance/` contains 18 neutral source/config/doc files and 40 graded queries across eight query classes. Every top-10 result must be graded or covered by an explicit query- or corpus-level negative policy, and every graded path must be lexically reachable. Five exact-phrase queries exercise matching and occurrence-count ranking as a scorer-independent canary; the other 35 queries exercise production scorer paths, including TF-IDF and the exact single-token file-stem signal. The test-only runner calls the production `xray_grep` MCP dispatch path; it does not duplicate the scoring implementation.
+The checked relevance corpus under `benches/fixtures/relevance/` contains 18 neutral source/config/doc files and 40 graded queries across eight query classes. Every query records its intent, every top-10 result must be graded or covered by an explicit query- or corpus-level negative policy, and every graded path must be lexically reachable. Five exact-phrase queries exercise matching and occurrence-count ranking as a scorer-independent canary; the other 35 queries exercise production scorer paths, including TF-IDF and the exact single-token file-stem signal. The test-only runner calls the production `xray_grep` MCP dispatch path; it does not duplicate the scoring implementation.
 
 Run the deterministic quality gate:
 
@@ -351,7 +351,7 @@ cargo test --bin xray write_tfidf_relevance_report -- --ignored --nocapture
 
 By default, the report is written to `target/relevance/tfidf-report.json` and the ready-to-review aggregate candidate to `target/relevance/tfidf-baseline-candidate.json`; the five slowest queries are included after one full warmup pass. With `XRAY_RELEVANCE_REPORT`, both files are written next to that override path. An override inside this repository must remain under `target/`; an external private path is allowed. Checked quality lives in `benches/fixtures/relevance/baseline-tfidf.json`; latency is intentionally excluded because it is machine-dependent.
 
-For a private local corpus, keep the same JSON schema and override the ignored runner inputs without adding them to Git. Corpus symlinks are rejected so indexed files and the corpus digest cannot diverge:
+For a private local corpus, keep the same JSON schema, including a non-empty `intent` on every query, and override the ignored runner inputs without adding them to Git. Corpus symlinks are rejected so indexed files and the corpus digest cannot diverge:
 
 ```powershell
 $env:XRAY_RELEVANCE_SPEC = 'C:\local\relevance\queries.json'
@@ -360,7 +360,25 @@ $env:XRAY_RELEVANCE_REPORT = 'C:\local\relevance\tfidf-report.json'
 cargo test --bin xray write_tfidf_relevance_report -- --ignored --nocapture
 ```
 
-NDCG uses grades 1–3, MRR@10 treats grades 2–3 as useful, and Success@1 requires a grade-3 primary result at rank 1. Recall@50 counts every judged path (grades 1–3), but with the checked 18-file corpus it is a matching/tokenizer regression canary, not a ranking metric.
+Candidate manifests use a strict query-only schema; graded relevance manifests are rejected:
+
+```json
+{
+  "schemaVersion": 1,
+  "corpusVersion": "local-corpus-v1",
+  "extensions": ["ts"],
+  "queries": [{
+    "id": "partial-order-processor",
+    "queryClass": "partial_identifier",
+    "intent": "Locate the primary order processor implementation.",
+    "request": { "terms": ["OrderProcess"], "substring": true }
+  }]
+}
+```
+
+Set `XRAY_RELEVANCE_CANDIDATE_SPEC`, `XRAY_RELEVANCE_CORPUS`, and `XRAY_RELEVANCE_CANDIDATES`, then run `cargo test --bin xray write_relevance_candidates -- --ignored --nocapture`. A candidate output inside this repository must remain under `target/`. Candidate reports use an independent `schemaVersion: 1`. When generating candidate or quality reports from another scorer build, set `XRAY_RELEVANCE_MODEL` to a unique provenance label; this variable labels the artifact and does not select or configure a scorer. The collector calls production `xray_grep` at depth 50, sorts each candidate path set, and omits ranks and scores. Candidate pools from every model under comparison must be unioned and graded before comparing their metrics.
+
+NDCG uses grades 1–3, MRR@10 treats grades 2–3 as useful, and Success@1 requires a grade-3 primary result at rank 1. Recall@50 counts every judged path (grades 1–3), but with the checked 18-file corpus it is a matching/tokenizer regression canary, not a ranking metric. ExplicitNegativeHits@10 is the total number of explicitly graded-zero results in the first 10 positions; lower is better.
 
 Current `tfidf-file-stem-v1` baseline:
 
@@ -370,10 +388,11 @@ Current `tfidf-file-stem-v1` baseline:
 | MRR@10 | 0.987500 | 0.985714 |
 | Recall@50 (matching canary) | 1.000000 | 1.000000 |
 | Success@1 (grade 3) | 0.575000 | 0.657143 |
+| Explicit negative hits@10 (total) | 1 | 1 |
 
 Use the 35-query scorer aggregate when comparing TF-IDF, BM25, or boosts. The all-40 aggregate additionally guards phrase matching and occurrence-count ordering, but its five phrase queries cannot move when only token scoring changes. The generated-noise class uses distinct method-plus-type requests with method-specific judgments and grades type-only generated bindings as weak context rather than as false negatives (`NDCG@10 = 0.949760`, `Success@1 = 0.8`). The normalized file-stem signal raises the exact-identifier class to `NDCG@10 = 0.881110`, `MRR@10 = 1.0`, and `Success@1 = 0.4`; broad common terms are now the weakest production-scored class at `NDCG@10 = 0.862921`. A private large-repository corpus should remain local; only anonymized aggregate results belong in the repository.
 
-The schema-v2 baseline stores both query and corpus digests. Query changes, judgments, ranked top paths, any file name or bytes under the corpus root, or indexed extensions therefore require explicit baseline review. After an intentional ranking or corpus change, run the ignored report, review `target/relevance/tfidf-baseline-candidate.json`, explain every moved aggregate and per-class metric in the PR, then replace `benches/fixtures/relevance/baseline-tfidf.json` with that generated candidate. Do not hand-edit metric literals or either digest.
+The schema-v3 baseline stores explicit-negative hit counts plus both query and corpus digests. Query changes, judgments, ranked top paths, any file name or bytes under the corpus root, or indexed extensions therefore require explicit baseline review. After an intentional ranking or corpus change, run the ignored report, review `target/relevance/tfidf-baseline-candidate.json`, explain every moved aggregate and per-class metric in the PR, then replace `benches/fixtures/relevance/baseline-tfidf.json` with that generated candidate. Do not hand-edit metric literals or either digest.
 
 ## Criterion Benchmarks (synthetic, reproducible)
 

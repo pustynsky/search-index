@@ -10,7 +10,9 @@ use serde_json::Value;
 use super::handlers_test_utils::HandlerContextBuilder;
 use super::{dispatch_tool, HandlerContext};
 
-const REPORT_SCHEMA_VERSION: u32 = 2;
+const REPORT_SCHEMA_VERSION: u32 = 3;
+const CANDIDATE_REPORT_SCHEMA_VERSION: u32 = 1;
+const PRODUCTION_RELEVANCE_MODEL: &str = "tfidf-file-stem-v1";
 const EXPECTED_QUERY_COUNT: usize = 40;
 const EXPECTED_TFIDF_QUERY_COUNT: usize = 35;
 const EXPECTED_CLASS_COUNT: usize = 8;
@@ -35,6 +37,7 @@ struct RelevanceSpec {
 struct RelevanceQuery {
     id: String,
     query_class: String,
+    intent: String,
     request: Value,
     judgments: Vec<Judgment>,
     #[serde(default)]
@@ -65,6 +68,7 @@ struct MetricSet {
     mrr_at_10: f64,
     recall_at_50: f64,
     success_at_1: f64,
+    explicit_negative_hits_at_10: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -77,6 +81,7 @@ struct QueryQuality {
     mrr_at_10: f64,
     recall_at_50: f64,
     success_at_1: bool,
+    explicit_negative_hits_at_10: usize,
     top_paths: Vec<String>,
     missing_judgments: Vec<String>,
 }
@@ -131,6 +136,46 @@ struct QueryLatency {
 struct OfflineReport {
     quality: QualityReport,
     latency: LatencySummary,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CandidateSpec {
+    schema_version: u32,
+    corpus_version: String,
+    extensions: Vec<String>,
+    queries: Vec<CandidateQuery>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CandidateQuery {
+    id: String,
+    query_class: String,
+    intent: String,
+    request: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CandidateReport {
+    schema_version: u32,
+    corpus_version: String,
+    model: String,
+    candidate_digest: String,
+    corpus_digest: String,
+    queries: Vec<QueryCandidates>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct QueryCandidates {
+    id: String,
+    query_class: String,
+    intent: String,
+    request: Value,
+    search_mode: String,
+    candidates: Vec<String>,
 }
 
 fn fixture_root() -> PathBuf {
@@ -267,6 +312,39 @@ fn validate_relative_path(path: &str, context: &str) {
 }
 
 
+fn validate_query_request(id: &str, request: &Value) {
+    let request = request.as_object()
+        .unwrap_or_else(|| panic!("{id} request must be an object"));
+    assert_ne!(request.get("countOnly").and_then(Value::as_bool), Some(true),
+        "{id} cannot use countOnly");
+    assert_ne!(request.get("filesOnly").and_then(Value::as_bool), Some(true),
+        "{id} cannot use filesOnly");
+    assert_ne!(request.get("invert").and_then(Value::as_bool), Some(true),
+        "{id} cannot use invert");
+    assert!(request.get("maxResults").is_none(),
+        "{id} cannot set maxResults; the evaluator owns the cutoff");
+    assert!(request.get("showLines").is_none(),
+        "{id} cannot set showLines; the evaluator disables source payloads");
+    let terms = request.get("terms").and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("{id} request must contain terms[]"));
+    assert!(!terms.is_empty(), "{id} has no terms");
+    assert!(terms.iter().all(Value::is_string), "{id} has a non-string term");
+}
+
+fn validate_candidate_spec(spec: &CandidateSpec) {
+    assert_eq!(spec.schema_version, 1);
+    assert!(!spec.corpus_version.trim().is_empty());
+    assert!(!spec.extensions.is_empty());
+    assert!(!spec.queries.is_empty());
+    let mut ids = HashSet::new();
+    for query in &spec.queries {
+        assert!(ids.insert(query.id.as_str()), "duplicate query id: {}", query.id);
+        assert!(!query.query_class.trim().is_empty(), "{} has an empty query class", query.id);
+        assert!(!query.intent.trim().is_empty(), "{} has an empty intent", query.id);
+        validate_query_request(&query.id, &query.request);
+    }
+}
+
 fn validate_spec(spec: &RelevanceSpec, corpus_root: &Path) {
     assert_eq!(spec.schema_version, 1);
     assert!(!spec.queries.is_empty());
@@ -287,23 +365,9 @@ fn validate_spec(spec: &RelevanceSpec, corpus_root: &Path) {
 
     for query in &spec.queries {
         assert!(ids.insert(query.id.as_str()), "duplicate query id: {}", query.id);
+        assert!(!query.intent.trim().is_empty(), "{} has an empty intent", query.id);
         *class_counts.entry(query.query_class.as_str()).or_default() += 1;
-        let request = query.request.as_object()
-            .unwrap_or_else(|| panic!("{} request must be an object", query.id));
-        assert_ne!(request.get("countOnly").and_then(Value::as_bool), Some(true),
-            "{} cannot use countOnly", query.id);
-        assert_ne!(request.get("filesOnly").and_then(Value::as_bool), Some(true),
-            "{} cannot use filesOnly", query.id);
-        assert_ne!(request.get("invert").and_then(Value::as_bool), Some(true),
-            "{} cannot use invert", query.id);
-        assert!(request.get("maxResults").is_none(),
-            "{} cannot set maxResults; the evaluator owns the cutoff", query.id);
-        assert!(request.get("showLines").is_none(),
-            "{} cannot set showLines; the evaluator disables source payloads", query.id);
-        let terms = request.get("terms").and_then(Value::as_array)
-            .unwrap_or_else(|| panic!("{} request must contain terms[]", query.id));
-        assert!(!terms.is_empty(), "{} has no terms", query.id);
-        assert!(terms.iter().all(Value::is_string), "{} has a non-string term", query.id);
+        validate_query_request(&query.id, &query.request);
 
         let mut judged_paths = HashSet::new();
         let mut negative_paths = HashSet::new();
@@ -355,11 +419,11 @@ fn validate_checked_fixture(spec: &RelevanceSpec) {
 }
 
 fn build_context(
-    spec: &RelevanceSpec,
+    extensions: &[String],
     corpus_root: &Path,
 ) -> (HandlerContext, PathBuf, tempfile::TempDir) {
     let corpus_root = crate::canonicalize_test_root(corpus_root);
-    let extensions = spec.extensions.join(",");
+    let extensions = extensions.join(",");
     let content_index = crate::build_content_index(&crate::ContentIndexArgs {
         dir: corpus_root.to_string_lossy().to_string(),
         ext: extensions.clone(),
@@ -443,6 +507,9 @@ fn summarize(queries: &[QueryQuality]) -> MetricSet {
         mrr_at_10: round_metric(queries.iter().map(|query| query.mrr_at_10).sum::<f64>() / divisor),
         recall_at_50: round_metric(queries.iter().map(|query| query.recall_at_50).sum::<f64>() / divisor),
         success_at_1: round_metric(queries.iter().filter(|query| query.success_at_1).count() as f64 / divisor),
+        explicit_negative_hits_at_10: queries.iter()
+            .map(|query| query.explicit_negative_hits_at_10)
+            .sum(),
     }
 }
 
@@ -461,6 +528,8 @@ fn aggregate_baseline(quality: &QualityReport) -> AggregateBaseline {
 
 fn assert_metric_set_close(actual: &MetricSet, expected: &MetricSet, context: &str) {
     assert_eq!(actual.query_count, expected.query_count, "{context} query count");
+    assert_eq!(actual.explicit_negative_hits_at_10, expected.explicit_negative_hits_at_10,
+        "{context} explicit negative hits at 10");
     for (name, actual_value, expected_value) in [
         ("ndcgAt10", actual.ndcg_at_10, expected.ndcg_at_10),
         ("mrrAt10", actual.mrr_at_10, expected.mrr_at_10),
@@ -558,6 +627,11 @@ fn evaluate_query(
             "{} has unlabelled top-{} result: {}",
             query.id, QUALITY_CUTOFF, path);
     }
+    let explicit_negative_hits_at_10 = retrieved_paths.iter()
+        .take(QUALITY_CUTOFF)
+        .filter(|path| query_negative_paths.contains(path.as_str())
+            || global_negative_paths.contains(path.as_str()))
+        .count();
     let retrieved_grades: Vec<u8> = retrieved_paths.iter()
         .map(|path| grades_by_path.get(path.as_str()).copied().unwrap_or(0))
         .collect();
@@ -579,15 +653,97 @@ fn evaluate_query(
         mrr_at_10: round_metric(reciprocal_rank_at(&retrieved_grades, QUALITY_CUTOFF, USEFUL_GRADE)),
         recall_at_50: round_metric(recall_at(&retrieved_paths, &query.judgments, RECALL_CUTOFF)),
         success_at_1: success_at_1(&retrieved_grades),
+        explicit_negative_hits_at_10,
         top_paths: retrieved_paths.into_iter().take(QUALITY_CUTOFF).collect(),
         missing_judgments,
     };
     (quality, elapsed_micros)
 }
 
-fn run_evaluation(spec: &RelevanceSpec, corpus_root: &Path, warm_up: bool) -> OfflineReport {
+fn collect_candidates(
+    spec: &CandidateSpec,
+    corpus_root: &Path,
+    model: &str,
+) -> CandidateReport {
+    assert!(!model.trim().is_empty(), "candidate model label cannot be empty");
+    validate_candidate_spec(spec);
+    let (context, corpus_root, _index_temp) = build_context(&spec.extensions, corpus_root);
+    let mut query_reports = Vec::with_capacity(spec.queries.len());
+    for query in &spec.queries {
+        let mut request = query.request.clone();
+        let request_object = request.as_object_mut().expect("validated request object");
+        request_object.insert("maxResults".to_string(), Value::from(RECALL_CUTOFF));
+        request_object.insert("showLines".to_string(), Value::Bool(false));
+        let result = dispatch_tool(&context, "xray_grep", &request);
+        assert!(!result.is_error, "{} failed: {}", query.id, result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text)
+            .unwrap_or_else(|error| panic!("{} returned invalid JSON: {error}", query.id));
+        validate_complete_ranked_response(&output)
+            .unwrap_or_else(|error| panic!("{} response is incomplete: {error}", query.id));
+        let search_mode = output.pointer("/summary/searchMode")
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("{} response has no searchMode: {output}", query.id))
+            .to_string();
+        let mut candidates: Vec<String> = output.get("files")
+            .and_then(Value::as_array)
+            .map(|files| {
+                files.iter()
+                    .filter_map(|file| file.get("path").and_then(Value::as_str))
+                    .map(|path| relative_result_path(&corpus_root, path))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let candidate_count = candidates.len();
+        candidates.sort();
+        candidates.dedup();
+        assert_eq!(candidates.len(), candidate_count,
+            "{} returned duplicate candidate paths", query.id);
+        query_reports.push(QueryCandidates {
+            id: query.id.clone(),
+            query_class: query.query_class.clone(),
+            intent: query.intent.clone(),
+            request: query.request.clone(),
+            search_mode,
+            candidates,
+        });
+    }
+    let candidate_bytes = serde_json::to_vec(&query_reports)
+        .expect("candidate digest projection should serialize");
+    CandidateReport {
+        schema_version: CANDIDATE_REPORT_SCHEMA_VERSION,
+        corpus_version: spec.corpus_version.clone(),
+        model: model.to_string(),
+        candidate_digest: format!("{:016x}", code_xray::stable_hash(&[&candidate_bytes])),
+        corpus_digest: corpus_digest(&corpus_root, &spec.extensions),
+        queries: query_reports,
+    }
+}
+
+fn relevance_model_from_env_value(
+    value: Result<String, std::env::VarError>,
+) -> String {
+    match value {
+        Ok(model) => model,
+        Err(std::env::VarError::NotPresent) => PRODUCTION_RELEVANCE_MODEL.to_string(),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            panic!("XRAY_RELEVANCE_MODEL must be valid Unicode")
+        }
+    }
+}
+
+fn relevance_model_from_env() -> String {
+    relevance_model_from_env_value(std::env::var("XRAY_RELEVANCE_MODEL"))
+}
+
+fn run_evaluation(
+    spec: &RelevanceSpec,
+    corpus_root: &Path,
+    warm_up: bool,
+    model: &str,
+) -> OfflineReport {
+    assert!(!model.trim().is_empty(), "relevance model label cannot be empty");
     validate_spec(spec, corpus_root);
-    let (context, corpus_root, _index_temp) = build_context(spec, corpus_root);
+    let (context, corpus_root, _index_temp) = build_context(&spec.extensions, corpus_root);
     let global_negative_paths: HashSet<&str> = spec.global_negatives.iter()
         .map(|negative| negative.path.as_str())
         .collect();
@@ -629,6 +785,7 @@ fn run_evaluation(spec: &RelevanceSpec, corpus_root: &Path, warm_up: bool) -> Of
             serde_json::json!({
                 "id": query.id,
                 "queryClass": query.query_class,
+                "intent": query.intent,
                 "searchMode": result.search_mode,
                 "request": query.request,
                 "judgments": query.judgments,
@@ -650,7 +807,7 @@ fn run_evaluation(spec: &RelevanceSpec, corpus_root: &Path, warm_up: bool) -> Of
     let quality = QualityReport {
         schema_version: REPORT_SCHEMA_VERSION,
         corpus_version: spec.corpus_version.clone(),
-        model: "tfidf-file-stem-v1".to_string(),
+        model: model.to_string(),
         metrics: summarize(&query_reports),
         scored_metrics,
         per_class,
@@ -746,8 +903,21 @@ fn relevance_negative_policies_accept_explicit_zero_grade_results() {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::canonicalize_test_root(temp.path());
     fs::write(root.join("a_main.rs"), "needle\n").unwrap();
-    fs::write(root.join("b_query_noise.rs"), "needle\n").unwrap();
     fs::write(root.join("c_global_noise.rs"), "needle\n").unwrap();
+    let query_negative_paths = [
+        "b_query_noise.rs",
+        "d_query_noise.rs",
+        "e_query_noise.rs",
+        "f_query_noise.rs",
+        "g_query_noise.rs",
+        "h_query_noise.rs",
+        "i_query_noise.rs",
+        "j_query_noise.rs",
+        "k_query_noise.rs",
+    ];
+    for path in query_negative_paths {
+        fs::write(root.join(path), "needle\n").unwrap();
+    }
 
     let spec = RelevanceSpec {
         schema_version: 1,
@@ -760,24 +930,28 @@ fn relevance_negative_policies_accept_explicit_zero_grade_results() {
         queries: vec![RelevanceQuery {
             id: "negative-policy".to_string(),
             query_class: "test".to_string(),
+            intent: "find the primary needle artifact".to_string(),
             request: serde_json::json!({"terms": ["needle"], "substring": false}),
             judgments: vec![Judgment {
                 path: "a_main.rs".to_string(),
                 grade: 3,
                 reason: "primary".to_string(),
             }],
-            negatives: vec![ExplicitNegative {
-                path: "b_query_noise.rs".to_string(),
+            negatives: query_negative_paths.into_iter().map(|path| ExplicitNegative {
+                path: path.to_string(),
                 reason: "query-specific noise".to_string(),
-            }],
+            }).collect(),
         }],
     };
 
-    let report = run_evaluation(&spec, &root, false).quality;
+    let report = run_evaluation(&spec, &root, false, PRODUCTION_RELEVANCE_MODEL).quality;
     assert_eq!(report.metrics.query_count, 1);
     // Equal scores make path order the deterministic primary-result oracle.
     assert_eq!(report.metrics.success_at_1, 1.0);
-    assert_eq!(report.queries[0].top_paths.len(), 3);
+    assert_eq!(report.metrics.explicit_negative_hits_at_10, 9);
+    assert_eq!(report.queries[0].explicit_negative_hits_at_10, 9);
+    assert_eq!(report.queries[0].top_paths.len(), QUALITY_CUTOFF);
+    assert_eq!(report.queries[0].top_paths.last().unwrap(), "j_query_noise.rs");
 }
 
 
@@ -829,9 +1003,9 @@ fn relevance_manifest_is_valid_and_balanced() {
 fn current_tfidf_matches_checked_relevance_baseline() {
     let spec = load_spec();
     let corpus_root = fixture_root().join("corpus");
-    let report = run_evaluation(&spec, &corpus_root, false).quality;
+    let report = run_evaluation(&spec, &corpus_root, false, PRODUCTION_RELEVANCE_MODEL).quality;
     assert_eq!(report.scored_metrics.query_count, EXPECTED_TFIDF_QUERY_COUNT);
-    let warm_report = run_evaluation(&spec, &corpus_root, true).quality;
+    let warm_report = run_evaluation(&spec, &corpus_root, true, PRODUCTION_RELEVANCE_MODEL).quality;
     assert_eq!(
         aggregate_baseline(&report),
         aggregate_baseline(&warm_report),
@@ -863,6 +1037,187 @@ fn current_tfidf_matches_checked_relevance_baseline() {
 }
 
 #[test]
+fn relevance_candidate_report_is_rank_blind() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    fs::write(root.join("a_noise.rs"), "needle filler filler filler\n").unwrap();
+    fs::write(root.join("m_unrelated.rs"), "filler filler filler filler\n").unwrap();
+    fs::write(root.join("z_primary.rs"), "needle needle needle filler\n").unwrap();
+    let spec = CandidateSpec {
+        schema_version: 1,
+        corpus_version: "candidate-test".to_string(),
+        extensions: vec!["rs".to_string()],
+        queries: vec![CandidateQuery {
+            id: "candidate-test".to_string(),
+            query_class: "test".to_string(),
+            intent: "find the needle implementation".to_string(),
+            request: serde_json::json!({"terms": ["needle"], "substring": false}),
+        }],
+    };
+
+    let (context, corpus_root, _index_temp) = build_context(&spec.extensions, &root);
+    let result = dispatch_tool(&context, "xray_grep", &serde_json::json!({
+        "terms": ["needle"],
+        "substring": false,
+        "maxResults": RECALL_CUTOFF,
+        "showLines": false,
+    }));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let ranked_paths: Vec<String> = output["files"].as_array().unwrap().iter()
+        .map(|file| relative_result_path(&corpus_root, file["path"].as_str().unwrap()))
+        .collect();
+    assert_eq!(ranked_paths, vec!["z_primary.rs", "a_noise.rs"]);
+
+    let report = collect_candidates(&spec, &root, PRODUCTION_RELEVANCE_MODEL);
+    let repeated_report = collect_candidates(&spec, &root, "candidate-model-v2");
+    assert_eq!(report.schema_version, CANDIDATE_REPORT_SCHEMA_VERSION);
+    assert_eq!(report.model, PRODUCTION_RELEVANCE_MODEL);
+    assert_eq!(repeated_report.model, "candidate-model-v2");
+    assert_eq!(report.candidate_digest, repeated_report.candidate_digest);
+    assert_eq!(report.queries[0].candidates, vec!["a_noise.rs", "z_primary.rs"]);
+    assert_eq!(report.queries[0].candidates, repeated_report.queries[0].candidates);
+    let report_value = serde_json::to_value(&report).unwrap();
+    let mut report_keys: Vec<&str> = report_value.as_object().unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    report_keys.sort_unstable();
+    assert_eq!(report_keys, [
+        "candidateDigest", "corpusDigest", "corpusVersion", "model", "queries",
+        "schemaVersion",
+    ]);
+    let mut query_keys: Vec<&str> = report_value["queries"][0].as_object().unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    query_keys.sort_unstable();
+    assert_eq!(query_keys, [
+        "candidates", "id", "intent", "queryClass", "request", "searchMode",
+    ]);
+
+    fs::write(root.join("b_context.rs"), "needle filler filler\n").unwrap();
+    let changed_report = collect_candidates(&spec, &root, "candidate-model-v3");
+    assert_ne!(report.candidate_digest, changed_report.candidate_digest);
+    assert_eq!(changed_report.queries[0].candidates,
+        vec!["a_noise.rs", "b_context.rs", "z_primary.rs"]);
+}
+
+fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
+    if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else {
+        "non-string panic".to_string()
+    }
+}
+
+#[test]
+fn relevance_model_env_routing_is_explicit() {
+    assert_eq!(
+        relevance_model_from_env_value(Err(std::env::VarError::NotPresent)),
+        PRODUCTION_RELEVANCE_MODEL,
+    );
+    assert_eq!(
+        relevance_model_from_env_value(Ok("candidate-model-v2".to_string())),
+        "candidate-model-v2",
+    );
+    let panic = std::panic::catch_unwind(|| relevance_model_from_env_value(Err(
+        std::env::VarError::NotUnicode(std::ffi::OsString::from("invalid")),
+    ))).unwrap_err();
+    assert!(panic_message(panic).contains("must be valid Unicode"));
+}
+
+#[test]
+fn relevance_specs_reject_grading_leaks_and_empty_intents() {
+    let graded_candidate = serde_json::json!({
+        "schemaVersion": 1,
+        "corpusVersion": "candidate-test",
+        "extensions": ["rs"],
+        "queries": [{
+            "id": "candidate-test",
+            "queryClass": "test",
+            "intent": "find the primary artifact",
+            "request": {"terms": ["needle"], "substring": false},
+            "judgments": [],
+        }],
+    });
+    let error = serde_json::from_value::<CandidateSpec>(graded_candidate).unwrap_err();
+    assert!(error.to_string().contains("unknown field `judgments`"));
+
+    let candidate_spec = CandidateSpec {
+        schema_version: 1,
+        corpus_version: "candidate-test".to_string(),
+        extensions: vec!["rs".to_string()],
+        queries: vec![CandidateQuery {
+            id: "candidate-test".to_string(),
+            query_class: "test".to_string(),
+            intent: "   ".to_string(),
+            request: serde_json::json!({"terms": ["needle"], "substring": false}),
+        }],
+    };
+    let panic = std::panic::catch_unwind(|| validate_candidate_spec(&candidate_spec))
+        .unwrap_err();
+    assert!(panic_message(panic).contains("has an empty intent"));
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    fs::write(root.join("primary.rs"), "needle\n").unwrap();
+    let relevance_spec = RelevanceSpec {
+        schema_version: 1,
+        corpus_version: "relevance-test".to_string(),
+        extensions: vec!["rs".to_string()],
+        global_negatives: Vec::new(),
+        queries: vec![RelevanceQuery {
+            id: "relevance-test".to_string(),
+            query_class: "test".to_string(),
+            intent: "   ".to_string(),
+            request: serde_json::json!({"terms": ["needle"], "substring": false}),
+            judgments: vec![Judgment {
+                path: "primary.rs".to_string(),
+                grade: 3,
+                reason: "primary".to_string(),
+            }],
+            negatives: Vec::new(),
+        }],
+    };
+    let panic = std::panic::catch_unwind(|| validate_spec(&relevance_spec, &root))
+        .unwrap_err();
+    assert!(panic_message(panic).contains("has an empty intent"));
+}
+
+#[test]
+#[ignore = "offline candidate collection; run explicitly before grading"]
+fn write_relevance_candidates() {
+    let spec_path = std::env::var_os("XRAY_RELEVANCE_CANDIDATE_SPEC")
+        .map(PathBuf::from)
+        .expect("XRAY_RELEVANCE_CANDIDATE_SPEC must be set");
+    let corpus_root = std::env::var_os("XRAY_RELEVANCE_CORPUS")
+        .map(PathBuf::from)
+        .expect("XRAY_RELEVANCE_CORPUS must be set");
+    let output_path = std::env::var_os("XRAY_RELEVANCE_CANDIDATES")
+        .map(PathBuf::from)
+        .expect("XRAY_RELEVANCE_CANDIDATES must be set");
+    let output_path = validate_report_output_path(&output_path)
+        .unwrap_or_else(|error| panic!("invalid candidate output path: {error}"));
+    let content = fs::read_to_string(&spec_path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", spec_path.display()));
+    let spec: CandidateSpec = serde_json::from_str(&content)
+        .unwrap_or_else(|error| panic!("failed to parse {}: {error}", spec_path.display()));
+    let model = relevance_model_from_env();
+    let report = collect_candidates(&spec, &corpus_root, &model);
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent).expect("candidate output directory should be creatable");
+    }
+    let mut report_json = serde_json::to_string_pretty(&report).unwrap();
+    report_json.push('\n');
+    fs::write(&output_path, report_json).expect("candidate report should be writable");
+    println!("{}", output_path.display());
+    println!("candidateDigest={}", report.candidate_digest);
+    println!("corpusDigest={}", report.corpus_digest);
+}
+
+#[test]
 #[ignore = "offline quality/latency report; run explicitly before ranking changes"]
 fn write_tfidf_relevance_report() {
     let spec_override = std::env::var_os("XRAY_RELEVANCE_SPEC").map(PathBuf::from);
@@ -880,7 +1235,8 @@ fn write_tfidf_relevance_report() {
         });
     let output_path = validate_report_output_path(&output_path)
         .unwrap_or_else(|error| panic!("invalid relevance report path: {error}"));
-    let report = run_evaluation(&load_spec_from(&spec_path), &corpus_root, true);
+    let model = relevance_model_from_env();
+    let report = run_evaluation(&load_spec_from(&spec_path), &corpus_root, true, &model);
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent).expect("relevance report directory should be creatable");
     }
