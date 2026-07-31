@@ -6,6 +6,7 @@
   "queries": [
     {
       "id": "exact-order-processor",
+      "intent": "Locate the primary OrderProcessor implementation.",
       "queryClass": "exact_identifier",
       "request": { "terms": ["OrderProcessor"], "substring": false },
       "judgments": [
@@ -18,6 +19,7 @@
     },
     {
       "id": "exact-inventory-manager",
+      "intent": "Locate the primary InventoryManager implementation.",
       "queryClass": "exact_identifier",
       "request": { "terms": ["InventoryManager"], "substring": false },
       "judgments": [
@@ -28,6 +30,7 @@
     },
     {
       "id": "exact-retry-policy",
+      "intent": "Locate the primary RetryPolicy implementation.",
       "queryClass": "exact_identifier",
       "request": { "terms": ["RetryPolicy"], "substring": false },
       "judgments": [
@@ -38,6 +41,7 @@
     },
     {
       "id": "exact-config-loader",
+      "intent": "Locate the primary ConfigLoader implementation.",
       "queryClass": "exact_identifier",
       "request": { "terms": ["ConfigLoader"], "substring": false },
       "judgments": [
@@ -47,6 +51,7 @@
     },
     {
       "id": "exact-session-token-store",
+      "intent": "Locate the primary SessionTokenStore implementation.",
       "queryClass": "exact_identifier",
       "request": { "terms": ["SessionTokenStore"], "substring": false },
       "judgments": [
@@ -58,6 +63,7 @@
 
     {
       "id": "partial-process-order-snake",
+      "intent": "Find the order-processing implementation from a snake-case identifier fragment.",
       "queryClass": "partial_identifier",
       "request": { "terms": ["process_order"], "substring": true },
       "judgments": [
@@ -68,6 +74,7 @@
     },
     {
       "id": "partial-process-order-camel",
+      "intent": "Find the C# order controller from a collapsed camel-case identifier fragment.",
       "queryClass": "partial_identifier",
       "request": { "terms": ["processorder"], "substring": true },
       "judgments": [
@@ -76,6 +83,7 @@
     },
     {
       "id": "partial-reserve-inventory",
+      "intent": "Find the inventory reservation implementation from an identifier prefix.",
       "queryClass": "partial_identifier",
       "request": { "terms": ["reserve_inven"], "substring": true },
       "judgments": [
@@ -85,6 +93,7 @@
     },
     {
       "id": "partial-cache-entry",
+      "intent": "Find the cache-entry storage implementation from an identifier fragment.",
       "queryClass": "partial_identifier",
       "request": { "terms": ["cache_entry"], "substring": true },
       "judgments": [
@@ -94,6 +103,7 @@
     },
     {
       "id": "partial-session-token",
+      "intent": "Find the session-token storage implementation from a snake-case fragment.",
       "queryClass": "partial_identifier",
       "request": { "terms": ["session_token"], "substring": true },
       "judgments": [
@@ -105,6 +115,7 @@
 
     {
       "id": "multi-order-inventory",
+      "intent": "Find the primary order implementation that coordinates inventory.",
       "queryClass": "multi_term_concept",
       "request": { "terms": ["order", "inventory"], "mode": "and" },
       "judgments": [
@@ -120,6 +131,7 @@
     },
     {
       "id": "multi-retry-order",
+      "intent": "Find the primary order implementation that applies retry behavior.",
       "queryClass": "multi_term_concept",
       "request": { "terms": ["retry", "order"], "mode": "and" },
       "judgments": [
@@ -133,6 +145,7 @@
     },
     {
       "id": "multi-cache-ttl",
+      "intent": "Find the cache implementation that enforces entry TTL.",
       "queryClass": "multi_term_concept",
       "request": { "terms": ["cache", "ttl"], "mode": "and" },
       "judgments": [
@@ -145,6 +158,7 @@
     },
     {
       "id": "multi-session-revoke",
+      "intent": "Find the session-token implementation that handles revocation.",
       "queryClass": "multi_term_concept",
       "request": { "terms": ["session", "revoke"], "mode": "and" },
       "judgments": [
@@ -154,6 +168,7 @@
     },
     {
       "id": "multi-config-retry-delay",
+      "intent": "Find the runtime configuration artifacts that define retry delay.",
       "queryClass": "multi_term_concept",
       "request": { "terms": ["config", "retry", "delay"], "mode": "and" },
       "judgments": [
@@ -165,6 +180,7 @@
 
     {
       "id": "phrase-order-validation-failed",
+      "intent": "Find the source artifact that emits the exact order validation failure.",
       "queryClass": "exact_phrase_error",
       "request": { "terms": ["order validation failed"], "phrase": true },
       "judgments": [
@@ -175,6 +191,7 @@
     },
     {
       "id": "phrase-retry-budget-exceeded",
+      "intent": "Find the source artifact that emits the exact retry budget failure.",
       "queryClass": "exact_phrase_error",
       "request": { "terms": ["retry budget exceeded"], "phrase": true },
       "judgments": [
@@ -185,6 +202,7 @@
     },
     {
       "id": "phrase-config-parse-failed",
+      "intent": "Find the source artifact that emits the exact configuration parse failure.",
       "queryClass": "exact_phrase_error",
       "request": { "terms": ["config parse failed"], "phrase": true },
       "judgments": [
@@ -195,6 +213,7 @@
     },
     {
       "id": "phrase-service-unavailable",
+      "intent": "Find the source artifact that emits the exact service-unavailable message.",
       "queryClass": "exact_phrase_error",
       "request": { "terms": ["service unavailable"], "phrase": true },
       "judgments": [
@@ -204,6 +223,7 @@
     },
     {
       "id": "phrase-authentication-pipeline",
+      "intent": "Find the source artifact containing the exact authentication-pipeline phrase.",
       "queryClass": "exact_phrase_error",
       "request": { "terms": ["authentication pipeline"], "phrase": true },
       "judgments": [
@@ -216,6 +236,7 @@
 
     {
       "id": "config-max-retries",
+      "intent": "Find the exact configuration artifacts that define maximum retries.",
       "queryClass": "config_api_key",
       "request": { "terms": ["MaxRetries", "max_retries"], "mode": "or", "substring": false },
       "judgments": [
@@ -229,6 +250,7 @@
     },
     {
       "id": "config-retry-delay-ms",
+      "intent": "Find the exact configuration artifacts that define retry delay in milliseconds.",
       "queryClass": "config_api_key",
       "request": { "terms": ["RetryDelayMs", "retry_delay_ms"], "mode": "or", "substring": false },
       "judgments": [
@@ -243,6 +265,7 @@
     },
     {
       "id": "config-cache-entry-ttl-seconds",
+      "intent": "Find the exact configuration artifacts that define cache-entry TTL.",
       "queryClass": "config_api_key",
       "request": { "terms": ["CacheEntryTtlSeconds", "cache_entry_ttl_seconds"], "mode": "or", "substring": false },
       "judgments": [
@@ -253,6 +276,7 @@
     },
     {
       "id": "config-token-issuer",
+      "intent": "Find the exact configuration artifacts that define the token issuer.",
       "queryClass": "config_api_key",
       "request": { "terms": ["TokenIssuer", "token_issuer"], "mode": "or", "substring": false },
       "judgments": [
@@ -265,6 +289,7 @@
     },
     {
       "id": "config-inventory-endpoint",
+      "intent": "Find the exact configuration artifacts that define the inventory endpoint.",
       "queryClass": "config_api_key",
       "request": { "terms": ["InventoryEndpoint"], "substring": false },
       "judgments": [
@@ -277,6 +302,7 @@
 
     {
       "id": "broad-order",
+      "intent": "Find the primary order-domain implementation for a broad order query.",
       "queryClass": "broad_common_term",
       "request": { "terms": ["order"], "substring": true },
       "judgments": [
@@ -294,6 +320,7 @@
     },
     {
       "id": "broad-service",
+      "intent": "Find the primary service client for a broad service query.",
       "queryClass": "broad_common_term",
       "request": { "terms": ["service"], "substring": true },
       "judgments": [
@@ -306,6 +333,7 @@
     },
     {
       "id": "broad-config",
+      "intent": "Find the primary configuration loader for a broad config query.",
       "queryClass": "broad_common_term",
       "request": { "terms": ["config"], "substring": true },
       "judgments": [
@@ -318,6 +346,7 @@
     },
     {
       "id": "broad-token",
+      "intent": "Find the primary token-store implementation for a broad token query.",
       "queryClass": "broad_common_term",
       "request": { "terms": ["token"], "substring": true },
       "judgments": [
@@ -333,6 +362,7 @@
     },
     {
       "id": "broad-cache",
+      "intent": "Find the primary cache-store implementation for a broad cache query.",
       "queryClass": "broad_common_term",
       "request": { "terms": ["cache"], "substring": true },
       "judgments": [
@@ -350,6 +380,7 @@
 
     {
       "id": "impl-validate-order",
+      "intent": "Find the validate_order implementation rather than its tests.",
       "queryClass": "implementation_vs_test",
       "request": { "terms": ["validate_order"], "substring": true },
       "judgments": [
@@ -359,6 +390,7 @@
     },
     {
       "id": "impl-load-runtime-settings",
+      "intent": "Find the load_runtime_settings implementation rather than its tests.",
       "queryClass": "implementation_vs_test",
       "request": { "terms": ["load_runtime_settings"], "substring": false },
       "judgments": [
@@ -368,6 +400,7 @@
     },
     {
       "id": "impl-issue-session-token",
+      "intent": "Find the issue_session_token implementation rather than its tests.",
       "queryClass": "implementation_vs_test",
       "request": { "terms": ["issue_session_token"], "substring": false },
       "judgments": [
@@ -377,6 +410,7 @@
     },
     {
       "id": "impl-reserve-inventory",
+      "intent": "Find the reserve_inventory implementation rather than its tests.",
       "queryClass": "implementation_vs_test",
       "request": { "terms": ["reserve_inventory"], "substring": false },
       "judgments": [
@@ -386,6 +420,7 @@
     },
     {
       "id": "impl-execute-with-retry",
+      "intent": "Find the execute_with_retry implementation rather than its tests.",
       "queryClass": "implementation_vs_test",
       "request": { "terms": ["execute_with_retry"], "substring": false },
       "judgments": [
@@ -396,6 +431,7 @@
 
     {
       "id": "noise-order-processing-binding",
+      "intent": "Find the order-processing implementation rather than generated binding noise.",
       "queryClass": "generated_noise",
       "request": { "terms": ["process_order_async", "OrderProcessor"], "mode": "or", "substring": false },
       "judgments": [
@@ -408,6 +444,7 @@
     },
     {
       "id": "noise-inventory-release-binding",
+      "intent": "Find the inventory-release implementation rather than generated binding noise.",
       "queryClass": "generated_noise",
       "request": { "terms": ["release_inventory", "InventoryManager"], "mode": "or", "substring": false },
       "judgments": [
@@ -418,6 +455,7 @@
     },
     {
       "id": "noise-retry-operation-binding",
+      "intent": "Find the retry implementation rather than generated operation noise.",
       "queryClass": "generated_noise",
       "request": { "terms": ["try_operation", "RetryPolicy"], "mode": "or", "substring": false },
       "judgments": [
@@ -428,6 +466,7 @@
     },
     {
       "id": "noise-cache-eviction-binding",
+      "intent": "Find the cache-eviction implementation rather than generated binding noise.",
       "queryClass": "generated_noise",
       "request": { "terms": ["evict_expired_entries", "CacheStore"], "mode": "or", "substring": false },
       "judgments": [
@@ -437,6 +476,7 @@
     },
     {
       "id": "noise-session-token-issuer-binding",
+      "intent": "Find the session-token implementation rather than generated issuer noise.",
       "queryClass": "generated_noise",
       "request": { "terms": ["token_issuer", "SessionTokenStore"], "mode": "or", "substring": false },
       "judgments": [

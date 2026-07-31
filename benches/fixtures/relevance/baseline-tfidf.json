@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 2,
+  "schemaVersion": 3,
   "corpusVersion": "xray-relevance-v1",
   "model": "tfidf-file-stem-v1",
   "metrics": {
@@ -7,14 +7,16 @@
     "ndcgAt10": 0.914894,
     "mrrAt10": 0.9875,
     "recallAt50": 1.0,
-    "successAt1": 0.575
+    "successAt1": 0.575,
+    "explicitNegativeHitsAt10": 1
   },
   "scoredMetrics": {
     "queryCount": 35,
     "ndcgAt10": 0.926663,
     "mrrAt10": 0.985714,
     "recallAt50": 1.0,
-    "successAt1": 0.657143
+    "successAt1": 0.657143,
+    "explicitNegativeHitsAt10": 1
   },
   "perClass": {
     "broad_common_term": {
@@ -22,58 +24,66 @@
       "ndcgAt10": 0.862921,
       "mrrAt10": 0.9,
       "recallAt50": 1.0,
-      "successAt1": 0.4
+      "successAt1": 0.4,
+      "explicitNegativeHitsAt10": 1
     },
     "config_api_key": {
       "queryCount": 5,
       "ndcgAt10": 0.99675,
       "mrrAt10": 1.0,
       "recallAt50": 1.0,
-      "successAt1": 1.0
+      "successAt1": 1.0,
+      "explicitNegativeHitsAt10": 0
     },
     "exact_identifier": {
       "queryCount": 5,
       "ndcgAt10": 0.88111,
       "mrrAt10": 1.0,
       "recallAt50": 1.0,
-      "successAt1": 0.4
+      "successAt1": 0.4,
+      "explicitNegativeHitsAt10": 0
     },
     "exact_phrase_error": {
       "queryCount": 5,
       "ndcgAt10": 0.832512,
       "mrrAt10": 1.0,
       "recallAt50": 1.0,
-      "successAt1": 0.0
+      "successAt1": 0.0,
+      "explicitNegativeHitsAt10": 0
     },
     "generated_noise": {
       "queryCount": 5,
       "ndcgAt10": 0.94976,
       "mrrAt10": 1.0,
       "recallAt50": 1.0,
-      "successAt1": 0.8
+      "successAt1": 0.8,
+      "explicitNegativeHitsAt10": 0
     },
     "implementation_vs_test": {
       "queryCount": 5,
       "ndcgAt10": 0.933596,
       "mrrAt10": 1.0,
       "recallAt50": 1.0,
-      "successAt1": 0.6
+      "successAt1": 0.6,
+      "explicitNegativeHitsAt10": 0
     },
     "multi_term_concept": {
       "queryCount": 5,
       "ndcgAt10": 0.958828,
       "mrrAt10": 1.0,
       "recallAt50": 1.0,
-      "successAt1": 0.8
+      "successAt1": 0.8,
+      "explicitNegativeHitsAt10": 0
     },
     "partial_identifier": {
       "queryCount": 5,
       "ndcgAt10": 0.903677,
       "mrrAt10": 1.0,
       "recallAt50": 1.0,
-      "successAt1": 0.6
+      "successAt1": 0.6,
+      "explicitNegativeHitsAt10": 0
     }
   },
-  "queryDigest": "571f7baa2fea088a",
+  "queryDigest": "85f9bc960eece5df",
   "corpusDigest": "c2c9440af4c1fffe"
 }
