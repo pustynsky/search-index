@@ -107,6 +107,10 @@ fn test_handler_context_field_count_guard() {
         file_index_build_gate: Arc::new(crate::mcp::handlers::utils::FileIndexBuildGate::new()),
         trigram_build_gate: Arc::new(crate::mcp::handlers::utils::TrigramRebuildGate::new()),
         autosave_dirty: Arc::new(AtomicBool::new(false)),
+        policy_reminder_mode: crate::mcp::handlers::utils::policy_reminder_mode(),
+        policy_reminder_state: Arc::new(
+            crate::mcp::handlers::utils::PolicyReminderState::new(),
+        ),
     };
     drop(_guard);
 }

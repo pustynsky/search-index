@@ -421,6 +421,21 @@ The class-aware rule was frozen before candidate collection and evaluated once o
 
 The frozen per-class gate failed, so the controlled latency gate was not run and the hybrid was rejected without retuning. Production remains on `tfidf-file-stem-v1`; this closes the ranking experiment rather than authorizing a narrower post-holdout rule.
 
+### Agent-level file-stem smoke pilot (2026-07-31)
+
+A frozen 12-session A/B pilot compared the pre-file-stem scorer with the current scorer on six neutral code-location tasks: three exact identifiers whose normalized names match their implementation file stems and three partial-identifier controls. Each stateless agent ran one read-only Xray search, opened candidates strictly in ranked order, and stopped after opening the grade-3 implementation. All 12 sessions succeeded with no protocol violations, and independent reruns confirmed every reported file-read count matched the target rank.
+
+| Group | Metric | Before | Current | Delta |
+| --- | --- | ---: | ---: | ---: |
+| Stem-sensitive (3 tasks) | File reads | 8 | 6 | -25.0% |
+| Stem-sensitive (3 tasks) | Total tool calls | 11 | 9 | -18.2% |
+| Controls (3 tasks) | File reads | 7 | 7 | 0 |
+| Controls (3 tasks) | Total tool calls | 10 | 10 | 0 |
+| Overall (6 tasks) | File reads | 15 | 13 | -13.3% |
+| Overall (6 tasks) | Total tool calls | 21 | 19 | -9.5% |
+
+Two stem-sensitive tasks saved one file read each; the third and all controls tied, with no regressions. This is a directional smoke result from one repetition per task, not a statistical estimate. The intended Copilot CLI MCP runner was unavailable, so the fallback used a VS Code stateless subagent with the same frozen A/B binaries through read-only `xray grep`. The result demonstrates reduced candidate-file inspection on that surface, but does not directly prove fewer VS Code MCP calls; the pilot was therefore not expanded to 72 sessions.
+
 The schema-v3 baseline stores explicit-negative hit counts plus both query and corpus digests. Query changes, judgments, ranked top paths, any file name or bytes under the corpus root, or indexed extensions therefore require explicit baseline review. After an intentional ranking or corpus change, run the ignored report, review `target/relevance/tfidf-file-stem-v1-baseline-candidate.json`, explain every moved aggregate and per-class metric in the PR, then replace `benches/fixtures/relevance/baseline-tfidf.json` with that generated candidate. Do not hand-edit metric literals or either digest.
 
 ## Criterion Benchmarks (synthetic, reproducible)

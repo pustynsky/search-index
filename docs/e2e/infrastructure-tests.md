@@ -58,13 +58,16 @@ Tests for MCP server protocol, async startup, graceful shutdown, LZ4 compression
 
 ---
 
-### T39c: `serve` — Successful JSON tool responses include policy reminder and next-step hint
+### T39c: `serve` — Adaptive policy reminder and persistent next-step hints
 
 **Expected:**
 
-- `summary.policyReminder` contains `XRAY_POLICY` and `Indexed extensions:`
-- Selected tools include `summary.nextStepHint`
-- Error responses do NOT get `policyReminder`
+- Default `adaptive` mode schedules policy reinforcement on the first response, every 25 responses, and after 30 minutes without a response
+- `XRAY_POLICY_REMINDER=always|off` forces or suppresses the policy independently of `XRAY_GUIDANCE_PREFIX`; parser unit tests also cover the documented truthy/falsy aliases
+- With default text-prefix presentation, a scheduled response carries the framed banner plus the compact enforcement line; later hint/warning-only prefixes are compact and unframed
+- With `XRAY_GUIDANCE_PREFIX=0`, the same schedule controls the full `summary.policyReminder` field
+- Selected tools keep `nextStepHint` regardless of policy cadence
+- JSON error envelopes participate in the same cadence
 
 ---
 
@@ -91,13 +94,13 @@ Tests for MCP server protocol, async startup, graceful shutdown, LZ4 compression
 
 ---
 
-### T39e: `serve` — policyReminder in tool responses contains INTENT->TOOL oneliner
+### T39e: `serve` — full policyReminder contains INTENT->TOOL oneliner
 
-**Goal:** Every successful JSON MCP tool response embeds a compact `INTENT->TOOL:` oneliner inside `summary.policyReminder`, providing re-entrancy of tool-selection rules between tool calls (system-prompt rules may be "forgotten" as context grows).
+**Goal:** Validate the full policy object used by legacy JSON presentation; default prefix presentation deliberately substitutes the shorter compact enforcement line, while initialize instructions carry the complete routing policy.
 
 **Expected:**
 
-- `summary.policyReminder` contains the substring `INTENT->TOOL:` on ANY successful JSON tool response (`xray_grep`, `xray_definitions`, `xray_callers`, `xray_edit`, `xray_fast`, etc.)
+- Every emitted full `summary.policyReminder` contains the substring `INTENT->TOOL:` (`xray_grep`, `xray_definitions`, `xray_callers`, `xray_edit`, `xray_fast`, etc.)
 - The oneliner lists at least these intent→tool pairs:
   - `context-around-match->xray_grep showLines`
   - `read-method-body->xray_definitions includeBody`
@@ -106,7 +109,7 @@ Tests for MCP server protocol, async startup, graceful shutdown, LZ4 compression
   - `list-dir->xray_fast dirsOnly`
   - `find-callers->xray_callers`
 - The oneliner is present regardless of whether `--ext` (indexed extensions) is configured
-- Error responses still get `policyReminder` including the INTENT oneliner
+- Error responses include the INTENT oneliner when cadence emits the reminder
 
 **Unit tests:** `test_build_policy_reminder_has_intent_oneliner`, `test_build_policy_reminder_intent_oneliner_without_extensions`
 

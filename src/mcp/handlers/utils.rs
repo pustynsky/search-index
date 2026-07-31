@@ -1084,9 +1084,9 @@ const MAX_MATCHED_TOKENS: usize = 20;
 ///
 /// `max_bytes` = 0 disables truncation entirely.
 /// Returns the (possibly truncated) JSON value.
-/// Build the policy reminder string that is embedded in every MCP tool response
-/// `summary.policyReminder`. Uses **imperative enforcement framing** (REQUIRED,
-/// NO EXCEPTIONS, STOP, protocol error) rather than passive advice ("Prefer xray").
+/// Build the policy reminder string emitted according to the configured cadence.
+/// Uses **imperative enforcement framing** (REQUIRED, NO EXCEPTIONS, STOP,
+/// protocol error) rather than passive advice ("Prefer xray").
 ///
 /// When `indexed_ext` is non-empty, appends a VIOLATION clause that explicitly
 /// lists the configured indexed extensions and names the required xray tool for
@@ -1398,6 +1398,94 @@ pub(crate) fn inject_response_guidance_with_args(
 }
 
 
+pub(crate) const POLICY_REMINDER_INTERVAL_RESPONSES: u64 = 25;
+pub(crate) const POLICY_REMINDER_IDLE_SECS: u64 = 30 * 60;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PolicyReminderMode {
+    Adaptive,
+    Always,
+    Off,
+}
+
+#[cfg(test)]
+thread_local! {
+    static POLICY_REMINDER_MODE_TEST_OVERRIDE: std::cell::Cell<Option<PolicyReminderMode>> =
+        const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_policy_reminder_mode_override_for_test(
+    value: Option<PolicyReminderMode>,
+) -> Option<PolicyReminderMode> {
+    POLICY_REMINDER_MODE_TEST_OVERRIDE.with(|override_value| {
+        let previous = override_value.get();
+        override_value.set(value);
+        previous
+    })
+}
+
+pub(crate) fn policy_reminder_mode_from_env_value(value: Option<&str>) -> PolicyReminderMode {
+    match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
+        Some("always" | "1" | "true" | "yes" | "on") => PolicyReminderMode::Always,
+        Some("off" | "0" | "false" | "no") => PolicyReminderMode::Off,
+        _ => PolicyReminderMode::Adaptive,
+    }
+}
+
+pub(crate) fn policy_reminder_mode() -> PolicyReminderMode {
+    #[cfg(test)]
+    {
+        POLICY_REMINDER_MODE_TEST_OVERRIDE
+            .with(|override_value| override_value.get().unwrap_or(PolicyReminderMode::Adaptive))
+    }
+
+    #[cfg(not(test))]
+    {
+        policy_reminder_mode_from_env_value(
+            std::env::var("XRAY_POLICY_REMINDER").ok().as_deref(),
+        )
+    }
+}
+
+pub(crate) fn current_unix_time_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Production MCP dispatch is sequential; atomics keep shared test contexts lock-free.
+#[derive(Debug, Default)]
+pub(crate) struct PolicyReminderState {
+    response_count: std::sync::atomic::AtomicU64,
+    last_response_secs: std::sync::atomic::AtomicU64,
+}
+
+impl PolicyReminderState {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn should_emit(&self, mode: PolicyReminderMode, now_secs: u64) -> bool {
+        use std::sync::atomic::Ordering;
+
+        let response_count = self.response_count.fetch_add(1, Ordering::Relaxed) + 1;
+        let previous_response_secs = self.last_response_secs.swap(now_secs, Ordering::Relaxed);
+        match mode {
+            PolicyReminderMode::Always => true,
+            PolicyReminderMode::Off => false,
+            PolicyReminderMode::Adaptive => {
+                response_count == 1
+                    || response_count.is_multiple_of(POLICY_REMINDER_INTERVAL_RESPONSES)
+                    || (previous_response_secs != 0
+                        && now_secs.saturating_sub(previous_response_secs)
+                            >= POLICY_REMINDER_IDLE_SECS)
+            }
+        }
+    }
+}
+
 const GUIDANCE_PREFIX_HEADER: &str = "=== XRAY AGENT GUIDANCE ===";
 const GUIDANCE_PREFIX_FOOTER: &str = "===============================";
 const COMPACT_POLICY_GUIDANCE: &str = concat!(
@@ -1439,8 +1527,8 @@ pub(crate) fn guidance_prefix_enabled() -> bool {
 
     #[cfg(not(test))]
     {
-        // 2026-05-04: prefix mode (policyReminder/nextStepHint as raw text
-        // before the JSON suffix) is now the default. Set
+        // 2026-05-04: prefix mode (present guidance fields as raw text before
+        // the JSON suffix) is now the default. Set
         // XRAY_GUIDANCE_PREFIX=0|false|no|off to opt back into the legacy
         // mode where guidance fields stay inside `summary` of the JSON body.
         match std::env::var("XRAY_GUIDANCE_PREFIX").ok() {
@@ -1450,21 +1538,23 @@ pub(crate) fn guidance_prefix_enabled() -> bool {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn render_guidance_prefix_if_enabled(
     result: ToolCallResult,
-    _tool_name: &str,
+    tool_name: &str,
 ) -> ToolCallResult {
-    // 2026-04-30: removed per-tool exclusion list. XRAY_GUIDANCE_PREFIX is a
-    // presentation-mode switch, not a per-tool allowlist — every JSON-producing
-    // tool with summary.policyReminder / summary.nextStepHint must move those
-    // fields into the raw prefix so the JSON suffix stays compact and stable.
-    // Previously xray_info / xray_help / xray_reindex / xray_reindex_definitions
-    // were excluded, which leaked the full policy text inside JSON when the
-    // env var was on (see user-story
-    // user-story_xray-guidance-prefix-json-policy-reminder-leak_2026-04-30.md).
-    if !guidance_prefix_enabled() {
-        return result;
-    }
+    render_guidance_prefix_for_policy(result, tool_name, true)
+}
+
+pub(crate) fn render_guidance_prefix_for_policy(
+    result: ToolCallResult,
+    _tool_name: &str,
+    include_policy_reminder: bool,
+) -> ToolCallResult {
+    // Prefix presentation and policy cadence are independent. Every response is
+    // budgeted with the policy present; off-cycle rendering removes it only from
+    // the final wire text, keeping result truncation deterministic.
+    let prefix_enabled = guidance_prefix_enabled();
 
     let was_error = result.is_error;
     let text = match result.content.first() {
@@ -1487,11 +1577,12 @@ pub(crate) fn render_guidance_prefix_if_enabled(
         .map(str::trim)
         .filter(|hint| !hint.is_empty())
         .map(str::to_string);
-    let has_policy_reminder = summary
-        .get("policyReminder")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .is_some_and(|reminder| !reminder.is_empty());
+    let has_policy_reminder = include_policy_reminder
+        && summary
+            .get("policyReminder")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .is_some_and(|reminder| !reminder.is_empty());
     // 2026-05-05: also promote `unknownArgsWarning` into the prefix so the
     // hint about a silently-ignored argument is visible BEFORE the JSON body.
     // The previous summary-only placement was easy to miss when the LLM
@@ -1507,12 +1598,29 @@ pub(crate) fn render_guidance_prefix_if_enabled(
         .filter(|warning| !warning.is_empty())
         .map(str::to_string);
 
-    if next_step_hint.is_none() && !has_policy_reminder && unknown_args_warning.is_none() {
-        return result;
-    }
-
     let has_response_bytes = summary.contains_key("responseBytes");
     let has_estimated_tokens = summary.contains_key("estimatedTokens");
+    if !include_policy_reminder {
+        summary.remove("policyReminder");
+    }
+
+    if !prefix_enabled
+        || (next_step_hint.is_none() && !has_policy_reminder && unknown_args_warning.is_none())
+    {
+        let text = serialize_guidance_response(
+            output,
+            None,
+            has_response_bytes,
+            has_estimated_tokens,
+        );
+        let rendered = ToolCallResult::success(text);
+        return if was_error {
+            ToolCallResult { is_error: true, ..rendered }
+        } else {
+            rendered
+        };
+    }
+
     summary.remove("nextStepHint");
     summary.remove("policyReminder");
 
@@ -1527,15 +1635,19 @@ pub(crate) fn render_guidance_prefix_if_enabled(
         guidance_lines.push(COMPACT_POLICY_GUIDANCE.to_string());
     }
 
-    let guidance_prefix = format!(
-        "{}\n{}\n{}",
-        GUIDANCE_PREFIX_HEADER,
-        guidance_lines.join("\n"),
-        GUIDANCE_PREFIX_FOOTER
-    );
-    let text = serialize_guidance_prefixed_response(
+    let guidance_prefix = if has_policy_reminder {
+        format!(
+            "{}\n{}\n{}",
+            GUIDANCE_PREFIX_HEADER,
+            guidance_lines.join("\n"),
+            GUIDANCE_PREFIX_FOOTER
+        )
+    } else {
+        guidance_lines.join("\n")
+    };
+    let text = serialize_guidance_response(
         output,
-        &guidance_prefix,
+        Some(&guidance_prefix),
         has_response_bytes,
         has_estimated_tokens,
     );
@@ -1550,15 +1662,22 @@ pub(crate) fn render_guidance_prefix_if_enabled(
     }
 }
 
-fn serialize_guidance_prefixed_response(
+fn serialize_guidance_response(
     mut output: Value,
-    guidance_prefix: &str,
+    guidance_prefix: Option<&str>,
     has_response_bytes: bool,
     has_estimated_tokens: bool,
 ) -> String {
+    let render = |output: &Value| {
+        let json_suffix = json_to_string(output);
+        guidance_prefix.map_or_else(
+            || json_suffix.clone(),
+            |prefix| format!("{}\n\n{}", prefix, json_suffix),
+        )
+    };
+
     for _ in 0..8 {
-        let json_suffix = json_to_string(&output);
-        let final_text = format!("{}\n\n{}", guidance_prefix, json_suffix);
+        let final_text = render(&output);
         let final_bytes = final_text.len() as u64;
         let estimated_tokens = final_bytes / 4;
 
@@ -1585,7 +1704,7 @@ fn serialize_guidance_prefixed_response(
         }
     }
 
-    format!("{}\n\n{}", guidance_prefix, json_to_string(&output))
+    render(&output)
 }
 
 /// Measure the JSON-serialized size of a Value in bytes.

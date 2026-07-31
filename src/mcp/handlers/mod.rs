@@ -1036,6 +1036,10 @@ pub struct HandlerContext {
     /// **Ordering:** `Relaxed` — same rationale as `file_index_dirty`.
     /// Pure signal, not a happens-before edge for data.
     pub autosave_dirty: Arc<AtomicBool>,
+    /// Policy reminder mode captured when the server context is created.
+    pub policy_reminder_mode: utils::PolicyReminderMode,
+    /// Shared cadence state for the adaptive policy reminder.
+    pub policy_reminder_state: Arc<utils::PolicyReminderState>,
 }
 
 impl HandlerContext {
@@ -1085,6 +1089,8 @@ impl Default for HandlerContext {
             file_index_build_gate: Arc::new(utils::FileIndexBuildGate::new()),
             trigram_build_gate: Arc::new(utils::TrigramRebuildGate::new()),
             autosave_dirty: Arc::new(AtomicBool::new(false)),
+            policy_reminder_mode: utils::policy_reminder_mode(),
+            policy_reminder_state: Arc::new(utils::PolicyReminderState::new()),
         }
     }
 }
@@ -1294,9 +1300,19 @@ fn finalize_response(
     dispatch_start: Instant,
     unknown_args_report: Option<arg_validation::UnknownArgsReport>,
 ) -> ToolCallResult {
-    // Guidance injection: policyReminder, nextStepHint, workspace metadata.
+    // Guidance injection: adaptive policy reminder, nextStepHint, workspace metadata.
     let was_error = result.is_error;
-    let result = utils::inject_response_guidance_with_args(result, tool_name, &ctx.server_ext, ctx, Some(arguments));
+    let include_policy_reminder = ctx.policy_reminder_state.should_emit(
+        ctx.policy_reminder_mode,
+        utils::current_unix_time_secs(),
+    );
+    let result = utils::inject_response_guidance_with_args(
+        result,
+        tool_name,
+        &ctx.server_ext,
+        ctx,
+        Some(arguments),
+    );
     let result = if was_error {
         ToolCallResult { is_error: true, ..result }
     } else {
@@ -1358,7 +1374,11 @@ fn finalize_response(
         utils::truncate_response_if_needed(result, effective_max)
     };
 
-    utils::render_guidance_prefix_if_enabled(result, tool_name)
+    utils::render_guidance_prefix_for_policy(
+        result,
+        tool_name,
+        include_policy_reminder,
+    )
 }
 
 // ─── Small inline handlers ──────────────────────────────────────────
