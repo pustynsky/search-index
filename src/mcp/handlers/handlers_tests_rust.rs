@@ -253,6 +253,7 @@ fn test_rust_reindex_definitions_success() {
         workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))),
         index_base: tmp_dir.join(".index"),
         server_ext: "rs".to_string(),
+        def_extensions: vec!["rs".to_string()],
         ..Default::default()
     };
 

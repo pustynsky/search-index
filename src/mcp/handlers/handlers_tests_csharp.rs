@@ -939,6 +939,8 @@ fn test_reindex_definitions_success() {
         def_index: Some(Arc::new(RwLock::new(def_index))),
         workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))),
         index_base: tmp_dir.join(".index"),
+        server_ext: "cs".to_string(),
+        def_extensions: vec!["cs".to_string()],
         ..Default::default()
     };
 

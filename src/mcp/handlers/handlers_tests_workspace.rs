@@ -848,6 +848,7 @@ fn test_handle_xray_reindex_definitions_inner_save_failure_keeps_fresh_in_memory
 
     let mut ctx = make_ctx_with_defs();
     ctx.server_ext = "rs".to_string();
+    ctx.def_extensions = vec!["rs".to_string()];
     // Force save_definition_index to fail by pointing index_base at a regular
     // file: the `create_dir_all(index_base)` inside the save layer will error
     // because the path component already exists as a non-directory.
@@ -1021,6 +1022,7 @@ fn test_handle_xray_reindex_definitions_inner_save_failure_does_not_publish_stal
     // 4. Reindex via the handler.
     let mut ctx = make_ctx_with_defs();
     ctx.server_ext = "rs".to_string();
+    ctx.def_extensions = vec!["rs".to_string()];
     ctx.index_base = index_base.clone();
     {
         let mut ws = ctx.workspace.write().unwrap();
@@ -1071,6 +1073,85 @@ fn test_handle_xray_reindex_definitions_inner_save_failure_does_not_publish_stal
         names
     );
 }
+
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn test_effective_definition_build_extensions_uses_first_parser_fallback() {
+    let mut ctx = make_ctx_with_defs();
+    ctx.def_extensions.clear();
+
+    assert_eq!(
+        super::effective_definition_build_extensions(&ctx),
+        vec!["cs".to_string()]
+    );
+}
+
+#[cfg(feature = "lang-rust")]
+#[test]
+fn test_handle_xray_reindex_definitions_inner_omitted_ext_defaults_to_def_extensions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws_def_extension_default");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("lib.rs"), "fn definition_extension_marker() {}\n").unwrap();
+    std::fs::write(workspace.join("model.cs"), "class ContentOnlyExtensionMarker {}\n").unwrap();
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+
+    let mut ctx = make_ctx_with_defs();
+    ctx.server_ext = "rs,cs".to_string();
+    ctx.def_extensions = vec!["rs".to_string()];
+    ctx.index_base = tmp.path().join("indexes");
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(workspace_str);
+        ws.mode = WorkspaceBindingMode::ManualOverride;
+    }
+
+    let result = handle_xray_reindex_definitions_inner(&ctx, &json!({}));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let definition_index = ctx.def_index.as_ref().unwrap().read().unwrap();
+    assert_eq!(definition_index.extensions, vec!["rs".to_string()]);
+    assert!(definition_index.definitions.iter().any(|definition| {
+        definition.name == "definition_extension_marker"
+    }));
+    assert!(!definition_index.definitions.iter().any(|definition| {
+        definition.name == "ContentOnlyExtensionMarker"
+    }));
+}
+
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn test_handle_xray_reindex_definitions_inner_empty_def_extensions_uses_parser_fallback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws_def_extension_fallback");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("model.cs"), "class ParserFallbackMarker {}\n").unwrap();
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+
+    let mut ctx = make_ctx_with_defs();
+    ctx.server_ext = "json".to_string();
+    ctx.def_extensions.clear();
+    ctx.index_base = tmp.path().join("indexes");
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(workspace_str);
+        ws.mode = WorkspaceBindingMode::ManualOverride;
+    }
+
+    let result = handle_xray_reindex_definitions_inner(&ctx, &json!({}));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let definition_index = ctx.def_index.as_ref().unwrap().read().unwrap();
+    assert!(definition_index.extensions.iter().any(|extension| extension == "cs"));
+    assert!(definition_index.definitions.iter().any(|definition| {
+        definition.name == "ParserFallbackMarker"
+    }));
+}
+
 
 
 
