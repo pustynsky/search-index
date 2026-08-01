@@ -1113,7 +1113,7 @@ Search pre-built file name index for instant file lookup (~35ms vs ~3s for live 
 
 ## `xray_info` — Index Information
 
-Shows all existing indexes with their status, sizes, age, and memory usage. No parameters.
+Shows all existing indexes with their status, sizes, age, and memory usage. Pass `file=["path", ...]` for per-file metadata without file content.
 
 ### Response fields (per index entry)
 
@@ -1127,6 +1127,17 @@ Shows all existing indexes with their status, sizes, age, and memory usage. No p
 | `inMemory` | Whether the index is currently loaded in memory |
 | `workerPanics` | Number of worker thread panics during the last index build. Present only when > 0 |
 | `degraded` | `true` when `workerPanics > 0` — the index may be incomplete. Re-run `xray_reindex` or `xray_reindex_definitions` to rebuild |
+
+### Per-file reachability fields
+
+| Field | Description |
+|-------|-------------|
+| `indexed` / `indexedByContent` | `true` only when the file is reachable through the content index after extension, `.git`, hidden, ignore, and configured git-exclude rules |
+| `indexedByDefinitions` | `true` only when an active bulk definition parser and definition walker can index the file |
+| `excludedReason` | Content exclusion reason: `insideGitDir`, `extensionNotIndexed`, or `ignoredByIndexRules`, in that precedence; omitted when content-indexed |
+| `definitionParserActive` | Whether a bulk definition parser supports the extension; capability alone does not imply reachability |
+| `xmlOnDemandActive` | Whether direct XML on-demand parsing is available, independent of bulk indexing |
+| `symbolReadableViaDefinitions` | `true` when bulk definition indexing or XML on-demand parsing can read symbols from the file |
 
 ### Response
 

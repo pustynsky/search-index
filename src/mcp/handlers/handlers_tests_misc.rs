@@ -1020,12 +1020,36 @@ fn test_xray_info_file_mode_returns_metadata_lf() {
     assert_eq!(f["byteSize"].as_u64().unwrap(), 6);
     assert_eq!(f["extension"].as_str().unwrap(), "rs");
     assert!(f["indexed"].as_bool().unwrap(), "`rs` is in server_ext, must be indexed=true");
+    assert_eq!(f["indexedByContent"], true);
+    assert_eq!(f["indexedByDefinitions"], false);
+    assert!(f.get("excludedReason").is_none());
     assert_eq!(f["lineEnding"].as_str().unwrap(), "LF");
     assert!(f.get("error").is_none(), "successful entry must NOT carry `error`");
     // The whole point of this mode: NO file content in the response.
     assert!(f.get("content").is_none(), "file content must not leak into xray_info response");
     assert_eq!(out["summary"]["requested"].as_u64().unwrap(), 1);
     assert_eq!(out["summary"]["returned"].as_u64().unwrap(), 1);
+}
+
+#[test]
+fn test_xray_info_file_mode_absolute_path_is_indexed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let absolute_path = tmp.path().join("absolute.rs");
+    std::fs::write(&absolute_path, "fn absolute() {}\n").unwrap();
+
+    let ctx = make_info_ctx(tmp.path(), "rs");
+    let result = dispatch_tool(
+        &ctx,
+        "xray_info",
+        &json!({ "file": [absolute_path.to_string_lossy()] }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let entry = &output["files"][0];
+    assert_eq!(entry["indexed"], true);
+    assert_eq!(entry["indexedByContent"], true);
+    assert!(entry.get("excludedReason").is_none(), "{entry:?}");
 }
 
 #[test]
@@ -1041,6 +1065,8 @@ fn test_xray_info_file_mode_marks_definition_parser_active() {
     let entry = &out["files"][0];
     assert_eq!(entry["extension"].as_str().unwrap(), "cs");
     assert!(entry["indexed"].as_bool().unwrap());
+    assert_eq!(entry["indexedByContent"], true);
+    assert_eq!(entry["indexedByDefinitions"], true);
     assert!(entry["definitionParserActive"].as_bool().unwrap());
     assert!(!entry["xmlOnDemandActive"].as_bool().unwrap());
     assert!(entry["symbolReadableViaDefinitions"].as_bool().unwrap());
@@ -1189,6 +1215,9 @@ fn test_xray_info_file_mode_indexed_false_for_unknown_extension() {
     assert_eq!(entry["extension"].as_str().unwrap(), "bin");
     assert!(!entry["indexed"].as_bool().unwrap(),
         "`bin` is NOT in server_ext, must be indexed=false");
+    assert_eq!(entry["indexedByContent"], false);
+    assert_eq!(entry["indexedByDefinitions"], false);
+    assert_eq!(entry["excludedReason"], "extensionNotIndexed");
     assert_eq!(entry["lineEnding"].as_str().unwrap(), "NONE",
         "file with no newline byte must report lineEnding=NONE");
     assert_eq!(entry["lineCount"].as_u64().unwrap(), 1,
@@ -1211,6 +1240,125 @@ fn test_xray_info_file_mode_handles_empty_file() {
     // INSERT-into-empty-file edit.
     assert_eq!(entry["lineCount"].as_u64().unwrap(), 0);
     assert_eq!(entry["byteSize"].as_u64().unwrap(), 0);
+}
+
+#[test]
+fn test_xray_info_file_mode_reports_gitignored_file_not_indexed() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir(tmp.path().join(".git")).unwrap();
+    std::fs::write(tmp.path().join(".gitignore"), "secret.rs\n").unwrap();
+    std::fs::write(tmp.path().join("secret.rs"), "fn secret() {}\n").unwrap();
+
+    let ctx = make_info_ctx_with_defs(tmp.path(), "rs", &["rs"]);
+    let result = dispatch_tool(&ctx, "xray_info", &json!({ "file": ["secret.rs"] }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let entry = &output["files"][0];
+    assert_eq!(entry["indexed"], false);
+    assert_eq!(entry["indexedByContent"], false);
+    assert_eq!(entry["indexedByDefinitions"], false);
+    assert_eq!(entry["definitionParserActive"], true);
+    assert_eq!(entry["symbolReadableViaDefinitions"], false);
+    assert_eq!(entry["excludedReason"], "ignoredByIndexRules");
+    assert!(entry.get("hint").is_none(), "excluded definitions must not receive a read hint: {entry:?}");
+}
+
+#[test]
+fn test_xray_info_file_mode_honors_git_exclude_policy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let info_dir = tmp.path().join(".git").join("info");
+    std::fs::create_dir_all(&info_dir).unwrap();
+    std::fs::write(info_dir.join("exclude"), "local.rs\n").unwrap();
+    std::fs::write(tmp.path().join("local.rs"), "fn local() {}\n").unwrap();
+
+    let default_ctx = make_info_ctx(tmp.path(), "rs");
+    let default_result = dispatch_tool(
+        &default_ctx,
+        "xray_info",
+        &json!({ "file": ["local.rs"] }),
+    );
+    assert!(!default_result.is_error, "{}", default_result.content[0].text);
+    let default_output: Value = serde_json::from_str(&default_result.content[0].text).unwrap();
+    assert_eq!(default_output["files"][0]["indexed"], true);
+
+    let mut respecting_ctx = make_info_ctx(tmp.path(), "rs");
+    respecting_ctx.respect_git_exclude = true;
+    let respecting_result = dispatch_tool(
+        &respecting_ctx,
+        "xray_info",
+        &json!({ "file": ["local.rs"] }),
+    );
+    assert!(!respecting_result.is_error, "{}", respecting_result.content[0].text);
+    let respecting_output: Value = serde_json::from_str(&respecting_result.content[0].text).unwrap();
+    let entry = &respecting_output["files"][0];
+    assert_eq!(entry["indexed"], false);
+    assert_eq!(entry["excludedReason"], "ignoredByIndexRules");
+}
+
+#[test]
+fn test_xray_info_file_mode_reports_git_internal_file_not_indexed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let git_dir = tmp.path().join(".git");
+    std::fs::create_dir(&git_dir).unwrap();
+    std::fs::write(git_dir.join("config"), "[core]\n").unwrap();
+
+    let ctx = make_info_ctx(tmp.path(), "rs");
+    let result = dispatch_tool(&ctx, "xray_info", &json!({ "file": [".git/config"] }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let entry = &output["files"][0];
+    assert_eq!(entry["indexed"], false);
+    assert_eq!(entry["indexedByContent"], false);
+    assert_eq!(entry["indexedByDefinitions"], false);
+    assert_eq!(entry["excludedReason"], "insideGitDir");
+}
+
+#[cfg(unix)]
+#[test]
+fn test_xray_info_file_mode_uses_canonical_root_for_index_rules() {
+    let tmp = tempfile::tempdir().unwrap();
+    let real_root = tmp.path().join("real");
+    let linked_root = tmp.path().join("linked");
+    std::fs::create_dir(&real_root).unwrap();
+    std::fs::write(real_root.join("tracked.rs"), "fn tracked() {}\n").unwrap();
+    std::os::unix::fs::symlink(&real_root, &linked_root).unwrap();
+
+    let absolute_path = linked_root.join("tracked.rs").to_string_lossy().to_string();
+    let ctx = make_info_ctx(&linked_root, "rs");
+    let result = dispatch_tool(
+        &ctx,
+        "xray_info",
+        &json!({ "file": ["tracked.rs", absolute_path] }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    for entry in output["files"].as_array().unwrap() {
+        assert_eq!(entry["indexed"], true);
+        assert_eq!(entry["indexedByContent"], true);
+        assert!(entry.get("excludedReason").is_none(), "{entry:?}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn test_xray_info_file_mode_reports_hidden_definition_only_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join(".hidden.rs"), "fn hidden() {}\n").unwrap();
+
+    let mut ctx = make_info_ctx(tmp.path(), "rs");
+    ctx.def_extensions = vec!["rs".to_string()];
+    let result = dispatch_tool(&ctx, "xray_info", &json!({ "file": [".hidden.rs"] }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let entry = &output["files"][0];
+    assert_eq!(entry["indexed"], false);
+    assert_eq!(entry["indexedByContent"], false);
+    assert_eq!(entry["indexedByDefinitions"], true);
+    assert_eq!(entry["excludedReason"], "ignoredByIndexRules");
 }
 
 #[test]

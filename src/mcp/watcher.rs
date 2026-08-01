@@ -69,7 +69,7 @@ pub(crate) fn is_included_by_index_rules(
     .contains(&crate::path_identity_key(path))
 }
 
-fn included_paths_by_index_rules(
+pub(crate) fn included_paths_by_index_rules(
     canonical_server_dir: &str,
     paths: &[PathBuf],
     respect_git_exclude: bool,
@@ -1916,11 +1916,7 @@ pub(crate) struct DirState {
 /// Walk `dir` once and classify every regular file into the two
 /// [`DirState`] views.
 ///
-/// Walker config is held centralised here so the watcher's
-/// reconciliation paths and the upcoming periodic rescan share a single
-/// source of truth: `follow_links(true).hidden(false).git_ignore(true)
-/// .git_exclude(false)`. `.git/` is excluded explicitly via
-/// [`is_inside_git_dir`] because `WalkBuilder` does not skip it by default.
+/// Uses the production walker rules; `.git/` remains an explicit caller-side exclusion.
 ///
 /// Path keys are normalised through [`clean_path`] so they can be
 /// compared 1:1 against `path_to_id` keys (which use the same
