@@ -15,7 +15,7 @@ pub(crate) mod utils;
 #[cfg(feature = "lang-xml")]
 mod xml_on_demand;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -183,14 +183,14 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
         },
         ToolDefinition {
             name: "xray_info".to_string(),
-            description: "Show all existing indexes with their status, sizes, and age. With `file=[\"path\",...]`: returns per-file metadata (lineCount, byteSize, extension, indexed, lineEnding, definitionParserActive, xmlOnDemandActive, symbolReadableViaDefinitions, optional hint) WITHOUT loading file content into the response. Use this to discover the line count of a file before composing an `xray_edit` call (e.g. for the append-EOF idiom `startLine: lineCount+1, endLine: lineCount`) instead of falling back to `Get-Content | Measure-Object` or `wc -l`. lineCount uses the same semantics as `xray_edit`'s `newLineCount` / `originalLineCount` (trailing newline is a terminator, not a line) so the value can be fed directly into edit ranges.".to_string(),
+            description: "Show index status, sizes, and age. With `file=[\"path\",...]`: returns metadata without file content. `indexed`/`indexedByContent` report content-index reachability; `indexedByDefinitions` reports bulk definition reachability; `symbolReadableViaDefinitions` also includes XML on-demand reads; `excludedReason` explains content exclusion. Use lineCount to compose `xray_edit` ranges, including append-EOF (`startLine: lineCount+1, endLine: lineCount`). Its semantics match `xray_edit`: a trailing newline terminates the last line rather than adding one.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "file": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Optional list of files to inspect. Each entry is one path (absolute, or workspace-relative). Returns lineCount/byteSize/extension/indexed/lineEnding plus parser/on-demand readability metadata per file. Without this argument, the existing index-level summary is returned."
+                        "description": "Files to inspect (absolute or workspace-relative). Returns size, line and reachability metadata. Omit for the index summary."
                     }
                 },
                 "required": []
@@ -1409,7 +1409,7 @@ fn handle_xray_help(ctx: &HandlerContext, arguments: &Value) -> ToolCallResult {
 fn handle_xray_info(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     // Per-file metadata mode: when caller passes `file=["path", ...]` we skip
     // the index-summary aggregation and return cheap-to-compute metadata for
-    // each requested path (lineCount/byteSize/extension/indexed/lineEnding).
+    // each requested path (lineCount/byteSize/extension/reachability/lineEnding).
     // Closes docs/user-stories/todo_2026-04-25_xray-edit-append-and-line-staleness.md §2.3
     // — without this, agents fall back to `Get-Content | Measure-Object` to
     // discover line count before composing an `xray_edit` call.
@@ -1621,8 +1621,8 @@ fn handle_xray_info(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 }
 // ─── Per-file metadata mode for `xray_info` ──────────────────────────
 //
-// Returns cheap-to-compute file metadata (lineCount/byteSize/extension/indexed/
-// lineEnding) WITHOUT putting file content into the response. The intended
+// Returns cheap-to-compute file metadata (lineCount/byteSize/extension/index
+// reachability/lineEnding) WITHOUT putting file content into the response. The intended
 // caller is an LLM agent that needs to know the line count of a file before
 // composing an `xray_edit` call (notably for the append-EOF idiom
 // `startLine: lineCount+1, endLine: lineCount`).
@@ -1645,9 +1645,36 @@ fn handle_xray_info_files(ctx: &HandlerContext, files: &[String]) -> ToolCallRes
         .collect();
     let def_exts = ctx.def_extensions.clone();
     let xml_on_demand_available = cfg!(feature = "lang-xml") && ctx.def_index.is_some();
+    let paths: Vec<(PathBuf, PathBuf)> = files
+        .iter()
+        .map(|raw_path| resolve_info_paths(raw_path, &server_dir, &canonical_server_dir))
+        .collect();
+    let index_rules_paths: Vec<PathBuf> = paths
+        .iter()
+        .map(|(_, index_rules_path)| index_rules_path.clone())
+        .collect();
+    let content_included = crate::mcp::watcher::included_paths_by_index_rules(
+        &canonical_server_dir,
+        &index_rules_paths,
+        ctx.respect_git_exclude,
+        false,
+    );
+    let definitions_included = crate::mcp::watcher::included_paths_by_index_rules(
+        &canonical_server_dir,
+        &index_rules_paths,
+        ctx.respect_git_exclude,
+        true,
+    );
 
     let mut entries: Vec<Value> = Vec::with_capacity(files.len());
-    for raw_path in files {
+    for (raw_path, (resolved, index_rules_path)) in files.iter().zip(paths) {
+        let path_key = crate::path_identity_key(&index_rules_path);
+        let reachability = InfoFileReachability {
+            resolved,
+            index_rules_path,
+            included_by_content_rules: content_included.contains(&path_key),
+            included_by_definition_rules: definitions_included.contains(&path_key),
+        };
         entries.push(file_metadata_entry(
             raw_path,
             &server_dir,
@@ -1655,6 +1682,7 @@ fn handle_xray_info_files(ctx: &HandlerContext, files: &[String]) -> ToolCallRes
             &server_exts,
             &def_exts,
             xml_on_demand_available,
+            reachability,
         ));
     }
 
@@ -1667,10 +1695,39 @@ fn handle_xray_info_files(ctx: &HandlerContext, files: &[String]) -> ToolCallRes
 }
 
 
-/// Compute metadata for a single file. Returns a per-file object that always
-/// contains `path` (the input string, echoed back for batch correlation) and
-/// either the metadata fields or an `error` describing why metadata could not
-/// be produced.
+/// Resolve the read path and its equivalent canonical-root walker path.
+fn resolve_info_paths(
+    raw_path: &str,
+    server_dir: &str,
+    canonical_server_dir: &str,
+) -> (PathBuf, PathBuf) {
+    let path = Path::new(raw_path);
+    let resolved = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        Path::new(server_dir).join(path)
+    };
+    let index_rules_path = if path.is_absolute() {
+        let resolved_key = crate::path_identity_key(&resolved);
+        let server_key = crate::path_identity_key(Path::new(server_dir));
+        resolved_key
+            .strip_prefix(&server_key)
+            .map(|relative| Path::new(canonical_server_dir).join(relative))
+            .unwrap_or_else(|_| resolved.clone())
+    } else {
+        Path::new(canonical_server_dir).join(path)
+    };
+    (resolved, index_rules_path)
+}
+
+struct InfoFileReachability {
+    resolved: PathBuf,
+    index_rules_path: PathBuf,
+    included_by_content_rules: bool,
+    included_by_definition_rules: bool,
+}
+
+/// Compute metadata or a per-file error for one requested path.
 fn file_metadata_entry(
     raw_path: &str,
     server_dir: &str,
@@ -1678,15 +1735,14 @@ fn file_metadata_entry(
     server_exts: &[String],
     def_exts: &[String],
     xml_on_demand_available: bool,
+    reachability: InfoFileReachability,
 ) -> Value {
-    use std::path::{Path, PathBuf};
-
-    let p = Path::new(raw_path);
-    let resolved: PathBuf = if p.is_absolute() {
-        p.to_path_buf()
-    } else {
-        Path::new(server_dir).join(p)
-    };
+    let InfoFileReachability {
+        resolved,
+        index_rules_path,
+        included_by_content_rules,
+        included_by_definition_rules,
+    } = reachability;
     let resolved_str = crate::clean_path(&resolved.to_string_lossy());
 
     // Workspace boundary check. Use the same logical-path comparison the edit
@@ -1734,19 +1790,43 @@ fn file_metadata_entry(
         });
     }
 
-    // Extension + indexed flag are derived from the resolved path so callers
-    // can ask about files outside the indexed extension set and still get a
-    // stable answer (`indexed: false`).
+    // Reachability is derived from the resolved path using the same extension,
+    // hidden, ignore, and git-exclude rules as content/definition indexing.
     let extension = resolved
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_ascii_lowercase();
-    let indexed = !extension.is_empty() && server_exts.iter().any(|e| e == &extension);
+    let content_extension_enabled = !extension.is_empty()
+        && server_exts.iter().any(|e| e == &extension);
     let definition_parser_active = !extension.is_empty()
         && def_exts.iter().any(|e| e.eq_ignore_ascii_case(&extension));
+    let inside_git_dir = crate::is_inside_git_dir(&index_rules_path);
+    let indexed_by_content = content_extension_enabled
+        && !inside_git_dir
+        && included_by_content_rules;
+    let indexed_by_definitions = definition_parser_active
+        && !inside_git_dir
+        && included_by_definition_rules;
+    let excluded_reason = if inside_git_dir {
+        Some("insideGitDir")
+    } else if !content_extension_enabled {
+        Some("extensionNotIndexed")
+    } else if !indexed_by_content {
+        Some("ignoredByIndexRules")
+    } else {
+        None
+    };
+    let indexed = indexed_by_content;
     let xml_on_demand_active = xml_on_demand_available && xml_on_demand_active_for_extension(&extension);
-    let symbol_readable_via_definitions = definition_parser_active || xml_on_demand_active;
+    let symbol_readable_via_definitions = indexed_by_definitions || xml_on_demand_active;
+    let apply_index_metadata = |entry: &mut Value| {
+        entry["indexedByContent"] = json!(indexed_by_content);
+        entry["indexedByDefinitions"] = json!(indexed_by_definitions);
+        if let Some(reason) = excluded_reason {
+            entry["excludedReason"] = json!(reason);
+        }
+    };
 
     // Read content via `read_file_lossy` so BOM detection / UTF-16 decoding
     // matches what `xray_grep`/`xray_edit` see. lineEnding detection runs on
@@ -1755,7 +1835,7 @@ fn file_metadata_entry(
     let raw = match std::fs::read(&resolved) {
         Ok(b) => b,
         Err(e) => {
-            return json!({
+            let mut entry = json!({
                 "path": raw_path,
                 "resolvedPath": resolved_str,
                 "byteSize": byte_size,
@@ -1766,6 +1846,8 @@ fn file_metadata_entry(
                 "symbolReadableViaDefinitions": symbol_readable_via_definitions,
                 "error": format!("cannot read file: {}", e),
             });
+            apply_index_metadata(&mut entry);
+            return entry;
         }
     };
     let line_ending = detect_line_ending(&raw);
@@ -1773,7 +1855,7 @@ fn file_metadata_entry(
     let (content, was_lossy) = match crate::read_file_lossy(&resolved) {
         Ok(pair) => pair,
         Err(e) => {
-            return json!({
+            let mut entry = json!({
                 "path": raw_path,
                 "resolvedPath": resolved_str,
                 "byteSize": byte_size,
@@ -1785,6 +1867,8 @@ fn file_metadata_entry(
                 "symbolReadableViaDefinitions": symbol_readable_via_definitions,
                 "error": format!("cannot decode file: {}", e),
             });
+            apply_index_metadata(&mut entry);
+            return entry;
         }
     };
     let line_count = count_lines_for_info(&content);
@@ -1801,10 +1885,11 @@ fn file_metadata_entry(
         "symbolReadableViaDefinitions": symbol_readable_via_definitions,
         "lineEnding": line_ending,
     });
+    apply_index_metadata(&mut entry);
     if was_lossy {
         entry["lossyUtf8"] = json!(true);
     }
-    if definition_parser_active {
+    if indexed_by_definitions {
         entry["hint"] = json!(format!(
             "{} has an active definition parser. Prefer xray_definitions file=[\"{}\"] includeBody=true maxBodyLines=0 over read_file for symbol-level reads.",
             raw_path, raw_path
