@@ -90,7 +90,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
     vec![
         crate::mcp::protocol::ToolDefinition {
             name: "xray_git_history".to_string(),
-            description: "Get commit history for a specific file in a git repository. By default, uses the fast workspace cache and returns direct-path history only; it may omit commits before renames/copies and reports source=git-cache, lineage=direct-path, safeForFullHistory=false. Set noCache=true for git CLI with --follow; this bypasses cache, resolves rename/copy lineage, applies author/message filters and maxResults to the followed history, and reports source=git-cli, lineage=follow, safeForFullHistory=true. Cache use is limited to the canonical bound workspace; another repo argument falls back to CLI. Works for existing and deleted files. xray_git_diff is always CLI-only. Set firstCommit=true for the followed creation commit; it bypasses cache and other filters.".to_string(),
+            description: "Get file history. Unfiltered canonical-workspace queries use the fast direct-path cache and may omit pre-rename history (source=git-cache, lineage=direct-path, safeForFullHistory=false). Message filters and noCache=true use CLI --follow; message filtering includes the full body (source=git-cli, lineage=follow, safeForFullHistory=true). Other repos and xray_git_diff also use CLI. Deleted files are supported. firstCommit=true returns the followed creation commit and ignores other filters.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -101,7 +101,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
                     "date": { "type": "string", "description": "Exact date (YYYY-MM-DD), overrides from/to" },
                     "maxResults": { "type": "integer", "description": "Max commits (default: 50, 0=unlimited)" },
                     "author": { "type": "string", "description": "Filter by author name/email (substring, case-insensitive)" },
-                    "message": { "type": "string", "description": "Filter by commit message (substring, case-insensitive)" },
+                    "message": { "type": "string", "description": "Filter by the full commit message, including body (substring, case-insensitive)" },
                     "noCache": { "type": "boolean", "description": "Bypass the direct-path workspace cache and use git --follow for full rename/copy lineage (default: false)" },
                     "firstCommit": { "type": "boolean", "description": "If true, return only the commit that CREATED this file (git log --follow --diff-filter=A --max-count=1, with no-follow fallback for deleted files). Correct across renames; works for deleted files. Always CLI-only and ignores noCache/date/author/message/maxResults filters. Response shape: {firstCommit: {hash,date,author,email,message} | null, summary: {...}}. Default: false." }
                 },
@@ -121,7 +121,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
                     "date": { "type": "string", "description": "Exact date (YYYY-MM-DD), overrides from/to" },
                     "maxResults": { "type": "integer", "description": "Max commits (default: 50, 0=unlimited)" },
                     "author": { "type": "string", "description": "Filter by author name/email (substring, case-insensitive)" },
-                    "message": { "type": "string", "description": "Filter by commit message (substring, case-insensitive)" }
+                    "message": { "type": "string", "description": "Filter by the full commit message (literal substring, case-insensitive)" }
                 },
                 "required": ["repo", "file"]
             }),
@@ -138,7 +138,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
                     "from": { "type": "string", "description": "Start date (YYYY-MM-DD, inclusive)" },
                     "to": { "type": "string", "description": "End date (YYYY-MM-DD, inclusive)" },
                     "top": { "type": "integer", "description": "Top N authors (default: 10)" },
-                    "message": { "type": "string", "description": "Filter by commit message (substring, case-insensitive)" },
+                    "message": { "type": "string", "description": "Filter by the full commit message (literal substring, case-insensitive)" },
                     "noCache": { "type": "boolean", "description": "Bypass cache, query git CLI directly (default: false)" }
                 },
                 "required": ["repo"]
@@ -170,7 +170,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
                     "to": { "type": "string", "description": "End date (YYYY-MM-DD, inclusive)" },
                     "date": { "type": "string", "description": "Exact date (YYYY-MM-DD), overrides from/to" },
                     "author": { "type": "string", "description": "Filter by author name/email (substring, case-insensitive)" },
-                    "message": { "type": "string", "description": "Filter by commit message (substring, case-insensitive)" },
+                    "message": { "type": "string", "description": "Filter by the full commit message (literal substring, case-insensitive)" },
                     "noCache": { "type": "boolean", "description": "Bypass cache, query git CLI directly (default: false)" },
                     "includeDeleted": { "type": "boolean", "description": "If true, restrict results to files that are NOT in current HEAD (i.e., files that were deleted). Useful for 'find deleted files in <dir>'. Uses a single `git ls-files` call for efficiency. Default: false." }
                 },
@@ -566,7 +566,8 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
     let no_cache = args.get("noCache").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // ── Cache path (history only, not diff — cache has no patch data) ──
-    if !include_diff && !no_cache && ctx.git_cache_ready.load(Ordering::Relaxed)
+    if !include_diff && !no_cache && message_filter.is_none()
+        && ctx.git_cache_ready.load(Ordering::Relaxed)
         && repo_matches_workspace(ctx, repo)
         && let Ok(cache_guard) = ctx.git_cache.read()
             && let Some(cache) = cache_guard.as_ref()
@@ -643,7 +644,21 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
     let query_author = if post_filter_lineage { None } else { author_filter };
     let query_message = if post_filter_lineage { None } else { message_filter };
 
-    match git::file_history(repo, file, &filter, include_diff, query_max_results, query_author, query_message) {
+    let history = if !include_diff && message_filter.is_some() {
+        git::file_history_with_full_messages(repo, file, &filter)
+    } else {
+        git::file_history(
+            repo,
+            file,
+            &filter,
+            include_diff,
+            query_max_results,
+            query_author,
+            query_message,
+        )
+    };
+
+    match history {
         Ok((mut commits, mut total_count)) => {
             if post_filter_lineage {
                 let author_pattern = author_filter.map(str::to_lowercase);
@@ -654,7 +669,7 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                             || commit.author_email.to_lowercase().contains(pattern)
                     });
                     let message_matches = message_pattern.as_ref().is_none_or(|pattern| {
-                        commit.message.to_lowercase().contains(pattern)
+                        commit.full_message.to_lowercase().contains(pattern)
                     });
                     author_matches && message_matches
                 });
@@ -760,7 +775,8 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let no_cache = args.get("noCache").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // ── Cache path ──
-    if !no_cache && ctx.git_cache_ready.load(Ordering::Relaxed)
+    if !no_cache && message_filter.is_none()
+        && ctx.git_cache_ready.load(Ordering::Relaxed)
         && repo_matches_workspace(ctx, repo)
         && let Ok(cache_guard) = ctx.git_cache.read()
             && let Some(cache) = cache_guard.as_ref()
@@ -909,7 +925,8 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let include_deleted = args.get("includeDeleted").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // ── Cache path ──
-    if !no_cache && ctx.git_cache_ready.load(Ordering::Relaxed)
+    if !no_cache && message_filter.is_none()
+        && ctx.git_cache_ready.load(Ordering::Relaxed)
         && repo_matches_workspace(ctx, repo)
         && let Ok(cache_guard) = ctx.git_cache.read()
             && let Some(cache) = cache_guard.as_ref()

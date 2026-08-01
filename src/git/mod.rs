@@ -18,6 +18,7 @@ pub struct CommitInfo {
     pub author_name: String,
     pub author_email: String,
     pub message: String,
+    pub(crate) full_message: String,
     pub patch: Option<String>,
 }
 
@@ -288,6 +289,22 @@ fn run_git(cmd: &mut Command) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+fn add_log_filters(
+    cmd: &mut Command,
+    author_filter: Option<&str>,
+    message_filter: Option<&str>,
+) {
+    if author_filter.is_some() || message_filter.is_some() {
+        cmd.arg("--fixed-strings").arg("--regexp-ignore-case");
+    }
+    if let Some(author) = author_filter {
+        cmd.arg(format!("--author={author}"));
+    }
+    if let Some(message) = message_filter {
+        cmd.arg(format!("--grep={message}"));
+    }
+}
+
 /// Parse a git log record (using FIELD_SEP-separated fields) into CommitInfo.
 fn parse_commit_record(record: &str) -> Option<CommitInfo> {
     let fields: Vec<&str> = record.split(FIELD_SEP).collect();
@@ -295,26 +312,51 @@ fn parse_commit_record(record: &str) -> Option<CommitInfo> {
         return None;
     }
 
-    // The format string ends with `%s{FIELD_SEP}` so the last split chunk is
-    // always an empty (or whitespace-only) trailing fragment. Strip it before
-    // joining so messages don't carry a trailing `␞` artifact. Without this
-    // step, a single-commit message like "create a.txt" parses as
-    // "create a.txt␞" because `String::trim()` doesn't treat `␞` as
-    // whitespace.
+    // The trailing FIELD_SEP leaves an empty final chunk.
     let message_end = if fields.last().map(|s| s.trim().is_empty()).unwrap_or(false) {
         fields.len() - 1
     } else {
         fields.len()
     };
 
+    let full_message = fields[4..message_end].join(FIELD_SEP).trim().to_string();
+    let message = full_message.lines().next().unwrap_or_default().trim().to_string();
+
     Some(CommitInfo {
         hash: fields[0].trim().to_string(),
         date: fields[1].trim().to_string(),
         author_name: fields[2].trim().to_string(),
         author_email: fields[3].trim().to_string(),
-        message: fields[4..message_end].join(FIELD_SEP).trim().to_string(),
+        message,
+        full_message,
         patch: None,
     })
+}
+
+fn parse_full_commit_output(output: &str) -> Vec<CommitInfo> {
+    let mut fields = output.split('\0');
+    let mut commits = Vec::new();
+    while let Some(hash) = fields.next() {
+        let hash = hash.trim_matches(['\r', '\n']);
+        if hash.is_empty() {
+            break;
+        }
+        let Some(date) = fields.next() else { break };
+        let Some(author_name) = fields.next() else { break };
+        let Some(author_email) = fields.next() else { break };
+        let Some(message) = fields.next() else { break };
+        let Some(full_message) = fields.next() else { break };
+        commits.push(CommitInfo {
+            hash: hash.to_string(),
+            date: date.trim().to_string(),
+            author_name: author_name.trim().to_string(),
+            author_email: author_email.trim().to_string(),
+            message: message.trim().to_string(),
+            full_message: full_message.trim().to_string(),
+            patch: None,
+        });
+    }
+    commits
 }
 
 // ─── Core query functions ───────────────────────────────────────────
@@ -340,7 +382,8 @@ pub fn file_history(
 ) -> Result<(Vec<CommitInfo>, usize), String> {
     // Try WITH --follow first (default behavior — follows renames)
     let (mut commits, mut total_count) = run_file_history_query(
-        repo_path, file, filter, max_results, author_filter, message_filter, true,
+        repo_path, file, filter, max_results, author_filter, message_filter,
+        FileHistoryQueryMode::FOLLOW_SUBJECT,
     )?;
 
     // Fallback for DELETED files: if --follow returned 0 results, retry WITHOUT --follow.
@@ -357,7 +400,8 @@ pub fn file_history(
     // `file_ever_existed_in_git` directly.
     if total_count == 0 {
         let (no_follow_commits, no_follow_total) = run_file_history_query(
-            repo_path, file, filter, max_results, author_filter, message_filter, false,
+            repo_path, file, filter, max_results, author_filter, message_filter,
+            FileHistoryQueryMode::DIRECT_SUBJECT,
         )?;
         if no_follow_total > 0 {
             commits = no_follow_commits;
@@ -376,8 +420,41 @@ pub fn file_history(
     Ok((commits, total_count))
 }
 
-/// Internal helper for `file_history`: run one `git log` query with or without `--follow`.
-/// Returns `(commits, total_count_before_truncation)`.
+/// Return followed file history with full commit messages retained for post-filtering.
+pub fn file_history_with_full_messages(
+    repo_path: &str,
+    file: &str,
+    filter: &DateFilter,
+) -> Result<(Vec<CommitInfo>, usize), String> {
+    let (mut commits, mut total_count) = run_file_history_query(
+        repo_path, file, filter, 0, None, None, FileHistoryQueryMode::FOLLOW_FULL,
+    )?;
+    if total_count == 0 {
+        let (no_follow_commits, no_follow_total) = run_file_history_query(
+            repo_path, file, filter, 0, None, None, FileHistoryQueryMode::DIRECT_FULL,
+        )?;
+        if no_follow_total > 0 {
+            commits = no_follow_commits;
+            total_count = no_follow_total;
+        }
+    }
+    Ok((commits, total_count))
+}
+
+#[derive(Clone, Copy)]
+struct FileHistoryQueryMode {
+    follow: bool,
+    include_full_message: bool,
+}
+
+impl FileHistoryQueryMode {
+    const FOLLOW_SUBJECT: Self = Self { follow: true, include_full_message: false };
+    const DIRECT_SUBJECT: Self = Self { follow: false, include_full_message: false };
+    const FOLLOW_FULL: Self = Self { follow: true, include_full_message: true };
+    const DIRECT_FULL: Self = Self { follow: false, include_full_message: true };
+}
+
+/// Run one `git log` query with or without `--follow`.
 fn run_file_history_query(
     repo_path: &str,
     file: &str,
@@ -385,9 +462,13 @@ fn run_file_history_query(
     max_results: usize,
     author_filter: Option<&str>,
     message_filter: Option<&str>,
-    follow: bool,
+    mode: FileHistoryQueryMode,
 ) -> Result<(Vec<CommitInfo>, usize), String> {
-    let format = format!("{}%H{}%ai{}%an{}%ae{}%s{}", RECORD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP);
+    let format = if mode.include_full_message {
+        "%H%x00%ai%x00%an%x00%ae%x00%s%x00%B%x00".to_string()
+    } else {
+        format!("{}%H{}%ai{}%an{}%ae{}%s{}", RECORD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP)
+    };
 
     let mut cmd = Command::new("git");
     cmd.current_dir(repo_path)
@@ -405,28 +486,27 @@ fn run_file_history_query(
         cmd.arg(format!("--max-count={}", max_results.saturating_add(1)));
     }
 
-    if follow {
+    if mode.follow {
         cmd.arg("--follow");
     }
 
     add_date_args(&mut cmd, filter);
 
-    if let Some(author) = author_filter {
-        cmd.arg(format!("--author={}", author));
-    }
-    if let Some(message) = message_filter {
-        cmd.arg(format!("--grep={}", message));
-    }
+    add_log_filters(&mut cmd, author_filter, message_filter);
 
     cmd.arg("--").arg(file);
 
     let output = run_git(&mut cmd)?;
 
-    let mut commits: Vec<CommitInfo> = output
-        .split(RECORD_SEP)
-        .filter(|s| !s.trim().is_empty())
-        .filter_map(parse_commit_record)
-        .collect();
+    let mut commits: Vec<CommitInfo> = if mode.include_full_message {
+        parse_full_commit_output(&output)
+    } else {
+        output
+            .split(RECORD_SEP)
+            .filter(|record| !record.trim().is_empty())
+            .filter_map(parse_commit_record)
+            .collect()
+    };
 
     let total_count = commits.len();
 
@@ -599,9 +679,7 @@ pub fn top_authors(
     // 50K commits covers ~10 years of daily commits for most projects.
     cmd.arg("--max-count=50000");
 
-    if let Some(message) = message_filter {
-        cmd.arg(format!("--grep={}", message));
-    }
+    add_log_filters(&mut cmd, None, message_filter);
 
     if !path.is_empty() {
         cmd.arg("--").arg(path);
@@ -711,12 +789,7 @@ pub fn repo_activity(
     // 10K commits is a reasonable limit for activity overview.
     cmd.arg("--max-count=10000");
 
-    if let Some(author) = author_filter {
-        cmd.arg(format!("--author={}", author));
-    }
-    if let Some(message) = message_filter {
-        cmd.arg(format!("--grep={}", message));
-    }
+    add_log_filters(&mut cmd, author_filter, message_filter);
 
     // Add path filter via git log's -- <pathspec> syntax
     if let Some(path) = path_filter

@@ -798,12 +798,49 @@ struct ResolvedDefinitionFileScope {
 impl ResolvedDefinitionFileScope {
     fn resolve(index: &DefinitionIndex, args: &DefinitionSearchArgs) -> Self {
         let started = Instant::now();
-        let file_terms = args.file_filter_terms.as_deref().unwrap_or_default();
+        let root = std::path::Path::new(&index.root);
+        let normalized_root = crate::clean_path(&index.root).to_lowercase();
+        let file_terms: Vec<(String, bool)> = args
+            .file_filter_raw
+            .iter()
+            .flat_map(|entry| entry.split(','))
+            .filter_map(|entry| {
+                let entry = entry.trim();
+                if entry.is_empty() {
+                    return None;
+                }
+                let fuzzy_term = entry.replace('\\', "/").to_lowercase();
+                let path = std::path::Path::new(entry);
+                let candidate = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    root.join(path)
+                };
+                let directory = candidate
+                    .canonicalize()
+                    .ok()
+                    .filter(|path| path.is_dir())
+                    .map(|path| crate::clean_path(&path.to_string_lossy()).to_lowercase())
+                    .filter(|path| {
+                        path.trim_end_matches('/') == normalized_root.trim_end_matches('/')
+                            || super::utils::is_under_dir(path, &normalized_root)
+                    });
+                Some(match directory {
+                    Some(directory) => (directory, true),
+                    None => (fuzzy_term, false),
+                })
+            })
+            .collect();
         let files = ResolvedFileScope::resolve(&index.files, true, None, |file_path| {
             let normalized_path = file_path.replace('\\', "/").to_lowercase();
-            file_terms.iter().any(|term| normalized_path.contains(term))
-                && (args.exclude_patterns.is_empty()
-                    || !args.exclude_patterns.matches(&normalized_path))
+            file_terms.iter().any(|(term, is_directory)| {
+                if *is_directory {
+                    super::utils::is_under_dir(&normalized_path, term)
+                } else {
+                    normalized_path.contains(term)
+                }
+            }) && (args.exclude_patterns.is_empty()
+                || !args.exclude_patterns.matches(&normalized_path))
         });
         let mut definition_ids: Vec<u32> = files.iter_ids()
             .filter_map(|file_id| index.file_index.get(&file_id))

@@ -79,6 +79,33 @@ fn commit_fixture(repo: &Path, name: &str, email: &str, message: &str) {
     );
 }
 
+fn commit_fixture_with_body(
+    repo: &Path,
+    name: &str,
+    email: &str,
+    subject: &str,
+    body: &str,
+) {
+    run_fixture_git(repo, &["add", "-A"]);
+    let name_config = format!("user.name={name}");
+    let email_config = format!("user.email={email}");
+    run_fixture_git(
+        repo,
+        &[
+            "-c",
+            &name_config,
+            "-c",
+            &email_config,
+            "commit",
+            "-q",
+            "-m",
+            subject,
+            "-m",
+            body,
+        ],
+    );
+}
+
 fn make_rename_history_repo() -> (tempfile::TempDir, std::path::PathBuf) {
     let temp = tempfile::TempDir::new().expect("tempdir");
     let repo = crate::canonicalize_test_root(temp.path());
@@ -94,19 +121,21 @@ fn make_rename_history_repo() -> (tempfile::TempDir, std::path::PathBuf) {
     );
 
     run_fixture_git(&repo, &["mv", "original.txt", "middle.txt"]);
-    commit_fixture(
+    commit_fixture_with_body(
         &repo,
         "Rename Author",
         "rename@example.com",
         "rename original to middle",
+        "body-only-fallback-marker",
     );
 
     run_fixture_git(&repo, &["mv", "middle.txt", "final.txt"]);
-    commit_fixture(
+    commit_fixture_with_body(
         &repo,
         "Rename Author",
         "rename@example.com",
         "rename middle to final",
+        "body-only-tools-marker",
     );
 
     (temp, repo)
@@ -238,6 +267,75 @@ fn test_git_history_rename_direct_path_and_follow_contracts() {
     let (_temp, repo) = make_rename_history_repo();
     let ctx = make_fixture_ctx(&repo);
     let repo_arg = repo.to_string_lossy();
+
+    let authors = dispatch_git_json(
+        &ctx,
+        "xray_git_authors",
+        json!({
+            "repo": repo_arg,
+            "message": "BODY-ONLY-TOOLS-MARKER",
+        }),
+    );
+    assert_eq!(authors["authors"].as_array().unwrap().len(), 1, "{authors}");
+    assert_eq!(authors["authors"][0]["name"], "Rename Author");
+    assert_eq!(authors["authors"][0]["commits"], 1);
+    assert!(!authors["summary"]["hint"].as_str().unwrap_or("").contains("cache"));
+
+    let activity = dispatch_git_json(
+        &ctx,
+        "xray_git_activity",
+        json!({
+            "repo": repo_arg,
+            "author": "RENAME AUTHOR",
+            "message": "BODY-ONLY-TOOLS-MARKER",
+        }),
+    );
+    let activity_files = activity["activity"].as_array().unwrap();
+    assert!(!activity_files.is_empty(), "{activity}");
+    assert!(
+        activity_files.iter().all(|file| {
+            file["commits"].as_array().unwrap().iter().all(|commit| {
+                commit["message"] == "rename middle to final"
+            })
+        }),
+        "{activity}"
+    );
+    assert!(!activity["summary"]["hint"].as_str().unwrap_or("").contains("cache"));
+
+    for no_cache in [false, true] {
+        let body_filtered = dispatch_git_json(
+            &ctx,
+            "xray_git_history",
+            json!({
+                "repo": repo_arg,
+                "file": "final.txt",
+                "message": "body-only-fallback-marker",
+                "maxResults": 0,
+                "noCache": no_cache,
+            }),
+        );
+        assert_eq!(
+            history_messages(&body_filtered),
+            vec!["rename original to middle"],
+            "noCache={no_cache}: {body_filtered}"
+        );
+        assert_followed_history_contract(&body_filtered);
+    }
+
+    let limited_body = dispatch_git_json(
+        &ctx,
+        "xray_git_history",
+        json!({
+            "repo": repo_arg,
+            "file": "final.txt",
+            "message": "BODY-ONLY",
+            "author": "Rename Author",
+            "maxResults": 1,
+        }),
+    );
+    assert_eq!(history_messages(&limited_body), vec!["rename middle to final"]);
+    assert_eq!(limited_body["summary"]["totalCommits"], 2);
+    assert_followed_history_contract(&limited_body);
 
     let existing_cached = dispatch_git_json(
         &ctx,

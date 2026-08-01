@@ -362,6 +362,30 @@ fn test_repo_activity_bad_repo() {
 // ─── Commit info field tests ────────────────────────────────────────
 
 #[test]
+fn test_parse_commit_record_preserves_field_separator_and_full_body() {
+    let subject = format!("Part A{FIELD_SEP}Part B");
+    let subject_record = format!(
+        "hash{FIELD_SEP}date{FIELD_SEP}name{FIELD_SEP}email{FIELD_SEP}{subject}{FIELD_SEP}"
+    );
+    let subject_info = parse_commit_record(&subject_record).unwrap();
+    assert_eq!(subject_info.message, subject);
+    assert_eq!(subject_info.full_message, subject);
+
+    let full_message = format!("{subject}\n\nbody{FIELD_SEP}tail{RECORD_SEP}end");
+    let full_output = format!(
+        "empty\0date0\0name0\0email0\0\0\0hash\0date\0name\0email\0{subject}\0{full_message}\0"
+    );
+    let full_infos = parse_full_commit_output(&full_output);
+    assert_eq!(full_infos.len(), 2);
+    assert_eq!(full_infos[0].hash, "empty");
+    assert_eq!(full_infos[0].message, "");
+    assert_eq!(full_infos[0].full_message, "");
+    assert_eq!(full_infos[1].hash, "hash");
+    assert_eq!(full_infos[1].message, subject);
+    assert_eq!(full_infos[1].full_message, full_message);
+}
+
+#[test]
 fn test_commit_info_has_all_fields() {
     let filter = DateFilter { from_date: None, to_date: None };
     let (commits, _) = file_history(".", "Cargo.toml", &filter, false, 1, None, None).unwrap();

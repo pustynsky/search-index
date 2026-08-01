@@ -248,6 +248,85 @@ fn test_file_filter_single_value_still_works() {
 }
 
 #[test]
+fn test_existing_directory_file_filter_rejects_sibling_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let module = root.join("ModuleRoot");
+    let sibling = root.join("ModuleRootSibling");
+    std::fs::create_dir_all(&module).unwrap();
+    std::fs::create_dir_all(&sibling).unwrap();
+
+    let mut definition_index = make_test_def_index();
+    definition_index.root = root.to_string_lossy().into_owned();
+    definition_index.files = vec![
+        module.join("UserService.cs").to_string_lossy().into_owned(),
+        sibling.join("OrderService.cs").to_string_lossy().into_owned(),
+    ];
+    let content_index = crate::ContentIndex {
+        root: root.to_string_lossy().into_owned(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    let context = HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(
+            definition_index,
+        ))),
+        workspace: std::sync::Arc::new(std::sync::RwLock::new(
+            WorkspaceBinding::pinned(root.to_string_lossy().into_owned()),
+        )),
+        ..Default::default()
+    };
+
+    let mut directory_terms = vec![
+        "ModuleRoot".to_string(),
+        "./ModuleRoot".to_string(),
+        "ModuleRoot/.".to_string(),
+        module.to_string_lossy().into_owned(),
+    ];
+    #[cfg(windows)]
+    directory_terms.push("ModuleRoot\\".to_string());
+
+    for directory_term in directory_terms {
+        let directory_result = handle_xray_definitions(
+            &context,
+            &json!({
+                "file": [directory_term],
+                "kind": ["class"],
+            }),
+        );
+        assert!(!directory_result.is_error, "{}", directory_result.content[0].text);
+        let directory_output: Value =
+            serde_json::from_str(&directory_result.content[0].text).unwrap();
+        let directory_definitions = directory_output["definitions"].as_array().unwrap();
+        assert_eq!(directory_definitions.len(), 1, "{directory_output}");
+        assert_eq!(directory_definitions[0]["name"], "UserService");
+    }
+
+    let mixed_result = handle_xray_definitions(
+        &context,
+        &json!({
+            "file": ["ModuleRoot", "Sibling"],
+            "kind": ["class"],
+        }),
+    );
+    assert!(!mixed_result.is_error, "{}", mixed_result.content[0].text);
+    let mixed_output: Value = serde_json::from_str(&mixed_result.content[0].text).unwrap();
+    assert_eq!(mixed_output["definitions"].as_array().unwrap().len(), 2, "{mixed_output}");
+
+    let fuzzy_result = handle_xray_definitions(
+        &context,
+        &json!({
+            "file": ["Module"],
+            "kind": ["class"],
+        }),
+    );
+    assert!(!fuzzy_result.is_error, "{}", fuzzy_result.content[0].text);
+    let fuzzy_output: Value = serde_json::from_str(&fuzzy_result.content[0].text).unwrap();
+    assert_eq!(fuzzy_output["definitions"].as_array().unwrap().len(), 2, "{fuzzy_output}");
+}
+
+#[test]
 fn test_file_filter_comma_separated_no_match_returns_empty() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
@@ -4688,6 +4767,67 @@ fn test_xml_on_demand_malformed_input_reports_warning() {
             .as_str()
             .is_none_or(|text| !text.contains("syntax errors"))
     }));
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_exact_name_only_rejects_substrings_and_text_content() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    std::fs::write(
+        root.join("project.csproj"),
+        r#"<Project><ProjectReference/><CustomProjectReference/><Marker>ProjectReference</Marker></Project>"#,
+    )
+    .unwrap();
+
+    let content_index = crate::ContentIndex {
+        root: root.to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    let context = HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(
+            make_test_def_index(),
+        ))),
+        server_ext: "csproj".to_string(),
+        workspace: std::sync::Arc::new(std::sync::RwLock::new(
+            WorkspaceBinding::pinned(root.to_string_lossy().to_string()),
+        )),
+        ..Default::default()
+    };
+
+    let exact_result = handle_xray_definitions(
+        &context,
+        &json!({
+            "file": ["project.csproj"],
+            "name": ["ProjectReference"],
+            "exactNameOnly": true,
+        }),
+    );
+    assert!(!exact_result.is_error, "{}", exact_result.content[0].text);
+    let exact_output: Value = serde_json::from_str(&exact_result.content[0].text).unwrap();
+    let exact_definitions = exact_output["definitions"].as_array().unwrap();
+    assert_eq!(exact_definitions.len(), 1, "{exact_output}");
+    assert_eq!(exact_definitions[0]["name"], "ProjectReference");
+    assert_eq!(exact_definitions[0]["matchedBy"], "name");
+
+    let substring_result = handle_xray_definitions(
+        &context,
+        &json!({
+            "file": ["project.csproj"],
+            "name": ["ProjectReference"],
+        }),
+    );
+    assert!(!substring_result.is_error, "{}", substring_result.content[0].text);
+    let substring_output: Value = serde_json::from_str(&substring_result.content[0].text).unwrap();
+    assert!(
+        substring_output["definitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|definition| definition["name"] == "CustomProjectReference"),
+        "{substring_output}"
+    );
 }
 
 #[test]
