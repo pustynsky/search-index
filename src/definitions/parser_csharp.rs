@@ -380,10 +380,9 @@ pub(crate) fn parse_field_signature(sig: &str) -> Option<(String, String)> {
     let parts: Vec<&str> = sig.trim().rsplitn(2, char::is_whitespace).collect();
     if parts.len() == 2 {
         let field_name = parts[0].trim().to_string();
-        let type_name = parts[1].trim().to_string();
-        let base_type = type_name.split('<').next().unwrap_or(&type_name).to_string();
-        if !base_type.is_empty() && !field_name.is_empty() {
-            return Some((base_type, field_name));
+        let type_name = normalize_csharp_declared_type(parts[1].trim())?;
+        if !type_name.is_empty() && !field_name.is_empty() {
+            return Some((type_name, field_name));
         }
     }
     None
@@ -433,9 +432,10 @@ pub(crate) fn extract_constructor_param_types(sig: &str) -> Vec<(String, String)
             let type_parts: Vec<&&str> = parts[..parts.len() - 1].iter()
                 .filter(|p| !matches!(**p, "ref" | "out" | "in" | "params" | "this"))
                 .collect();
-            if let Some(type_str) = type_parts.last() {
-                let base_type = type_str.split('<').next().unwrap_or(type_str);
-                result.push((name.to_string(), base_type.to_string()));
+            if let Some(type_str) = type_parts.last()
+                && let Some(type_name) = normalize_csharp_declared_type(type_str)
+            {
+                result.push((name.to_string(), type_name));
             }
         }
     }
@@ -822,7 +822,7 @@ fn extract_csharp_parameter_types(
         let name = node_text(name_node, source).trim();
         let type_text = node_text(type_node, source);
         if !name.is_empty() {
-            if let Some(type_name) = normalize_csharp_receiver_type(type_text) {
+            if let Some(type_name) = normalize_csharp_declared_type(type_text) {
                 parameter_types.insert(name.to_string(), type_name);
             } else if type_text.trim().trim_end_matches('?') == "dynamic" {
                 parameter_types.insert(name.to_string(), "dynamic".to_string());
@@ -835,7 +835,7 @@ fn extract_csharp_parameter_types(
         .any(|token| token == "params")
         && let Some(name) = find_child_by_field(parameter_list, "name")
         && let Some(ty) = find_child_by_field(parameter_list, "type")
-        && let Some(type_name) = normalize_csharp_receiver_type(node_text(ty, source))
+        && let Some(type_name) = normalize_csharp_declared_type(node_text(ty, source))
     {
         parameter_types.insert(node_text(name, source).trim().to_string(), type_name);
     }
@@ -1007,6 +1007,7 @@ fn extract_csharp_call_site_shape(
         source_end: node.end_byte().min(u32::MAX as usize) as u32,
         receiver,
         base_receiver: csharp_invocation_has_base_receiver(node, source),
+        self_receiver: csharp_invocation_has_self_receiver(node, source),
         method_generic_arity: csharp_call_generic_arity(node),
         arguments: extract_csharp_argument_shapes(node, source, field_types),
     }
@@ -1026,6 +1027,35 @@ fn csharp_invocation_has_base_receiver(node: tree_sitter::Node, source: &[u8]) -
                 || receiver.kind() == "base"
                 || node_text(receiver, source).trim() == "base"
         })
+}
+
+fn csharp_expression_is_this(node: tree_sitter::Node, source: &[u8]) -> bool {
+    if node.kind() == "this_expression" || node_text(node, source).trim() == "this" {
+        return true;
+    }
+    node.kind() == "parenthesized_expression"
+        && (0..node.child_count()).any(|index| {
+            node.child(index)
+                .is_some_and(|child| csharp_expression_is_this(child, source))
+        })
+}
+
+fn csharp_invocation_has_self_receiver(node: tree_sitter::Node, source: &[u8]) -> bool {
+    if node.kind() != "invocation_expression" {
+        return false;
+    }
+    let Some(expression) = node.child(0) else {
+        return false;
+    };
+    match expression.kind() {
+        "identifier" | "generic_name" => true,
+        "member_access_expression" | "conditional_access_expression" => {
+            find_child_by_field(expression, "expression")
+                .or_else(|| expression.child(0))
+                .is_some_and(|receiver| csharp_expression_is_this(receiver, source))
+        }
+        _ => false,
+    }
 }
 
 
@@ -1309,10 +1339,10 @@ fn extract_invocation(
             Some(CallSite { method_name, receiver_type: None, line, call_kind: Default::default(), receiver_is_generic: false })
         }
         "member_access_expression" => {
-            extract_member_access_call(expr, source, class_name, field_types, base_types, line)
+            extract_member_access_call(expr, source, class_name, field_types, base_types)
         }
         "conditional_access_expression" => {
-            extract_conditional_access_call(expr, source, class_name, field_types, base_types, line)
+            extract_conditional_access_call(expr, source, class_name, field_types, base_types)
         }
         "generic_name" => {
             let name_node = find_child_by_field(expr, "name")
@@ -1334,16 +1364,18 @@ fn extract_member_access_call(
     class_name: &str,
     field_types: &HashMap<String, String>,
     base_types: &[String],
-    line: u32,
 ) -> Option<CallSite> {
     let name_node = find_child_by_field(node, "name")?;
     let method_name = extract_method_name_from_name_node(name_node, source);
+    let line = name_node.start_position().row as u32 + 1;
 
     let receiver_node = find_child_by_field(node, "expression")
         .or_else(|| node.child(0))?;
     let receiver_type = resolve_receiver_type(receiver_node, source, class_name, field_types, base_types);
+    let receiver_is_generic = receiver_type.as_deref()
+        .is_some_and(|type_name| csharp_type_owner_name(type_name).1);
 
-    Some(CallSite { method_name, receiver_type, line, call_kind: Default::default(), receiver_is_generic: false })
+    Some(CallSite { method_name, receiver_type, line, call_kind: Default::default(), receiver_is_generic })
 }
 
 fn extract_conditional_access_call(
@@ -1352,7 +1384,6 @@ fn extract_conditional_access_call(
     class_name: &str,
     field_types: &HashMap<String, String>,
     base_types: &[String],
-    line: u32,
 ) -> Option<CallSite> {
     let receiver_node = node.child(0)?;
 
@@ -1369,10 +1400,13 @@ fn extract_conditional_access_call(
     let name_node = find_child_by_field(binding, "name")
         .or_else(|| binding.child(binding.child_count().saturating_sub(1)))?;
     let method_name = extract_method_name_from_name_node(name_node, source);
+    let line = name_node.start_position().row as u32 + 1;
 
     let receiver_type = resolve_receiver_type(receiver_node, source, class_name, field_types, base_types);
+    let receiver_is_generic = receiver_type.as_deref()
+        .is_some_and(|type_name| csharp_type_owner_name(type_name).1);
 
-    Some(CallSite { method_name, receiver_type, line, call_kind: Default::default(), receiver_is_generic: false })
+    Some(CallSite { method_name, receiver_type, line, call_kind: Default::default(), receiver_is_generic })
 }
 
 /// Extract the method name from a name node, handling `generic_name` by stripping
@@ -1398,18 +1432,18 @@ fn extract_object_creation(
     source: &[u8],
 ) -> Option<CallSite> {
     let type_node = find_child_by_field(node, "type")?;
-    let type_text = node_text(type_node, source);
-    let is_generic = type_text.contains('<');
-    let type_name = type_text.split('<').next().unwrap_or(type_text).trim();
+    let type_text = canonical_csharp_type(node_text(type_node, source));
+    let (owner, owner_is_generic) = csharp_type_owner_name(&type_text);
+    let type_name = owner.rsplit('.').next().unwrap_or(&owner).trim();
 
     if type_name.is_empty() { return None; }
 
     Some(CallSite {
         method_name: type_name.to_string(),
-        receiver_type: Some(type_name.to_string()),
-        line: node.start_position().row as u32 + 1,
-        call_kind: Default::default(),
-        receiver_is_generic: is_generic,
+        receiver_type: Some(type_text),
+        line: type_node.start_position().row as u32 + 1,
+        call_kind: CallSiteKind::Constructor,
+        receiver_is_generic: owner_is_generic,
     })
 }
 
@@ -1739,6 +1773,7 @@ fn build_type_signature(node: tree_sitter::Node, source: &[u8]) -> String {
     // PARSE-007: lossy decode keeps multi-byte identifiers (Cyrillic / CJK)
     // legible instead of silently substituting an empty signature.
     let text = String::from_utf8_lossy(&source[start..end]);
+    let text = csharp_source_without_comments(&text);
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -1952,14 +1987,8 @@ fn extract_csharp_var_declaration_types(
 
     let is_var_or_dynamic = type_text == "var" || type_text == "dynamic";
 
-    // For explicit types (not var/dynamic), extract the base type
-    let explicit_base_type = if !is_var_or_dynamic {
-        let base = type_text.split('<').next().unwrap_or(&type_text).trim().to_string();
-        if !base.is_empty() && base.chars().next().is_some_and(|c| c.is_uppercase()) {
-            Some(base)
-        } else {
-            None
-        }
+    let explicit_type = if !is_var_or_dynamic {
+        normalize_csharp_declared_type(&type_text)
     } else {
         None
     };
@@ -1976,9 +2005,9 @@ fn extract_csharp_var_declaration_types(
                         let name = node_text(name_n, source).trim().to_string();
                         if name.is_empty() { continue; }
 
-                        if let Some(ref base_type) = explicit_base_type {
+                        if let Some(ref type_name) = explicit_type {
                             // Path 1: explicit type
-                            vars.insert(name, base_type.clone());
+                            vars.insert(name, type_name.clone());
                         } else if is_var_or_dynamic {
                             // Path 2a: try to infer from new expression
                             // Try equals_value_clause first, then direct child (tree-sitter C# 0.23
@@ -2032,22 +2061,12 @@ fn extract_csharp_var_declaration_types(
     }
 }
 
-/// Reduces a declared C# type to the class/interface name used by the call graph.
-fn normalize_csharp_receiver_type(type_text: &str) -> Option<String> {
-    let without_nullable = type_text.trim().trim_end_matches('?');
-    let without_generics = without_nullable
-        .split('<')
-        .next()
-        .unwrap_or(without_nullable)
-        .trim();
-    let base = without_generics
-        .rsplit('.')
-        .next()
-        .unwrap_or(without_generics)
-        .trim();
-
+fn normalize_csharp_declared_type(type_text: &str) -> Option<String> {
+    let type_name = canonical_csharp_type(type_text);
+    let (owner, _) = csharp_type_owner_name(&type_name);
+    let base = owner.rsplit('.').next().unwrap_or(&owner).trim();
     if !base.is_empty() && base.chars().next().is_some_and(|c| c.is_uppercase()) {
-        Some(base.to_string())
+        Some(type_name)
     } else {
         None
     }
@@ -2070,7 +2089,7 @@ fn extract_csharp_type_from_new_expr(
 
     // In C# tree-sitter, object_creation_expression: child(0) = "new", child(1) = type
     let type_node = new_expr.child(1)?;
-    normalize_csharp_receiver_type(node_text(type_node, source))
+    normalize_csharp_declared_type(node_text(type_node, source))
 }
 
 /// Extract the method name from an invocation_expression, but only for simple

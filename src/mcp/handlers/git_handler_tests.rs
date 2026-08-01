@@ -779,6 +779,69 @@ fn test_detect_main_branch_name_prefers_main_over_local_master() {
     );
 }
 
+#[test]
+fn test_detect_main_branch_name_uses_origin_head_when_both_exist() {
+    use std::process::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = crate::canonicalize_test_root(tmp.path());
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .status()
+            .expect("git must be on PATH for this test");
+        assert!(status.success(), "git {:?} failed in {:?}", args, repo);
+    };
+    run(&["init", "--quiet", "-b", "master"]);
+    run(&["config", "user.email", "branch@test.local"]);
+    run(&["config", "user.name", "Branch Test"]);
+    std::fs::write(repo.join("seed.txt"), "x").unwrap();
+    run(&["add", "seed.txt"]);
+    run(&["commit", "--quiet", "-m", "init"]);
+    run(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    run(&["update-ref", "refs/remotes/origin/master", "HEAD"]);
+    run(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/master",
+    ]);
+
+    let ctx = make_git_test_ctx();
+    let resolved = detect_main_branch_name(&ctx, repo.to_str().unwrap());
+    assert_eq!(resolved.as_deref(), Some("master"));
+}
+
+#[test]
+fn test_detect_main_branch_name_ignores_dangling_origin_head() {
+    use std::process::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = crate::canonicalize_test_root(tmp.path());
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(&repo)
+            .status()
+            .expect("git must be on PATH for this test");
+        assert!(status.success(), "git {:?} failed in {:?}", args, repo);
+    };
+    run(&["init", "--quiet", "-b", "master"]);
+    run(&["config", "user.email", "branch@test.local"]);
+    run(&["config", "user.name", "Branch Test"]);
+    std::fs::write(repo.join("seed.txt"), "x").unwrap();
+    run(&["add", "seed.txt"]);
+    run(&["commit", "--quiet", "-m", "init"]);
+    run(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    run(&[
+        "symbolic-ref",
+        "refs/remotes/origin/HEAD",
+        "refs/remotes/origin/master",
+    ]);
+
+    let ctx = make_git_test_ctx();
+    let resolved = detect_main_branch_name(&ctx, repo.to_str().unwrap());
+    assert_eq!(resolved.as_deref(), Some("main"));
+}
+
 /// Run `git` in `repo` with a fixed test identity; assert success; return
 /// trimmed stdout. Shared by the trunk/orphan/shallow branch-status fixtures.
 fn git_in(repo: &std::path::Path, args: &[&str]) -> String {

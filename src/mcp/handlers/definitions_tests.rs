@@ -2865,6 +2865,21 @@ fn test_auto_correct_false_keeps_typo_not_found() {
 }
 
 #[test]
+fn test_exact_name_only_skips_fuzzy_suggestions_by_default() {
+    let ctx = make_auto_correction_ctx();
+    let result = handle_xray_definitions(&ctx, &json!({
+        "name": ["GetUsr"],
+        "exactNameOnly": true
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(v.get("suggestedMatches").is_none(), "{}", v);
+    if let Some(hint) = v["summary"]["hint"].as_str() {
+        assert!(!hint.contains("Nearest match"), "{}", v);
+    }
+}
+
+#[test]
 fn test_versioned_name_mismatch_suggested_but_not_auto_corrected() {
     let mut index = make_test_def_index();
     let def_idx = index.definitions.len() as u32;

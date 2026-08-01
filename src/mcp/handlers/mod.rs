@@ -329,7 +329,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "exactNameOnly": {
                         "type": "boolean",
-                        "description": "When true with name, match definition names exactly instead of substring matching. Also disables name auto-correction for this request. (default: false)"
+                        "description": "When true with name, match definition names exactly instead of substring matching. Also disables name auto-correction, fuzzy name suggestions, and nearest-match name hints for this request. (default: false)"
                     },
                     "autoCorrect": {
                         "type": "boolean",
@@ -552,7 +552,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
 
                     "includeGrepReferences": {
                         "type": "boolean",
-                        "description": "Add grepReferences[] — files containing the method name as text but NOT in the call tree. Catches delegate usage, method groups, reflection. Skipped for method names shorter than 4 characters to avoid noise. (default: false)"
+                        "description": "Add grepReferences[] for method text outside the graph. In-scope definition-indexed refs set resultStatus.safeForExhaustiveClaims=false (grep_references_outside_call_graph). Test refs stay advisory only with productionOnly=true; excluded/text-only refs stay advisory. Skips names shorter than 4 characters. (default: false)"
                     }
                 },
                 "required": [],

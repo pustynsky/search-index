@@ -190,6 +190,11 @@ fn test_find_def_index_meta_rejects_extension_mismatch() {
 // ─── Definition index format_version tests ──────────────────────────
 
 #[test]
+fn test_definition_index_version_is_pinned() {
+    assert_eq!(crate::definitions::DEFINITION_INDEX_VERSION, 8);
+}
+
+#[test]
 fn test_def_index_format_version_correct_loads_ok() {
     use crate::definitions::DEFINITION_INDEX_VERSION;
     let tmp = tempfile::tempdir().unwrap();
@@ -363,6 +368,7 @@ public sealed class Router {
     );
 
     let call_shape = loaded.csharp_semantics.call_shape(call_int, 0).unwrap();
+    assert!(call_shape.self_receiver);
     let CSharpTypeEvidence::Exact(argument_type) = call_shape.arguments[0].ty else {
         panic!("expected exact argument type");
     };
