@@ -600,6 +600,10 @@ Query multiple methods in a single call to reduce MCP round trips. Each method g
 
 When `maxTotalNodes` or `maxCallersPerLevel` omits an otherwise eligible node, `resultStatus` reports `status="partial"`, `complete=false`, `totalKnown=false`, and `safeForExhaustiveClaims=false`. `shown.nodes` is exact; `total.nodes` and `omitted.nodes` are lower bounds because traversal stops at the protective cap. Filling a cap exactly without finding another eligible node remains complete.
 
+`complete` and `safeForExhaustiveClaims` are independent. With `includeGrepReferences=true`, an in-scope definition-indexed code reference outside the AST graph adds reason `grep_references_outside_call_graph` and sets `safeForExhaustiveClaims=false`, even when traversal is complete. Excluded and text-only references stay advisory; test references do too when `productionOnly=true`.
+
+For C# member-access and constructor call nodes, `receiverType` preserves the canonical constructed type when known, including namespace qualification and generic arguments (for example, `Demo.Result<System.Int32>`).
+
 **Backward compatibility:** Single-method calls (no comma) return the existing format with `callTree` at the top level. Multi-method calls return `results` array.
 
 ### Limitations

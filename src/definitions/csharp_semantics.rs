@@ -88,12 +88,324 @@ pub struct CSharpArgumentShape {
     pub ty: CSharpTypeEvidence,
 }
 
+pub(crate) fn csharp_type_owner_name(type_name: &str) -> (String, bool) {
+    let mut owner = String::with_capacity(type_name.len());
+    let mut generic_depth = 0_usize;
+    let mut owner_is_generic = false;
+    for character in type_name.chars() {
+        match character {
+            '<' => {
+                if generic_depth == 0 {
+                    owner_is_generic = true;
+                }
+                generic_depth += 1;
+            }
+            '>' => generic_depth = generic_depth.saturating_sub(1),
+            '.' if generic_depth == 0 => {
+                owner.push(character);
+                owner_is_generic = false;
+            }
+            _ if generic_depth == 0 => owner.push(character),
+            _ => {}
+        }
+    }
+    (owner, owner_is_generic)
+}
+
+pub(crate) fn csharp_source_without_comments(source: &str) -> String {
+    enum State {
+        Code,
+        String,
+        VerbatimString,
+        RawString(usize),
+        Char,
+        LineComment,
+        BlockComment,
+    }
+
+    let bytes = source.as_bytes();
+    let mut output = bytes.to_vec();
+    let mut state = State::Code;
+    let mut index = 0;
+    while index < bytes.len() {
+        match state {
+            State::Code => {
+                if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'/') {
+                    output[index] = b' ';
+                    output[index + 1] = b' ';
+                    state = State::LineComment;
+                    index += 2;
+                    continue;
+                }
+                if bytes[index] == b'/' && bytes.get(index + 1) == Some(&b'*') {
+                    output[index] = b' ';
+                    output[index + 1] = b' ';
+                    state = State::BlockComment;
+                    index += 2;
+                    continue;
+                }
+                let verbatim_length = if bytes[index] == b'@'
+                    && bytes.get(index + 1) == Some(&b'"')
+                {
+                    2
+                } else if matches!(bytes[index], b'@' | b'$')
+                    && matches!(bytes.get(index + 1), Some(b'@' | b'$'))
+                    && bytes.get(index + 2) == Some(&b'"')
+                {
+                    3
+                } else {
+                    0
+                };
+                if verbatim_length > 0 {
+                    state = State::VerbatimString;
+                    index += verbatim_length;
+                    continue;
+                }
+                if bytes[index] == b'"' {
+                    let quote_count = bytes[index..]
+                        .iter()
+                        .take_while(|&&byte| byte == b'"')
+                        .count();
+                    if quote_count >= 3 {
+                        state = State::RawString(quote_count);
+                        index += quote_count;
+                    } else {
+                        state = State::String;
+                        index += 1;
+                    }
+                    continue;
+                }
+                if bytes[index] == b'\'' {
+                    state = State::Char;
+                }
+                index += 1;
+            }
+            State::String => {
+                if bytes[index] == b'\\' {
+                    index = (index + 2).min(bytes.len());
+                } else {
+                    if bytes[index] == b'"' {
+                        state = State::Code;
+                    }
+                    index += 1;
+                }
+            }
+            State::VerbatimString => {
+                if bytes[index] == b'"' && bytes.get(index + 1) == Some(&b'"') {
+                    index += 2;
+                } else {
+                    if bytes[index] == b'"' {
+                        state = State::Code;
+                    }
+                    index += 1;
+                }
+            }
+            State::RawString(delimiter) => {
+                let quote_count = bytes[index..]
+                    .iter()
+                    .take_while(|&&byte| byte == b'"')
+                    .count();
+                if quote_count >= delimiter {
+                    state = State::Code;
+                    index += delimiter;
+                } else {
+                    index += quote_count.max(1);
+                }
+            }
+            State::Char => {
+                if bytes[index] == b'\\' {
+                    index = (index + 2).min(bytes.len());
+                } else {
+                    if bytes[index] == b'\'' {
+                        state = State::Code;
+                    }
+                    index += 1;
+                }
+            }
+            State::LineComment => {
+                if matches!(bytes[index], b'\r' | b'\n') {
+                    state = State::Code;
+                } else {
+                    output[index] = b' ';
+                }
+                index += 1;
+            }
+            State::BlockComment => {
+                if !matches!(bytes[index], b'\r' | b'\n') {
+                    output[index] = b' ';
+                }
+                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    output[index + 1] = b' ';
+                    state = State::Code;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+        }
+    }
+    String::from_utf8(output).expect("masking ASCII comment bytes preserves UTF-8")
+}
+
+pub(crate) fn csharp_source_code_only(source: &str) -> String {
+    enum State {
+        Code,
+        String,
+        VerbatimString,
+        RawString(usize),
+        Char,
+    }
+
+    let source = csharp_source_without_comments(source);
+    let bytes = source.as_bytes();
+    let mut output = bytes.to_vec();
+    let mut state = State::Code;
+    let mut index = 0;
+    while index < bytes.len() {
+        match state {
+            State::Code => {
+                let mut raw_start = index;
+                while bytes.get(raw_start) == Some(&b'$') {
+                    raw_start += 1;
+                }
+                let raw_quotes = bytes[raw_start..]
+                    .iter()
+                    .take_while(|&&byte| byte == b'"')
+                    .count();
+                if raw_quotes >= 3 {
+                    output[index..raw_start + raw_quotes].fill(b' ');
+                    state = State::RawString(raw_quotes);
+                    index = raw_start + raw_quotes;
+                    continue;
+                }
+
+                let verbatim_length = if bytes[index] == b'@'
+                    && bytes.get(index + 1) == Some(&b'"')
+                {
+                    2
+                } else if matches!(bytes[index], b'@' | b'$')
+                    && matches!(bytes.get(index + 1), Some(b'@' | b'$'))
+                    && bytes.get(index + 2) == Some(&b'"')
+                {
+                    3
+                } else {
+                    0
+                };
+                if verbatim_length > 0 {
+                    output[index..index + verbatim_length].fill(b' ');
+                    state = State::VerbatimString;
+                    index += verbatim_length;
+                    continue;
+                }
+
+                let string_length = if bytes[index] == b'$'
+                    && bytes.get(index + 1) == Some(&b'"')
+                {
+                    2
+                } else if bytes[index] == b'"' {
+                    1
+                } else {
+                    0
+                };
+                if string_length > 0 {
+                    output[index..index + string_length].fill(b' ');
+                    state = State::String;
+                    index += string_length;
+                    continue;
+                }
+                if bytes[index] == b'\'' {
+                    output[index] = b' ';
+                    state = State::Char;
+                }
+                index += 1;
+            }
+            State::String => {
+                if bytes[index] == b'\\' {
+                    let end = (index + 2).min(bytes.len());
+                    for offset in index..end {
+                        if !matches!(bytes[offset], b'\r' | b'\n') {
+                            output[offset] = b' ';
+                        }
+                    }
+                    index = end;
+                } else {
+                    let closing = bytes[index] == b'"';
+                    if !matches!(bytes[index], b'\r' | b'\n') {
+                        output[index] = b' ';
+                    }
+                    index += 1;
+                    if closing {
+                        state = State::Code;
+                    }
+                }
+            }
+            State::VerbatimString => {
+                if bytes[index] == b'"' && bytes.get(index + 1) == Some(&b'"') {
+                    output[index] = b' ';
+                    output[index + 1] = b' ';
+                    index += 2;
+                } else {
+                    let closing = bytes[index] == b'"';
+                    if !matches!(bytes[index], b'\r' | b'\n') {
+                        output[index] = b' ';
+                    }
+                    index += 1;
+                    if closing {
+                        state = State::Code;
+                    }
+                }
+            }
+            State::RawString(delimiter) => {
+                let quote_count = bytes[index..]
+                    .iter()
+                    .take_while(|&&byte| byte == b'"')
+                    .count();
+                if quote_count >= delimiter {
+                    output[index..index + delimiter].fill(b' ');
+                    state = State::Code;
+                    index += delimiter;
+                } else {
+                    let count = quote_count.max(1);
+                    for offset in 0..count {
+                        if !matches!(bytes[index + offset], b'\r' | b'\n') {
+                            output[index + offset] = b' ';
+                        }
+                    }
+                    index += count;
+                }
+            }
+            State::Char => {
+                if bytes[index] == b'\\' {
+                    let end = (index + 2).min(bytes.len());
+                    for offset in index..end {
+                        if !matches!(bytes[offset], b'\r' | b'\n') {
+                            output[offset] = b' ';
+                        }
+                    }
+                    index = end;
+                } else {
+                    let closing = bytes[index] == b'\'';
+                    if !matches!(bytes[index], b'\r' | b'\n') {
+                        output[index] = b' ';
+                    }
+                    index += 1;
+                    if closing {
+                        state = State::Code;
+                    }
+                }
+            }
+        }
+    }
+    String::from_utf8(output).expect("masking complete literal bytes preserves UTF-8")
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CSharpCallSiteShape {
     pub source_start: u32,
     pub source_end: u32,
     pub receiver: CSharpTypeEvidence,
     pub base_receiver: bool,
+    pub self_receiver: bool,
     pub method_generic_arity: Option<u16>,
     pub arguments: Vec<CSharpArgumentShape>,
 }
@@ -435,6 +747,7 @@ impl CSharpSemanticIndex {
             source_end: shape.source_end,
             receiver: self.intern_evidence(shape.receiver),
             base_receiver: shape.base_receiver,
+            self_receiver: shape.self_receiver,
             method_generic_arity: shape.method_generic_arity,
             arguments: shape.arguments.into_iter().map(|argument| CSharpArgumentShape {
                 name: argument.name.map(|name| self.strings.intern(name)),
@@ -547,6 +860,7 @@ pub struct CSharpLocalCallSiteShape {
     pub source_end: u32,
     pub receiver: CSharpLocalTypeEvidence,
     pub base_receiver: bool,
+    pub self_receiver: bool,
     pub method_generic_arity: Option<u16>,
     pub arguments: Vec<CSharpLocalArgumentShape>,
 }

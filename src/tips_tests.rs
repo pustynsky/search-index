@@ -635,6 +635,36 @@ fn test_tool_definitions_rust_only() {
 }
 
 #[test]
+fn test_exact_name_schema_describes_suggestion_suppression() {
+    use crate::mcp::handlers::tool_definitions;
+    let tools = tool_definitions(&["rs".to_string()]);
+    let def_tool = tools.iter().find(|tool| tool.name == "xray_definitions").unwrap();
+    let description = def_tool.input_schema["properties"]["exactNameOnly"]["description"]
+        .as_str()
+        .unwrap();
+    assert!(description.contains("fuzzy name suggestions"), "{description}");
+    assert!(description.contains("nearest-match name hints"), "{description}");
+}
+
+#[test]
+fn test_callers_grep_reference_docs_describe_exhaustive_safety() {
+    use crate::mcp::handlers::tool_definitions;
+    let extensions = ["rs".to_string()];
+    let tools = tool_definitions(&extensions);
+    let callers = tools.iter().find(|tool| tool.name == "xray_callers").unwrap();
+    let description = callers.input_schema["properties"]["includeGrepReferences"]["description"]
+        .as_str()
+        .unwrap();
+    let examples = crate::tips::parameter_examples(&extensions);
+    let guidance = examples["xray_callers"]["includeGrepReferences"].as_str().unwrap();
+    for text in [description, guidance] {
+        assert!(text.contains("safeForExhaustiveClaims"), "{text}");
+        assert!(text.contains("grep_references_outside_call_graph"), "{text}");
+        assert!(text.contains("productionOnly=true"), "{text}");
+    }
+}
+
+#[test]
 fn test_tool_definitions_empty_extensions() {
     use crate::mcp::handlers::tool_definitions;
     let tools = tool_definitions(&[]);

@@ -1477,38 +1477,58 @@ fn detect_main_branch_name(ctx: &HandlerContext, repo: &str) -> Option<String> {
     resolved
 }
 
-/// PERF-02 cold probe: ask `git for-each-ref` for all four candidate refs in
-/// a single spawn instead of running up to 4 sequential `git rev-parse`.
+/// PERF-02 cold probe: ask `git for-each-ref` for both trunk names and
+/// `origin/HEAD` in one spawn instead of sequential `git rev-parse` calls.
 ///
-/// `for-each-ref` prints one line per ref that **exists**, silent for refs
-/// that don't exist. **Output is sorted by refname**, NOT by argument order,
-/// so a repo with both `refs/heads/master` and `refs/remotes/origin/main`
-/// emits `master` BEFORE `origin/main`. We must therefore enumerate which
-/// candidates exist and apply explicit priority — matching the legacy
-/// 4-probe sequence: `main` (local-or-remote) is always preferred over
-/// `master` (local-or-remote). Falls back to the legacy probe sequence if
-/// the combined call fails for any reason (very old git, hardened sandbox
-/// without `for-each-ref`, etc.) so we never regress the resolution itself.
+/// A valid `origin/HEAD` target has priority because it records the remote's
+/// operational default branch. The target is accepted only when its matching
+/// remote-tracking ref exists; dangling symrefs fall back to `main`, then
+/// `master`, across local and remote refs. If the combined call fails, the
+/// legacy probe sequence preserves the previous fallback behavior.
 fn probe_main_branch_name(repo: &str) -> Option<String> {
     if let Ok(out) = run_git_command(
         repo,
         &[
             "for-each-ref",
-            "--format=%(refname:short)",
+            "--format=%(refname)|%(symref)",
             "refs/heads/main",
             "refs/heads/master",
+            "refs/remotes/origin/HEAD",
             "refs/remotes/origin/main",
             "refs/remotes/origin/master",
         ],
     ) {
         let mut has_main = false;
         let mut has_master = false;
+        let mut has_remote_main = false;
+        let mut has_remote_master = false;
+        let mut origin_head = None;
         for line in out.lines() {
-            match line.trim() {
-                "main" | "origin/main" => has_main = true,
-                "master" | "origin/master" => has_master = true,
+            let (ref_name, symref) = line.trim().split_once('|').unwrap_or((line.trim(), ""));
+            match ref_name {
+                "refs/heads/main" => has_main = true,
+                "refs/heads/master" => has_master = true,
+                "refs/remotes/origin/main" => {
+                    has_main = true;
+                    has_remote_main = true;
+                }
+                "refs/remotes/origin/master" => {
+                    has_master = true;
+                    has_remote_master = true;
+                }
+                "refs/remotes/origin/HEAD" => {
+                    origin_head = symref
+                        .strip_prefix("refs/remotes/origin/")
+                        .filter(|name| matches!(*name, "main" | "master"));
+                }
                 _ => {}
             }
+        }
+        if let Some(branch) = origin_head
+            && ((branch == "main" && has_remote_main)
+                || (branch == "master" && has_remote_master))
+        {
+            return Some(branch.to_string());
         }
         if has_main {
             return Some("main".to_string());

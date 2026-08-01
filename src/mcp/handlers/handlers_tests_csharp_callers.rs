@@ -675,6 +675,16 @@ public sealed class DerivedDispatch : BaseDispatch {
 public sealed class ConcreteCaller {
     public void Call(BaseDispatch dispatch) { dispatch.Route(); }
 }
+public interface IGenericDispatch<T> {
+    void Send();
+}
+public sealed class GenericDispatchImpl : IGenericDispatch<string> {
+    public void Send() { GenericTarget(); }
+    private void GenericTarget() { }
+}
+public sealed class GenericDispatchCaller {
+    public void Call(IGenericDispatch<string> dispatch) { dispatch.Send(); }
+}
 "#,
     )
     .unwrap();
@@ -746,6 +756,28 @@ public sealed class ConcreteCaller {
             .as_array()
             .is_some_and(|nodes| nodes.iter().any(|node| node["method"] == "PingTarget")),
         "{expanded:#}"
+    );
+
+    let generic_direct = query("GenericDispatchCaller", "Call", false, 20);
+    let generic_direct_tree = generic_direct["callTree"].as_array().unwrap();
+    assert!(
+        tree_contains(generic_direct_tree, "IGenericDispatch", "Send"),
+        "{generic_direct:#}"
+    );
+    assert!(
+        !tree_contains(generic_direct_tree, "GenericDispatchImpl", "Send"),
+        "{generic_direct:#}"
+    );
+    assert!(
+        !tree_contains(generic_direct_tree, "GenericDispatchImpl", "GenericTarget"),
+        "{generic_direct:#}"
+    );
+
+    let generic_expanded = query("GenericDispatchCaller", "Call", true, 20);
+    let generic_expanded_tree = generic_expanded["callTree"].as_array().unwrap();
+    assert!(
+        tree_contains(generic_expanded_tree, "GenericDispatchImpl", "GenericTarget"),
+        "{generic_expanded:#}"
     );
 
     let mid_tree_direct = query("DispatchRoot", "Start", false, 20);
@@ -1037,7 +1069,10 @@ const D20_DI_CALLER_SOURCE: &str = r#"namespace Demo;
 public sealed class WorkflowController {
     private readonly IWorkflowManager _manager;
     public WorkflowController(IWorkflowManager manager) { _manager = manager; }
-    public void Handle() { _manager.Fetch(); }
+    public void Handle() {
+        _manager
+            .Fetch();
+    }
 }
 "#;
 
@@ -4103,4 +4138,181 @@ fn test_xray_callers_root_method_body_line_range() {
         "bodyStartLine should reflect the filtered range");
 
     cleanup_callers_body_ctx(&tmp);
+}
+
+const D20_CROSS_ARITY_FIELD_SOURCE: &str = r#"namespace Demo;
+public sealed class Result {
+    private readonly Result<int> typed;
+    public void UseTyped() { typed.Describe(); }
+    public void Describe() { NonGenericTarget(); }
+    private void NonGenericTarget() { }
+}
+public sealed class Result<T> {
+    private readonly Result plain;
+    public void UsePlain() { plain.Describe(); }
+    public void Describe() { GenericTarget(); }
+    private void GenericTarget() { }
+}
+"#;
+
+#[test]
+fn test_d20_cross_arity_fields_keep_explicit_receiver_arity() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(
+        &root,
+        "D20CrossArityFields.cs",
+        D20_CROSS_ARITY_FIELD_SOURCE,
+    );
+
+    for (root_method, expected, excluded, expected_receiver) in [
+        (
+            "UseTyped",
+            "GenericTarget",
+            "NonGenericTarget",
+            "Result<System.Int32>",
+        ),
+        ("UsePlain", "NonGenericTarget", "GenericTarget", "Result"),
+    ] {
+        let result = dispatch_tool(
+            &context,
+            "xray_callers",
+            &json!({
+                "method": [root_method],
+                "class": "Result",
+                "direction": "down",
+                "depth": 2
+            }),
+        );
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        fn tree_contains(nodes: &[Value], method_name: &str) -> bool {
+            nodes.iter().any(|node| {
+                (node["nodeKind"] == "callee" && node["method"] == method_name)
+                    || node["callees"].as_array()
+                        .is_some_and(|children| tree_contains(children, method_name))
+            })
+        }
+        let tree = output["callTree"].as_array().unwrap();
+        assert_eq!(output["resultStatus"]["complete"], true, "{}", output);
+        assert!(tree.iter().any(|node| {
+            node["method"] == "Describe" && node["receiverType"] == expected_receiver
+        }), "{}", output);
+        assert!(tree_contains(tree, expected), "{}", output);
+        assert!(!tree_contains(tree, excluded), "{}", output);
+    }
+}
+
+const D20_CONSTRUCTOR_COLLISION_SOURCE: &str = r#"namespace Demo;
+public sealed class Caller {
+    public object Create() { return new List<int>(); }
+}
+public sealed class List {
+    public List() { SharedTarget(); }
+    private void SharedTarget() { NonGenericTarget(); }
+    private void NonGenericTarget() { }
+}
+[Description("generic list")]
+// Keep the generic declaration after this line comment.
+public sealed class List<T> {
+    public List() {
+        SharedTarget();
+        this.SharedTarget();
+    }
+    private void SharedTarget() { GenericTarget(); }
+    private void GenericTarget() { }
+}
+public static class TermFactory {
+    public static object List<T>(params T[] items) { return items; }
+}
+"#;
+
+#[test]
+fn test_d20_object_creation_does_not_resolve_to_same_named_method() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(
+        &root,
+        "D20ConstructorCollision.cs",
+        D20_CONSTRUCTOR_COLLISION_SOURCE,
+    );
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["Create"],
+            "class": "Caller",
+            "direction": "down",
+            "depth": 3
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let list_nodes: Vec<_> = output["callTree"].as_array().unwrap().iter()
+        .filter(|node| node["method"].as_str() == Some("List"))
+        .collect();
+    assert_eq!(list_nodes.len(), 1, "{}", output);
+    assert_eq!(list_nodes[0]["class"].as_str(), Some("List"), "{}", output);
+
+    fn tree_contains_callee(nodes: &[Value], method_name: &str) -> bool {
+        nodes.iter().any(|node| {
+            (node["nodeKind"] == "callee" && node["method"] == method_name)
+                || node["callees"].as_array()
+                    .is_some_and(|children| tree_contains_callee(children, method_name))
+        })
+    }
+    let tree = output["callTree"].as_array().unwrap();
+    assert_eq!(output["resultStatus"]["complete"], true, "{}", output);
+    assert!(tree_contains_callee(tree, "SharedTarget"), "{}", output);
+    assert!(tree_contains_callee(tree, "GenericTarget"), "{}", output);
+    assert!(!tree_contains_callee(tree, "NonGenericTarget"), "{}", output);
+}
+
+const D20_PARTIAL_QUALIFIED_RECEIVER_SOURCE: &str = r#"namespace Demo.Contracts {
+public interface IWorkflowManager {
+    void Fetch();
+}
+public sealed class WorkflowManager : IWorkflowManager {
+    public void Fetch() { Target(); }
+    private void Target() { }
+}
+}
+namespace Demo {
+public sealed class WorkflowCaller {
+    public void Run(Contracts.IWorkflowManager manager) { manager.Fetch(); }
+}
+}
+"#;
+
+#[test]
+fn test_d20_partially_qualified_receiver_matches_full_owner() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(
+        &root,
+        "D20PartialQualifiedReceiver.cs",
+        D20_PARTIAL_QUALIFIED_RECEIVER_SOURCE,
+    );
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["Run"],
+            "class": "WorkflowCaller",
+            "direction": "down",
+            "depth": 1,
+            "resolveInterfaces": false
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    assert_eq!(output["resultStatus"]["complete"], true, "{}", output);
+    assert!(tree.iter().any(|node| {
+        node["class"] == "IWorkflowManager"
+            && node["method"] == "Fetch"
+            && node["nodeKind"] == "callee"
+    }), "{}", output);
 }

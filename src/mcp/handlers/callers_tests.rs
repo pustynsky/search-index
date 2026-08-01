@@ -3213,6 +3213,106 @@ fn test_is_test_method_negative_no_attributes_no_test_file() {
 }
 
 #[test]
+fn test_csharp_type_owner_name_preserves_nested_paths() {
+    assert_eq!(
+        csharp_type_owner_name("Demo.List<int>"),
+        ("Demo.List".to_string(), true)
+    );
+    assert_eq!(
+        csharp_type_owner_name("Demo.Outer<int>.Inner"),
+        ("Demo.Outer.Inner".to_string(), false)
+    );
+    assert_eq!(
+        csharp_type_owner_name("Demo.Outer.Inner<System.String>"),
+        ("Demo.Outer.Inner".to_string(), true)
+    );
+}
+
+#[test]
+fn test_csharp_type_generic_detection_ignores_generic_base_types() {
+    let definition = |name: &str, signature: &str| DefinitionEntry {
+        file_id: 0,
+        name: name.to_string(),
+        kind: DefinitionKind::Class,
+        line_start: 1,
+        line_end: 10,
+        parent: None,
+        signature: Some(signature.to_string()),
+        modifiers: vec![],
+        attributes: vec![],
+        base_types: vec![],
+    };
+    assert!(csharp_type_definition_is_generic(&definition("List", "public class List<T>")));
+    assert!(csharp_type_definition_is_generic(&definition(
+        "List",
+        "public class List<T> : IBase /* class List */"
+    )));
+    assert!(csharp_type_definition_is_generic(&definition(
+        "List",
+        r#"[Description(@"/* class List */")] public class List<T>"#
+    )));
+    assert!(csharp_type_definition_is_generic(&definition(
+        "List",
+        r#"[Description(@$"/* class List */")] public class List<T>"#
+    )));
+    assert!(!csharp_type_definition_is_generic(&definition(
+        "Config",
+        r#"public record Config(string Path = "class Config<T>")"#
+    )));
+    assert!(!csharp_type_definition_is_generic(&definition(
+        "Config",
+        r####"public record Config(string Path = $"""class Config<T>""")"####
+    )));
+    assert!(!csharp_type_definition_is_generic(&definition(
+        "List",
+        r#"[Description("http://example/class List<T>")] public class List"#
+    )));
+    assert!(!csharp_type_definition_is_generic(&definition(
+        "List",
+        r#"[Description(@$"C:\")] public class List /* class List<T> */"#
+    )));
+    assert!(csharp_type_definition_is_generic(&definition("Box", "public record struct Box<T>")));
+    assert!(csharp_type_definition_is_generic(&definition(
+        "List",
+        "[Obsolete(\"Use class List instead\")] public class List<T>"
+    )));
+    assert!(!csharp_type_definition_is_generic(&definition(
+        "List",
+        "public class List : IBase<List<int>>"
+    )));
+    assert!(!csharp_type_definition_is_generic(&definition(
+        "List",
+        "[Description(\"class List<T>\")] public class List"
+    )));
+}
+
+#[test]
+fn test_csharp_source_code_only_preserves_line_endings() {
+    let source = "\"value\\\r\ncontinued\" class Order";
+    let masked = csharp_source_code_only(source);
+    assert!(masked.contains("\r\n"), "{masked:?}");
+}
+
+#[test]
+fn test_is_class_generic_preserves_non_csharp_fallback() {
+    let definitions = vec![DefinitionEntry {
+        file_id: 0,
+        name: "Widget".to_string(),
+        kind: DefinitionKind::Class,
+        line_start: 1,
+        line_end: 20,
+        parent: None,
+        signature: Some("@Component({ template: `<p>Don't</p>` }) export class Widget<T>".to_string()),
+        modifiers: vec![],
+        attributes: vec![],
+        base_types: vec![],
+    }];
+    let mut index = make_def_index(definitions, HashMap::new());
+    index.files[0] = "Widget.ts".to_string();
+    assert!(is_class_generic(&index, "widget"));
+}
+
+#[test]
 fn test_is_test_method_negative_non_test_attribute() {
     let def = DefinitionEntry {
         file_id: 0, name: "processOrder".to_string(), kind: DefinitionKind::Method,
@@ -3221,6 +3321,64 @@ fn test_is_test_method_negative_non_test_attribute() {
         attributes: vec!["Authorize".to_string(), "HttpGet".to_string()],
     };
     assert!(!is_test_method(&def, "src/OrderService.cs"));
+}
+
+#[test]
+fn test_is_test_method_does_not_match_attribute_arguments() {
+    let def = DefinitionEntry {
+        file_id: 0, name: "DiscoverArtifacts".to_string(), kind: DefinitionKind::Method,
+        line_start: 10, line_end: 30, parent: Some("ArtifactController".to_string()),
+        signature: None, modifiers: vec![], base_types: vec![],
+        attributes: vec!["Monitor(typeof(ArtifactsActivity))".to_string()],
+    };
+    assert!(!is_test_method(&def, "src/ArtifactController.cs"));
+}
+
+#[test]
+fn test_is_test_method_supports_additional_framework_attributes() {
+    for attribute in [
+        "SkippableFact",
+        "UITestMethod",
+        "TestInitialize",
+        "TestCleanup",
+        "TestFixtureSetUp",
+        "TestFixtureTearDown",
+        "rstest",
+        "test_case",
+        "wasm_bindgen_test",
+        "tracing_test::traced_test",
+        "test_context(MyContext)",
+        "TestCase<int>(1)",
+        "test_strategy::proptest",
+        "quickcheck",
+        "cfg(test)",
+        "cfg(all(feature = \"slow\", test))",
+        "cfg(any(test, feature = \"test-support\"))",
+    ] {
+        let def = DefinitionEntry {
+            file_id: 0, name: "process_order".to_string(), kind: DefinitionKind::Method,
+            line_start: 10, line_end: 30, parent: Some("OrderProcessor".to_string()),
+            signature: None, modifiers: vec![], base_types: vec![],
+            attributes: vec![attribute.to_string()],
+        };
+        assert!(is_test_method(&def, "src/OrderProcessor.cs"), "{attribute}");
+    }
+}
+
+#[test]
+fn test_is_test_method_does_not_treat_cfg_feature_as_test_only() {
+    for attribute in [
+        "cfg(feature = \"test\")",
+        "cfg(not(test))",
+    ] {
+        let def = DefinitionEntry {
+            file_id: 0, name: "process_order".to_string(), kind: DefinitionKind::Method,
+            line_start: 10, line_end: 30, parent: Some("OrderProcessor".to_string()),
+            signature: None, modifiers: vec![], base_types: vec![],
+            attributes: vec![attribute.to_string()],
+        };
+        assert!(!is_test_method(&def, "src/OrderProcessor.rs"), "{attribute}");
+    }
 }
 
 #[test]
@@ -3461,7 +3619,7 @@ fn test_impact_analysis_non_test_method_recurses_normally() {
         DefinitionEntry { file_id: 0, name: "OrderService".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
         DefinitionEntry { file_id: 0, name: "process".to_string(), kind: DefinitionKind::Method, line_start: 10, line_end: 20, parent: Some("OrderService".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
         DefinitionEntry { file_id: 1, name: "Controller".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
-        DefinitionEntry { file_id: 1, name: "handle".to_string(), kind: DefinitionKind::Method, line_start: 10, line_end: 30, parent: Some("Controller".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        DefinitionEntry { file_id: 1, name: "handle".to_string(), kind: DefinitionKind::Method, line_start: 10, line_end: 30, parent: Some("Controller".to_string()), signature: None, modifiers: vec![], attributes: vec!["Monitor(typeof(ArtifactsActivity))".to_string()], base_types: vec![] },
         DefinitionEntry { file_id: 2, name: "ControllerTests".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
         DefinitionEntry { file_id: 2, name: "testHandle".to_string(), kind: DefinitionKind::Method, line_start: 10, line_end: 30, parent: Some("ControllerTests".to_string()), signature: None, modifiers: vec![], attributes: vec!["Fact".to_string()], base_types: vec![] },
     ];
@@ -3961,12 +4119,21 @@ fn test_include_grep_references_finds_extra_files() {
     let mut def_idx = make_def_index(definitions, method_calls_map);
     def_idx.path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/OrderController.ts")), 0);
     def_idx.path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/OrderValidator.ts")), 1);
+    def_idx.path_to_id.insert(
+        crate::path_identity_key(&PathBuf::from("src/Pipelines/ValidationPipeline.ts")),
+        2,
+    );
+    def_idx.path_to_id.insert(
+        crate::path_identity_key(&PathBuf::from("src/test/TestOnlyReference.ts")),
+        3,
+    );
 
     let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
     index.insert("processorder".to_string(), vec![
         Posting { file_id: 0, lines: vec![5] },
         Posting { file_id: 1, lines: vec![10] },
-        Posting { file_id: 2, lines: vec![42] },  // extra file not in def index
+        Posting { file_id: 2, lines: vec![42] },  // extra indexed code file
+        Posting { file_id: 3, lines: vec![7] },   // test-only reference
     ]);
     index.insert("orderservice".to_string(), vec![
         Posting { file_id: 0, lines: vec![1] },
@@ -3979,11 +4146,12 @@ fn test_include_grep_references_finds_extra_files() {
             "src/OrderController.ts".to_string(),
             "src/OrderValidator.ts".to_string(),
             "src/Pipelines/ValidationPipeline.ts".to_string(),
+            "src/test/TestOnlyReference.ts".to_string(),
         ],
         index,
         total_tokens: 100,
         extensions: vec!["ts".to_string()],
-        file_token_counts: vec![50, 50, 50],
+        file_token_counts: vec![50, 50, 50, 50],
         ..Default::default()
     };
 
@@ -3997,6 +4165,7 @@ fn test_include_grep_references_finds_extra_files() {
         "method": ["ProcessOrder"],
         "class": "OrderService",
         "depth": 1,
+        "ext": ["ts"],
         "includeGrepReferences": true
     }));
     assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
@@ -4008,6 +4177,44 @@ fn test_include_grep_references_finds_extra_files() {
     let refs = grep_refs.unwrap().as_array().unwrap();
     assert!(!refs.is_empty(), "grepReferences should not be empty");
     assert!(v.get("grepReferencesNote").is_some(), "Should have grepReferencesNote");
+    assert_eq!(v["resultStatus"]["safeForExhaustiveClaims"], false);
+    assert!(v["resultStatus"]["reasons"].as_array().unwrap().iter()
+        .any(|reason| reason.as_str() == Some("grep_references_outside_call_graph")));
+
+    let test_included_result = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": ["ProcessOrder"],
+        "class": "OrderService",
+        "depth": 1,
+        "ext": ["ts"],
+        "excludeFile": ["ValidationPipeline"],
+        "includeGrepReferences": true
+    }));
+    assert!(!test_included_result.is_error, "{}", test_included_result.content[0].text);
+    let test_included: serde_json::Value =
+        serde_json::from_str(&test_included_result.content[0].text).unwrap();
+    assert_eq!(
+        test_included["resultStatus"]["safeForExhaustiveClaims"],
+        false,
+        "{}",
+        test_included
+    );
+    assert!(test_included["resultStatus"]["reasons"].as_array().unwrap().iter()
+        .any(|reason| reason.as_str() == Some("grep_references_outside_call_graph")));
+
+    let scoped_result = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": ["ProcessOrder"],
+        "class": "OrderService",
+        "depth": 1,
+        "ext": ["ts"],
+        "excludeFile": ["ValidationPipeline"],
+        "productionOnly": true,
+        "includeGrepReferences": true
+    }));
+    assert!(!scoped_result.is_error, "{}", scoped_result.content[0].text);
+    let scoped: serde_json::Value = serde_json::from_str(&scoped_result.content[0].text).unwrap();
+    assert_eq!(scoped["resultStatus"]["safeForExhaustiveClaims"], true, "{}", scoped);
+    assert!(!scoped["resultStatus"]["reasons"].as_array().unwrap().iter()
+        .any(|reason| reason.as_str() == Some("grep_references_outside_call_graph")), "{}", scoped);
 }
 
 #[test]

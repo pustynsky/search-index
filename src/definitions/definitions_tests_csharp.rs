@@ -90,7 +90,10 @@ fn test_code_stats_else_if_chain_flat_nesting() {
 // C# parser tests — split from definitions_tests.rs.
 
 use super::*;
-use super::parser_csharp::{parse_csharp_definitions, parse_field_signature, extract_constructor_param_types, unwrap_task_type};
+use super::parser_csharp::{
+    extract_constructor_param_types, parse_csharp_definitions,
+    parse_csharp_definitions_with_semantics, parse_field_signature, unwrap_task_type,
+};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -419,6 +422,102 @@ public class Factory { public void Create() { var obj = new OrderValidator(); } 
     assert_eq!(nc.unwrap().receiver_type.as_deref(), Some("OrderValidator"));
 }
 
+#[test]
+fn test_call_site_shapes_distinguish_self_from_same_name_field() {
+    let source = r#"
+public class Result<T> {
+    private Result plain;
+    public void Calls() {
+        Shared();
+        this.Shared();
+        this?.Shared();
+        (this).Shared();
+        plain.Shared();
+    }
+    private void Shared() { }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (definitions, call_sites, _, _, semantics) =
+        parse_csharp_definitions_with_semantics(&mut parser, source, 0);
+    let calls_index = definitions.iter()
+        .position(|definition| definition.name == "Calls")
+        .unwrap();
+    let calls = &call_sites.iter().find(|(owner, _)| *owner == calls_index).unwrap().1;
+    let shapes = &semantics.call_sites.iter()
+        .find(|entry| entry.local_def_idx == calls_index)
+        .unwrap()
+        .shapes;
+    let observed: Vec<_> = calls.iter().zip(shapes)
+        .filter(|(call, _)| call.method_name == "Shared")
+        .map(|(_, shape)| shape.self_receiver)
+        .collect();
+    assert_eq!(observed, vec![true, true, true, true, false]);
+}
+
+#[test]
+fn test_object_creation_uses_final_nested_owner() {
+    let source = r#"
+public class Factory {
+    public void Create() {
+        var inner = new Outer<int>.Inner();
+        var genericInner = new Outer.Inner<string>();
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (definitions, call_sites, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let create = definitions.iter().position(|definition| definition.name == "Create").unwrap();
+    let calls = &call_sites.iter().find(|(owner, _)| *owner == create).unwrap().1;
+    let mut constructors: Vec<_> = calls.iter()
+        .filter(|call| call.call_kind == CallSiteKind::Constructor)
+        .map(|call| (
+            call.method_name.as_str(),
+            call.receiver_type.as_deref(),
+            call.receiver_is_generic,
+        ))
+        .collect();
+    constructors.sort_unstable();
+    assert_eq!(constructors, vec![
+        ("Inner", Some("Outer.Inner<System.String>"), true),
+        ("Inner", Some("Outer<System.Int32>.Inner"), false),
+    ]);
+}
+
+#[test]
+fn test_multiline_call_sites_use_invoked_member_line() {
+    let source = r#"
+public class Service { public void Run() { } }
+public class Caller {
+    private Service service;
+    public void Execute() {
+        service
+            .Run();
+        service
+            ?.Run();
+        var value = new
+            Service();
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (definitions, call_sites, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+    let execute = definitions.iter().position(|definition| definition.name == "Execute").unwrap();
+    let calls = call_sites.iter().find(|(owner, _)| *owner == execute).unwrap();
+    let mut run_lines: Vec<_> = calls.1.iter()
+        .filter(|call| call.method_name == "Run")
+        .map(|call| call.line)
+        .collect();
+    run_lines.sort_unstable();
+    assert_eq!(run_lines, vec![7, 9]);
+    let constructor = calls.1.iter().find(|call| call.method_name == "Service").unwrap();
+    assert_eq!(constructor.line, 11);
+    assert_eq!(constructor.call_kind, CallSiteKind::Constructor);
+}
+
 #[test] fn test_call_site_extraction_this_and_static() {
     let source = r#"
 public class MyClass {
@@ -442,8 +541,8 @@ public class MyClass {
 
 #[test] fn test_parse_field_signature() {
     assert_eq!(parse_field_signature("IUserService _userService"), Some(("IUserService".to_string(), "_userService".to_string())));
-    assert_eq!(parse_field_signature("ILogger<OrderService> _logger"), Some(("ILogger".to_string(), "_logger".to_string())));
-    assert_eq!(parse_field_signature("string Name"), Some(("string".to_string(), "Name".to_string())));
+    assert_eq!(parse_field_signature("ILogger<OrderService> _logger"), Some(("ILogger<OrderService>".to_string(), "_logger".to_string())));
+    assert_eq!(parse_field_signature("string Name"), Some(("System.String".to_string(), "Name".to_string())));
 }
 
 #[test] fn test_extract_constructor_param_types() {
@@ -451,7 +550,7 @@ public class MyClass {
     let params = extract_constructor_param_types(sig);
     assert_eq!(params.len(), 2);
     assert_eq!(params[0], ("userService".to_string(), "IUserService".to_string()));
-    assert_eq!(params[1], ("logger".to_string(), "ILogger".to_string()));
+    assert_eq!(params[1], ("logger".to_string(), "ILogger<OrderService>".to_string()));
 }
 
 #[test] fn test_call_site_no_calls_for_empty_method() {
@@ -535,7 +634,10 @@ public class OrderService {
     assert!(!pc.is_empty());
     let lc = pc[0].1.iter().find(|c| c.method_name == "LogInformation");
     assert!(lc.is_some());
-    assert_eq!(lc.unwrap().receiver_type.as_deref(), Some("ILogger"));
+    assert_eq!(
+        lc.unwrap().receiver_type.as_deref(),
+        Some("ILogger<OrderService>")
+    );
 }
 
 #[test] fn test_incremental_update_preserves_call_graph() {
@@ -728,7 +830,7 @@ public sealed class InlineReceiverCaller {
         [
             ("NoArgs", "NoArgTarget"),
             ("WithArgs", "ArgTarget"),
-            ("Generic", "GenericTarget"),
+            ("Generic", "TestTypes.GenericTarget<System.String>"),
         ]
     {
         let method_index = definitions
@@ -773,7 +875,10 @@ public sealed class ParameterCaller {
     let (definitions, call_sites, _, _) = parse_csharp_definitions(&mut parser, source, 0);
 
     for (method_name, expected_receiver) in
-        [("Simple", "ParameterTarget"), ("Generic", "GenericTarget")]
+        [
+            ("Simple", "ParameterTarget"),
+            ("Generic", "TestTypes.GenericTarget<System.String>"),
+        ]
     {
         let method_index = definitions
             .iter()
@@ -966,8 +1071,8 @@ public class DataService {
     assert!(add.is_some(), "Expected call to 'Add'");
     assert_eq!(
         add.unwrap().receiver_type.as_deref(),
-        Some("List"),
-        "Local var 'users' with generic type 'List<User>' should resolve receiver_type to 'List' (stripped generics)"
+        Some("List<User>"),
+        "Local var 'users' should preserve its constructed receiver type"
     );
 }
 

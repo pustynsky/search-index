@@ -1410,6 +1410,10 @@ fn requested_name_terms(args: &DefinitionSearchArgs) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn fuzzy_name_suggestions_enabled(args: &DefinitionSearchArgs) -> bool {
+    !args.exact_name_only
+}
+
 fn suggested_name_matches(index: &DefinitionIndex, args: &DefinitionSearchArgs) -> Vec<Value> {
     let terms = requested_name_terms(args);
     if terms.is_empty() {
@@ -1659,7 +1663,7 @@ fn format_search_output(
     );
     inject_definition_scope_telemetry(&mut summary, scope_telemetry);
 
-    let suggestions = if total_results == 0 {
+    let suggestions = if total_results == 0 && fuzzy_name_suggestions_enabled(args) {
         suggested_name_matches(index, args)
     } else {
         Vec::new()
@@ -2704,9 +2708,13 @@ fn generate_zero_result_hints(
     let hint = hint_unsupported_extension(args, ctx)
         .or_else(|| hint_wrong_kind(index, args))
         .or_else(|| hint_file_has_defs_but_filters_narrow(index, args))
-        .or_else(|| hint_file_fuzzy_match(index, args))
-        .or_else(|| hint_nearest_name(index, args))
-        .or_else(|| hint_name_in_content_not_defs(args, ctx, content_idx));
+        .or_else(|| hint_file_fuzzy_match(index, args));
+    let hint = if hint.is_some() || !fuzzy_name_suggestions_enabled(args) {
+        hint
+    } else {
+        hint_nearest_name(index, args)
+    };
+    let hint = hint.or_else(|| hint_name_in_content_not_defs(args, ctx, content_idx));
 
     if let Some(hint_text) = hint {
         summary["hint"] = json!(hint_text);

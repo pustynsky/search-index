@@ -10,8 +10,10 @@ use serde_json::{json, Value};
 use crate::mcp::protocol::ToolCallResult;
 use crate::ContentIndex;
 use crate::definitions::{
-    CallSite, CallSiteKind, CSharpCallSiteShape, CSharpCallableRecord, CSharpRefKind,
-    CSharpTypeEvidence, DefinitionEntry, DefinitionIndex, DefinitionKind,
+    csharp_source_code_only, csharp_type_owner_name, CallSite, CallSiteKind,
+    CSharpCallSiteShape,
+    CSharpCallableRecord, CSharpRefKind, CSharpTypeEvidence, DefinitionEntry,
+    DefinitionIndex, DefinitionKind,
 };
 use code_xray::generate_trigrams;
 
@@ -154,14 +156,29 @@ fn build_callers_result_status(
 }
 
 
-/// Test attribute markers (lowercase) used to identify test methods.
-/// Covers: NUnit [Test], xUnit [Fact]/[Theory], MSTest [TestMethod],
-/// Rust #[test]/#[tokio::test], and similar frameworks.
-const TEST_ATTRIBUTE_MARKERS: &[&str] = &[
-    "test",         // NUnit [Test], Rust #[test], #[tokio::test]
-    "fact",         // xUnit [Fact]
-    "theory",       // xUnit [Theory]
-    "testmethod",   // MSTest [TestMethod]
+/// Exact test attribute names after normalizing qualifiers, suffixes, and arguments.
+const TEST_ATTRIBUTE_NAMES: &[&str] = &[
+    "test",
+    "testcase",
+    "testcasesource",
+    "fact",
+    "skippablefact",
+    "theory",
+    "skippabletheory",
+    "testmethod",
+    "datatestmethod",
+    "uitestmethod",
+    "testinitialize",
+    "testcleanup",
+    "testfixturesetup",
+    "testfixtureteardown",
+    "rstest",
+    "test_case",
+    "wasm_bindgen_test",
+    "traced_test",
+    "test_context",
+    "proptest",
+    "quickcheck",
 ];
 
 /// File name patterns (lowercase) that indicate TypeScript/JavaScript test files.
@@ -171,22 +188,43 @@ const TEST_FILE_PATTERNS: &[&str] = &[
     ".spec.js", ".test.js",
 ];
 
-/// Check if a definition entry represents a test method.
-/// Uses two strategies:
-/// 1. Attribute-based: checks for test framework attributes (C#, Rust)
-/// 2. File-name-based: checks for test file patterns (TypeScript/JavaScript)
-fn is_test_method(def: &DefinitionEntry, file_path: &str) -> bool {
-    // Strategy 1: check attributes (C#, Rust)
-    for attr in &def.attributes {
-        let lower = attr.to_lowercase();
-        for marker in TEST_ATTRIBUTE_MARKERS {
-            if lower.contains(marker) {
-                return true;
-            }
+fn is_test_attribute(attr: &str) -> bool {
+    if let Some((name, arguments)) = attr.split_once('(')
+        && name.trim() == "cfg"
+    {
+        let arguments = arguments.strip_suffix(')').unwrap_or(arguments).trim();
+        if arguments == "test" {
+            return true;
+        }
+        let compact: String = arguments.chars()
+            .filter(|character| !character.is_whitespace())
+            .collect();
+        if ["all(", "any("].into_iter().any(|prefix| {
+            compact.strip_prefix(prefix)
+                .and_then(|value| value.strip_suffix(')'))
+                .is_some_and(|value| value.split(',').any(|term| term == "test"))
+        }) {
+            return true;
         }
     }
 
-    // Strategy 2: file name heuristic (TypeScript/JavaScript)
+    let qualified_name = attr.split('(').next().unwrap_or(attr).trim();
+    let name = qualified_name
+        .split('<').next().unwrap_or(qualified_name)
+        .rsplit(['.', ':'])
+        .find(|part| !part.is_empty())
+        .unwrap_or(qualified_name)
+        .to_ascii_lowercase();
+    let name = name.strip_suffix("attribute").unwrap_or(&name);
+    TEST_ATTRIBUTE_NAMES.contains(&name)
+}
+
+/// Check framework attributes and TypeScript/JavaScript test-file suffixes.
+fn is_test_method(def: &DefinitionEntry, file_path: &str) -> bool {
+    if def.attributes.iter().any(|attr| is_test_attribute(attr)) {
+        return true;
+    }
+
     let file_lower = file_path.to_lowercase();
     for pattern in TEST_FILE_PATTERNS {
         if file_lower.ends_with(pattern) {
@@ -412,6 +450,17 @@ fn inject_exact_root_resolution(
     });
 }
 
+
+fn mark_grep_reference_uncertainty(result_status: &mut Value) {
+    result_status["safeForExhaustiveClaims"] = json!(false);
+    if let Some(reasons) = result_status["reasons"].as_array_mut()
+        && !reasons.iter().any(|reason| {
+            reason.as_str() == Some("grep_references_outside_call_graph")
+        })
+    {
+        reasons.push(json!("grep_references_outside_call_graph"));
+    }
+}
 
 fn read_symbol_target(args: &Value) -> Result<Option<String>, String> {
     let Some(targets) = args.get("targets") else {
@@ -1069,15 +1118,18 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         }
 
         // Cross-index enrichment: grep references not in call tree
+        let mut has_external_grep_refs = false;
         let include_grep_refs = args.get("includeGrepReferences").and_then(|v| v.as_bool()).unwrap_or(false);
         if include_grep_refs && method_name.len() >= 4 {
             let tree_files = collect_files_from_tree(&tree);
-            let grep_refs = build_grep_references(&method_name, &content_index, &tree_files, &def_idx);
+            let (grep_refs, has_in_scope_code_refs) =
+                build_grep_references(&method_name, &tree_files, &caller_ctx);
             if !grep_refs.is_empty() {
                 output["grepReferences"] = json!(grep_refs);
                 output["grepReferencesNote"] = json!(
                     "Text references not captured by AST call analysis. May include delegate usage, method groups, reflection, or comments."
                 );
+                has_external_grep_refs = has_in_scope_code_refs;
             }
         }
 
@@ -1107,6 +1159,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             false,
             is_sql_routine_query(&def_idx, &method_name, class_filter.as_deref()),
         );
+        if has_external_grep_refs {
+            mark_grep_reference_uncertainty(&mut result_status);
+        }
         if ambiguous_references > 0 {
             result_status["status"] = json!("partial");
             result_status["complete"] = json!(false);
@@ -1208,15 +1263,18 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         }
 
         // Cross-index enrichment: grep references not in call tree
+        let mut has_external_grep_refs = false;
         let include_grep_refs = args.get("includeGrepReferences").and_then(|v| v.as_bool()).unwrap_or(false);
         if include_grep_refs && method_name.len() >= 4 {
             let tree_files = collect_files_from_tree(&tree);
-            let grep_refs = build_grep_references(&method_name, &content_index, &tree_files, &def_idx);
+            let (grep_refs, has_in_scope_code_refs) =
+                build_grep_references(&method_name, &tree_files, &caller_ctx);
             if !grep_refs.is_empty() {
                 output["grepReferences"] = json!(grep_refs);
                 output["grepReferencesNote"] = json!(
                     "Text references not captured by AST call analysis. May include delegate usage, method groups, reflection, or comments."
                 );
+                has_external_grep_refs = has_in_scope_code_refs;
             }
         }
 
@@ -1246,6 +1304,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             false,
             is_sql_routine_query(&def_idx, &method_name, class_filter.as_deref()),
         );
+        if has_external_grep_refs {
+            mark_grep_reference_uncertainty(&mut result_status);
+        }
         if ambiguous_edges > 0 {
             result_status["status"] = json!("partial");
             result_status["complete"] = json!(false);
@@ -1818,14 +1879,15 @@ fn collect_files_from_tree(tree: &[Value]) -> HashSet<String> {
 /// but NOT in the call tree. Uses the content index for O(1) lookup.
 fn build_grep_references(
     method_name: &str,
-    content_index: &ContentIndex,
     tree_files: &HashSet<String>,
-    def_index: &DefinitionIndex,
-) -> Vec<Value> {
+    caller_ctx: &CallerTreeContext<'_>,
+) -> (Vec<Value>, bool) {
+    let content_index = caller_ctx.content_index;
+    let def_index = caller_ctx.def_idx;
     let method_lower = method_name.to_lowercase();
     let postings = match content_index.index.get(&method_lower) {
         Some(p) => p,
-        None => return Vec::new(),
+        None => return (Vec::new(), false),
     };
 
     // A3 fix: Collect files where the method is DEFINED to exclude them.
@@ -1846,6 +1908,7 @@ fn build_grep_references(
     };
 
     let mut grep_refs: Vec<Value> = Vec::new();
+    let mut has_in_scope_code_reference = false;
     for posting in postings {
         if let Some(file) = content_index.files.get(posting.file_id as usize) {
             // Compare by filename only (call tree stores filenames, not full paths).
@@ -1857,6 +1920,11 @@ fn build_grep_references(
                 .and_then(|f| f.to_str())
                 .unwrap_or(file);
             if !tree_files.contains(fname) && !definition_file_names.contains(fname) {
+                if caller_ctx.passes_file_filters(file)
+                    && def_index.path_to_id.contains_key(&crate::path_identity_key(Path::new(file)))
+                {
+                    has_in_scope_code_reference = true;
+                }
                 grep_refs.push(json!({
                     "file": file,
                     "tokenCount": posting.lines.len(),
@@ -1864,7 +1932,7 @@ fn build_grep_references(
             }
         }
     }
-    grep_refs
+    (grep_refs, has_in_scope_code_reference)
 }
 
 // ─── Internal helpers ───────────────────────────────────────────────
@@ -2581,7 +2649,9 @@ fn verify_call_site_target_with_policy(
     for cs in &matching_calls {
         match &cs.receiver_type {
             Some(rt) => {
-                let rt_lower = rt.to_lowercase();
+                let (rt_owner, _) = csharp_type_owner_name(rt);
+                let rt_owner = rt_owner.rsplit('.').next().unwrap_or(&rt_owner);
+                let rt_lower = rt_owner.to_lowercase();
                 // Direct match
                 if rt_lower == target_lower {
                     return true;
@@ -2615,11 +2685,11 @@ fn verify_call_site_target_with_policy(
                 // Check if target_class is an implementation of the receiver interface
                 // NOTE: pass original-case values — is_implementation_of checks for
                 // uppercase 'I' prefix and would always fail on lowercased inputs.
-                if is_implementation_of(target_class, rt) {
+                if is_implementation_of(target_class, rt_owner) {
                     return true;
                 }
                 // Reverse: receiver is the implementation, target is the interface
-                if is_implementation_of(rt, target_class) {
+                if is_implementation_of(rt_owner, target_class) {
                     return true;
                 }
             }
@@ -3783,10 +3853,11 @@ impl CalleeTreeBuilder<'_> {
                     }
                     seen_callees.insert(callee_key);
 
-                    let sub_callees = self.build(
+                    let sub_callees = self.build_with_root(
                         &callee_def.name,
-                        callee_def.parent.as_deref(), // scope recursion to the callee's own class
+                        callee_def.parent.as_deref(),
                         current_depth + 1,
+                        Some(callee_di),
                     );
 
                     let mut node = json!({
@@ -3923,20 +3994,65 @@ fn is_interface_type(def_idx: &DefinitionIndex, type_name_lower: &str) -> bool {
 }
 
 
-/// Check if a class (by lowercased name) has generic parameters in its signature.
-/// Returns true if ANY class definition with that name has `<` in its signature.
-fn is_class_generic(def_idx: &DefinitionIndex, class_name_lower: &str) -> bool {
-    if let Some(indices) = def_idx.name_index.get(class_name_lower) {
-        for &di in indices {
-            if let Some(def) = def_idx.definitions.get(di as usize)
-                && matches!(def.kind, DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record | DefinitionKind::Interface)
-                    && let Some(ref sig) = def.signature
-                        && sig.contains('<') {
-                            return true;
-                        }
-        }
+
+/// Detect generic parameters on the declared type, excluding generic base types.
+fn csharp_type_definition_is_generic(definition: &DefinitionEntry) -> bool {
+    let Some(signature) = definition.signature.as_deref() else {
+        return false;
+    };
+    let signature = csharp_source_code_only(signature);
+    let signature = signature.as_str();
+    ["class ", "struct ", "interface ", "record "]
+        .into_iter()
+        .flat_map(|keyword| {
+            signature.match_indices(keyword).filter_map(move |(index, _)| {
+                let mut declaration = signature[index + keyword.len()..].trim_start();
+                if keyword == "record " {
+                    declaration = declaration.strip_prefix("class ")
+                        .or_else(|| declaration.strip_prefix("struct "))
+                        .unwrap_or(declaration)
+                        .trim_start();
+                }
+                let name_end = declaration.find(|character: char| {
+                    character != '_' && !character.is_alphanumeric()
+                }).unwrap_or(declaration.len());
+                (declaration.get(..name_end) == Some(definition.name.as_str()))
+                    .then(|| (index, declaration[name_end..].trim_start().starts_with('<')))
+            })
+        })
+        .max_by_key(|(index, _)| *index)
+        .is_some_and(|(_, is_generic)| is_generic)
+}
+
+fn type_definition_is_generic(
+    def_idx: &DefinitionIndex,
+    definition: &DefinitionEntry,
+) -> bool {
+    let is_csharp = def_idx.files
+        .get(definition.file_id as usize)
+        .and_then(|file| Path::new(file).extension())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("cs"));
+    if is_csharp {
+        csharp_type_definition_is_generic(definition)
+    } else {
+        definition.signature.as_deref().is_some_and(|signature| signature.contains('<'))
     }
-    false
+}
+
+fn is_class_generic(def_idx: &DefinitionIndex, class_name_lower: &str) -> bool {
+    def_idx.name_index.get(class_name_lower).is_some_and(|indices| {
+        indices.iter().any(|&definition_index| {
+            def_idx.definitions.get(definition_index as usize).is_some_and(|definition| {
+                matches!(
+                    definition.kind,
+                    DefinitionKind::Class
+                        | DefinitionKind::Struct
+                        | DefinitionKind::Record
+                        | DefinitionKind::Interface
+                ) && type_definition_is_generic(def_idx, definition)
+            })
+        })
+    })
 }
 
 /// Resolve a CallSite to actual definition indices in the definition index.
@@ -3946,6 +4062,23 @@ fn is_class_generic(def_idx: &DefinitionIndex, class_name_lower: &str) -> bool {
 enum CSharpCallResolution {
     Resolved(Vec<u32>),
     Ambiguous(Vec<u32>),
+}
+
+fn call_site_kind_matches(call_kind: CallSiteKind, definition_kind: &DefinitionKind) -> bool {
+    match call_kind {
+        CallSiteKind::Unknown => matches!(
+            definition_kind,
+            DefinitionKind::Method
+                | DefinitionKind::Constructor
+                | DefinitionKind::Function
+                | DefinitionKind::StoredProcedure
+                | DefinitionKind::SqlFunction
+        ),
+        CallSiteKind::SqlExecute => matches!(definition_kind, DefinitionKind::StoredProcedure),
+        CallSiteKind::SqlScalarFunction => matches!(definition_kind, DefinitionKind::SqlFunction),
+        CallSiteKind::SqlRelation => false,
+        CallSiteKind::Constructor => matches!(definition_kind, DefinitionKind::Constructor),
+    }
 }
 
 fn resolve_call_site_for_graph(
@@ -3981,7 +4114,9 @@ fn resolve_call_site_for_graph(
         .flatten()
         .filter_map(|&candidate| {
             let definition = def_idx.definitions.get(candidate as usize)?;
-            if definition.name != call.method_name {
+            if definition.name != call.method_name
+                || !call_site_kind_matches(call.call_kind, &definition.kind)
+            {
                 return None;
             }
             let active = def_idx.file_index.get(&definition.file_id)
@@ -4004,7 +4139,16 @@ fn resolve_call_site_for_graph(
         .filter(|(_, callable)| csharp_candidate_applies(def_idx, callable, shape))
         .collect();
     let owner_matches: Vec<_> = applicable.iter()
-        .filter(|(_, callable)| csharp_receiver_matches(def_idx, callable, shape))
+        .filter(|(candidate, callable)| {
+            csharp_receiver_matches(
+                def_idx,
+                call,
+                caller_def_idx,
+                *candidate,
+                callable,
+                shape,
+            )
+        })
         .map(|(candidate, _)| *candidate)
         .collect();
 
@@ -4127,8 +4271,41 @@ fn csharp_candidate_applies(
     })
 }
 
+fn csharp_candidate_owner_is_generic(
+    def_idx: &DefinitionIndex,
+    candidate: u32,
+) -> Option<bool> {
+    let member = def_idx.definitions.get(candidate as usize)?;
+    let file_definitions = def_idx.file_index.get(&member.file_id)?;
+    file_definitions.iter()
+        .filter_map(|&definition_index| def_idx.definitions.get(definition_index as usize))
+        .filter(|definition| {
+            matches!(
+                definition.kind,
+                DefinitionKind::Class
+                    | DefinitionKind::Struct
+                    | DefinitionKind::Record
+                    | DefinitionKind::Interface
+            ) && definition.line_start <= member.line_start
+                && definition.line_end >= member.line_end
+        })
+        .min_by_key(|definition| definition.line_end.saturating_sub(definition.line_start))
+        .filter(|definition| definition.signature.is_some())
+        .map(csharp_type_definition_is_generic)
+}
+
+fn csharp_owner_name_matches(receiver: &str, parent: &str) -> bool {
+    receiver == parent
+        || parent
+            .strip_suffix(receiver)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
 fn csharp_receiver_matches(
     def_idx: &DefinitionIndex,
+    call: &CallSite,
+    caller_def_idx: u32,
+    candidate: u32,
     callable: &CSharpCallableRecord,
     shape: &CSharpCallSiteShape,
 ) -> bool {
@@ -4138,14 +4315,25 @@ fn csharp_receiver_matches(
     let Some(receiver) = def_idx.csharp_semantics.strings.get(receiver) else {
         return false;
     };
+    let (receiver, receiver_is_generic) = csharp_type_owner_name(receiver);
     let Some(parent) = def_idx.csharp_semantics.strings.get(callable.qualified_parent) else {
         return false;
     };
-    if receiver.contains('.') {
-        receiver == parent
-    } else {
-        parent.rsplit('.').next() == Some(receiver)
+    if !csharp_owner_name_matches(&receiver, parent) {
+        return false;
     }
+
+    let receiver_arity = if call.call_kind == CallSiteKind::Constructor {
+        Some(receiver_is_generic)
+    } else if shape.self_receiver {
+        csharp_candidate_owner_is_generic(def_idx, caller_def_idx)
+    } else {
+        Some(receiver_is_generic)
+    };
+    receiver_arity.is_none_or(|receiver_is_generic| {
+        csharp_candidate_owner_is_generic(def_idx, candidate)
+            .is_none_or(|candidate_is_generic| candidate_is_generic == receiver_is_generic)
+    })
 }
 
 fn csharp_receiver_is_interface(
@@ -4158,7 +4346,12 @@ fn csharp_receiver_is_interface(
     let Some(receiver) = def_idx.csharp_semantics.strings.get(receiver) else {
         return false;
     };
-    let receiver_short = receiver.rsplit('.').next().unwrap_or(receiver).to_lowercase();
+    let (receiver_owner, _) = csharp_type_owner_name(receiver);
+    let receiver_short = receiver_owner
+        .rsplit('.')
+        .next()
+        .unwrap_or(&receiver_owner)
+        .to_lowercase();
     is_interface_type(def_idx, &receiver_short)
 }
 
@@ -4174,7 +4367,8 @@ fn csharp_candidate_has_base_receiver(
     let Some(receiver) = def_idx.csharp_semantics.strings.get(receiver) else {
         return false;
     };
-    let receiver_short = receiver.rsplit('.').next().unwrap_or(receiver);
+    let (receiver_owner, _) = csharp_type_owner_name(receiver);
+    let receiver_short = receiver_owner.rsplit('.').next().unwrap_or(&receiver_owner);
     let Some(method) = def_idx.definitions.get(candidate as usize) else {
         return false;
     };
@@ -4305,10 +4499,19 @@ fn resolve_call_site_with_policy(
     let mut resolved: Vec<u32> = Vec::new();
 
     // Skip matching for built-in types to avoid false positives
-    if let Some(ref rt) = call.receiver_type
-        && BUILTIN_RECEIVER_TYPES.iter().any(|&b| b.eq_ignore_ascii_case(rt.as_str())) {
+    if let Some(ref receiver_type) = call.receiver_type {
+        let (receiver_owner, _) = csharp_type_owner_name(receiver_type);
+        let receiver_short = receiver_owner
+            .rsplit('.')
+            .next()
+            .unwrap_or(&receiver_owner);
+        if BUILTIN_RECEIVER_TYPES
+            .iter()
+            .any(|builtin| builtin.eq_ignore_ascii_case(receiver_short))
+        {
             return Vec::new();
         }
+    }
 
     for &di in candidates {
         let def = match def_idx.definitions.get(di as usize) {
@@ -4316,26 +4519,14 @@ fn resolve_call_site_with_policy(
             None => continue,
         };
 
-        let kind_matches = match call.call_kind {
-            CallSiteKind::Unknown => matches!(
-                def.kind,
-                DefinitionKind::Method
-                    | DefinitionKind::Constructor
-                    | DefinitionKind::Function
-                    | DefinitionKind::StoredProcedure
-                    | DefinitionKind::SqlFunction
-            ),
-            CallSiteKind::SqlExecute => def.kind == DefinitionKind::StoredProcedure,
-            CallSiteKind::SqlScalarFunction => def.kind == DefinitionKind::SqlFunction,
-            CallSiteKind::SqlRelation => false,
-        };
-        if !kind_matches {
+        if !call_site_kind_matches(call.call_kind, &def.kind) {
             continue;
         }
 
         if let Some(ref recv_type) = call.receiver_type {
             // We have receiver type info -- use it to disambiguate
-            let recv_lower = recv_type.to_lowercase();
+            let (recv_owner, _) = csharp_type_owner_name(recv_type);
+            let recv_lower = recv_owner.rsplit('.').next().unwrap_or(&recv_owner).to_lowercase();
 
             if let Some(ref parent) = def.parent {
                 let parent_lower = parent.to_lowercase();
