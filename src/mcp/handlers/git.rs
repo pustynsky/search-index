@@ -90,7 +90,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
     vec![
         crate::mcp::protocol::ToolDefinition {
             name: "xray_git_history".to_string(),
-            description: "Get file history. Unfiltered canonical-workspace queries use the fast direct-path cache and may omit pre-rename history (source=git-cache, lineage=direct-path, safeForFullHistory=false). Message filters and noCache=true use CLI --follow; message filtering includes the full body (source=git-cli, lineage=follow, safeForFullHistory=true). Other repos and xray_git_diff also use CLI. Deleted files are supported. firstCommit=true returns the followed creation commit and ignores other filters. Summary fields totalCommitsExact and hasMoreCommits distinguish exact totals from bounded CLI lower bounds and returned-page truncation.".to_string(),
+            description: "Get file history. Unfiltered canonical-workspace queries use the fast direct-path cache and may omit pre-rename history (source=git-cache, lineage=direct-path, safeForFullHistory=false). Cache responses identify their default-branch snapshot with cacheBranch/cacheHead and report totalCommitsExact=false because the count is snapshot-scoped rather than a live Git result. Message filters and noCache=true use CLI --follow; message filtering includes the full body (source=git-cli, lineage=follow, safeForFullHistory=true). Other repos and xray_git_diff also use CLI. Deleted files are supported. firstCommit=true returns the followed creation commit and ignores other filters. Summary fields totalCommitsExact and hasMoreCommits distinguish exact totals from bounded or snapshot-scoped counts and returned-page truncation.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -586,6 +586,7 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                 // cache read-lock before spawning `git rev-parse HEAD` (lock-order hygiene:
                 // never hold git_cache.read while doing IO that could outlive the request).
                 let cache_head_snapshot = cache.head_hash.clone();
+                let cache_branch_snapshot = cache.branch.clone();
                 drop(cache_guard);
                 let elapsed = start.elapsed();
 
@@ -608,8 +609,10 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                         "source": "git-cache",
                         "lineage": "direct-path",
                         "safeForFullHistory": false,
+                        "cacheBranch": cache_branch_snapshot,
+                        "cacheHead": cache_head_snapshot.clone(),
                         "totalCommits": total_count,
-                        "totalCommitsExact": true,
+                        "totalCommitsExact": false,
                         "hasMoreCommits": total_count > commits_json.len(),
                         "returned": commits_json.len(),
                         "file": file,
@@ -803,8 +806,9 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
                 // Truncate to top N
                 authors.truncate(top);
-                // Snapshot head + drop guard before spawning git (lock-order hygiene).
+                // Snapshot revision + drop guard before spawning git (lock-order hygiene).
                 let cache_head_snapshot = cache.head_hash.clone();
+                let cache_branch_snapshot = cache.branch.clone();
                 drop(cache_guard);
                 let elapsed = start.elapsed();
 
@@ -823,6 +827,9 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                     "authors": authors_json,
                     "summary": {
                         "tool": "xray_git_authors",
+                        "source": "git-cache",
+                        "cacheBranch": cache_branch_snapshot,
+                        "cacheHead": cache_head_snapshot.clone(),
                         "totalCommits": total_commits,
                         "totalAuthors": total_authors,
                         "returned": authors_json.len(),
@@ -871,6 +878,7 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 "authors": authors_json,
                 "summary": {
                     "tool": "xray_git_authors",
+                    "source": "git-cli",
                     "totalCommits": total_commits,
                     "totalAuthors": total_authors,
                     "returned": authors_json.len(),
@@ -960,6 +968,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 // (lock-order hygiene: never hold git_cache.read() across `git ls-files` /
                 // `git rev-parse` subprocesses, which can briefly block cache writers).
                 let cache_head_snapshot = cache.head_hash.clone();
+                let cache_branch_snapshot = cache.branch.clone();
                 let cache_commits_count = cache.commits.len();
                 drop(cache_guard);
 
@@ -991,6 +1000,9 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                     "activity": files_array,
                     "summary": {
                         "tool": "xray_git_activity",
+                        "source": "git-cache",
+                        "cacheBranch": cache_branch_snapshot,
+                        "cacheHead": cache_head_snapshot.clone(),
                         "filesChanged": total_files,
                         "totalEntries": total_entries,
                         "commitsProcessed": cache_commits_count,
@@ -1086,6 +1098,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 "activity": files_array,
                 "summary": {
                     "tool": "xray_git_activity",
+                    "source": "git-cli",
                     "filesChanged": total_files,
                     "totalEntries": total_entries,
                     "commitsProcessed": commits_processed,

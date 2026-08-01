@@ -37,7 +37,7 @@ fn make_ctx_with_git_cache() -> HandlerContext {
     let cache = GitHistoryCache::from_builder(
         builder,
         "abc123def456abc123def456abc123def456abc1".to_string(),
-        "main".to_string(),
+        "release/test".to_string(),
     );
 
     let mut ctx = make_empty_ctx();
@@ -196,6 +196,8 @@ fn assert_followed_history_contract(output: &Value) {
     assert_eq!(output["summary"]["source"], "git-cli");
     assert_eq!(output["summary"]["lineage"], "follow");
     assert_eq!(output["summary"]["safeForFullHistory"], true);
+    assert!(output["summary"]["cacheBranch"].is_null());
+    assert!(output["summary"]["cacheHead"].is_null());
 }
 
 /// xray_git_authors with populated cache returns non-empty firstChange and lastChange.
@@ -212,6 +214,9 @@ fn test_git_authors_cached_has_first_and_last_change() {
     // Should use cache path (hint contains "from cache")
     let hint = output["summary"]["hint"].as_str().unwrap_or("");
     assert!(hint.contains("cache"), "Should use cache path, hint: {}", hint);
+    assert_eq!(output["summary"]["source"], "git-cache");
+    assert_eq!(output["summary"]["cacheBranch"], "release/test");
+    assert_eq!(output["summary"]["cacheHead"], "abc123def456abc123def456abc123def456abc1");
 
     let authors = output["authors"].as_array().unwrap();
     assert!(authors.len() >= 2, "Should have at least 2 authors, got {}", authors.len());
@@ -265,7 +270,12 @@ fn test_git_history_cached_direct_path_contract() {
     assert_eq!(limited_output["summary"]["totalCommits"], 3);
     assert_eq!(limited_output["summary"]["returned"], 2);
     assert_eq!(limited_output["summary"]["hasMoreCommits"], true);
-    assert_eq!(limited_output["summary"]["totalCommitsExact"], true);
+    assert_eq!(limited_output["summary"]["totalCommitsExact"], false);
+    assert_eq!(limited_output["summary"]["cacheBranch"], "release/test");
+    assert_eq!(
+        limited_output["summary"]["cacheHead"],
+        "abc123def456abc123def456abc123def456abc1"
+    );
 
 
     // Verify commits are sorted newest first
@@ -575,6 +585,9 @@ fn test_git_activity_cached_returns_files() {
 
     let hint = output["summary"]["hint"].as_str().unwrap_or("");
     assert!(hint.contains("cache"), "Should use cache path, hint: {}", hint);
+    assert_eq!(output["summary"]["source"], "git-cache");
+    assert_eq!(output["summary"]["cacheBranch"], "release/test");
+    assert_eq!(output["summary"]["cacheHead"], "abc123def456abc123def456abc123def456abc1");
 
     let activity = output["activity"].as_array().unwrap();
     assert_eq!(activity.len(), 3, "Should have 3 files in activity");
@@ -653,13 +666,14 @@ fn test_git_authors_no_cache_bypasses_cache() {
         "file": "src/main.rs",
         "noCache": true
     }));
-    // If succeeded via CLI, verify no cache hint
-    if !result.is_error {
-        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-        let hint = output["summary"]["hint"].as_str().unwrap_or("");
-        assert!(!hint.contains("cache"),
-            "noCache=true should bypass cache for authors, but hint says: {}", hint);
-    }
+    assert!(!result.is_error, "authors CLI path failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["hint"].as_str().unwrap_or("");
+    assert!(!hint.contains("cache"),
+        "noCache=true should bypass cache for authors, but hint says: {}", hint);
+    assert_eq!(output["summary"]["source"], "git-cli");
+    assert!(output["summary"]["cacheBranch"].is_null());
+    assert!(output["summary"]["cacheHead"].is_null());
 }
 
 /// noCache: xray_git_activity with noCache=true bypasses cache.
@@ -670,13 +684,14 @@ fn test_git_activity_no_cache_bypasses_cache() {
         "repo": ".",
         "noCache": true
     }));
-    // If succeeded via CLI, verify no cache hint
-    if !result.is_error {
-        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-        let hint = output["summary"]["hint"].as_str().unwrap_or("");
-        assert!(!hint.contains("cache"),
-            "noCache=true should bypass cache for activity, but hint says: {}", hint);
-    }
+    assert!(!result.is_error, "activity CLI path failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["hint"].as_str().unwrap_or("");
+    assert!(!hint.contains("cache"),
+        "noCache=true should bypass cache for activity, but hint says: {}", hint);
+    assert_eq!(output["summary"]["source"], "git-cli");
+    assert!(output["summary"]["cacheBranch"].is_null());
+    assert!(output["summary"]["cacheHead"].is_null());
 }
 
 /// noCache: noCache=false should behave same as omitting — use cache.
@@ -794,6 +809,12 @@ fn test_git_history_nonempty_cache_with_stale_head_still_uses_cache() {
     assert!(hint.contains("cache"),
         "Non-empty cache result must still serve from cache (HEAD-pinning is empty-only), got hint: {}", hint);
     assert_eq!(output["commits"].as_array().unwrap().len(), 3);
+    assert_eq!(output["summary"]["totalCommitsExact"], false);
+    assert_eq!(output["summary"]["cacheBranch"], "release/test");
+    assert_eq!(
+        output["summary"]["cacheHead"],
+        "abc123def456abc123def456abc123def456abc1"
+    );
 }
 
 /// REGRESSION-KILLER for code-reviewer's MAJOR finding (2026-05-10):
@@ -880,7 +901,7 @@ fn test_git_history_empty_cache_with_fresh_head_serves_cached_empty() {
     let nul_input: Vec<u8> = log.bytes().map(|b| if b == b'\n' { 0 } else { b }).collect();
     let mut builder = GitHistoryCache::builder();
     parse_git_log_stream(Cursor::new(nul_input), &mut builder).unwrap();
-    let cache = GitHistoryCache::from_builder(builder, live_head, "main".to_string());
+    let cache = GitHistoryCache::from_builder(builder, live_head.clone(), "main".to_string());
 
     let mut ctx = make_empty_ctx();
     *ctx.git_cache.write().unwrap() = Some(cache);
@@ -895,6 +916,9 @@ fn test_git_history_empty_cache_with_fresh_head_serves_cached_empty() {
     assert!(!result.is_error, "should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["source"], "git-cache");
+    assert_eq!(output["summary"]["cacheBranch"], "main");
+    assert_eq!(output["summary"]["cacheHead"], live_head);
+    assert_eq!(output["summary"]["totalCommitsExact"], false);
     assert_eq!(output["commits"].as_array().unwrap().len(), 0);
 }
 
