@@ -615,7 +615,7 @@ fn handle_name_filter(
     warnings: &[String],
 ) -> ToolCallResult {
     // Phase 1: classify matches
-    let matches = classify_matches(xml_defs, name);
+    let matches = classify_matches(xml_defs, name, args.exact_name_only);
 
     // Phase 2: compute de-duplication set (name-matched indices).
     let name_matched: HashSet<usize> = matches
@@ -674,7 +674,11 @@ fn handle_name_filter(
 /// textContent-match, or non-match. Comma-separated search terms use OR
 /// semantics. textContent search ignores terms shorter than 3 chars to avoid
 /// noise (a 1-char query against long paragraphs matches almost everything).
-fn classify_matches(xml_defs: &[XmlDefinition], name: &str) -> Vec<XmlMatch> {
+fn classify_matches(
+    xml_defs: &[XmlDefinition],
+    name: &str,
+    exact_name_only: bool,
+) -> Vec<XmlMatch> {
     let name_lower = name.to_lowercase();
     let terms: Vec<&str> = name_lower
         .split(',')
@@ -687,11 +691,17 @@ fn classify_matches(xml_defs: &[XmlDefinition], name: &str) -> Vec<XmlMatch> {
     let mut matches = Vec::new();
     for (idx, def) in xml_defs.iter().enumerate() {
         let def_name_lower = def.entry.name.to_lowercase();
-        if terms.iter().any(|t| def_name_lower.contains(t)) {
+        if terms.iter().any(|term| {
+            if exact_name_only {
+                def_name_lower == *term
+            } else {
+                def_name_lower.contains(term)
+            }
+        }) {
             matches.push(XmlMatch { def_index: idx, is_text_content: false });
             continue;
         }
-        if !long_terms.is_empty()
+        if !exact_name_only && !long_terms.is_empty()
             && let Some(ref tc) = def.text_content {
                 let tc_lower = tc.to_lowercase();
                 if long_terms.iter().any(|t| tc_lower.contains(t)) {

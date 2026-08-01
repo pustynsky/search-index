@@ -312,7 +312,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "file": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Filter by file path substring(s). Each array entry is one term; multiple entries = OR. Use file=['<dirname>'] to explore an entire module — returns all definitions in files matching this directory path."
+                        "description": "Filter by file path. Directories resolving under the canonical index root use boundary matching; aliases, unresolved paths, and other terms use substring matching. Multiple entries = OR."
                     },
                     "parent": {
                         "type": "array",
@@ -329,7 +329,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "exactNameOnly": {
                         "type": "boolean",
-                        "description": "When true with name, match definition names exactly instead of substring matching. Also disables name auto-correction, fuzzy name suggestions, and nearest-match name hints for this request. (default: false)"
+                        "description": "Match definition names exactly. Also disables XML text-content matching, auto-correction, fuzzy name suggestions, and nearest-match name hints. (default: false)"
                     },
                     "autoCorrect": {
                         "type": "boolean",

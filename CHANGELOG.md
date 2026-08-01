@@ -5,6 +5,8 @@
 
 - **Hardened caller analysis, branch status, and strict definition misses.** Production-only filtering now recognizes exact framework test attributes without substring false positives; multiline calls report the invoked member line and retain their callers; C# `receiverType` preserves canonical constructed types; constructor syntax resolves only constructors and preserves the selected body across generic/non-generic owner collisions; in-scope indexed code references outside the graph make exhaustive-claim safety conservative; `origin/HEAD` selects the operational base branch; and strict exact-name misses skip fuzzy suggestion scans. C# type signatures omit inline comment text before normalization. Definition indexes rebuild once to adopt the corrected call-site payload.
 
+- **Corrected exact XML, Git message, and definition directory scopes.** XML on-demand definitions now honor `exactNameOnly` without substring or text-content matches; Git history searches the full commit message while retaining rename lineage; and existing directory filters no longer include sibling-prefix directories while fuzzy file terms keep substring semantics.
+
 - **Streamlined repository code-review follow-ups.** The reviewer batches Xray discovery, reuses validation only when bound to the exact diff hash, and limits consolidated follow-ups to prior findings and changed invariants while escalating scope drift or new contract risk to a full review.
 
 ## 0.5.0 (2026-07-31)

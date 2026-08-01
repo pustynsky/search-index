@@ -631,7 +631,7 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 | `attribute`         | string  | —       | Filter by C# attribute or TypeScript decorator                                           |
 | `baseType`          | string  | —       | Filter by base type/interface (substring match — `IAccessTable` finds `IAccessTable<Model>`, etc.) |
 | `baseTypeTransitive`| boolean | false   | With `baseType`, traverses inheritance chain transitively (BFS, max depth 10). Finds classes that inherit from classes that inherit from the specified baseType |
-| `file`              | array&lt;string&gt;  | —       | Filter by file path substring. Multi-element array for OR. **BREAKING 2026-04-25:** array required |
+| `file`              | array&lt;string&gt;  | —       | Filter by file path. Directories resolving under the canonical index root use boundary matching; aliases, unresolved paths, and other terms use substring matching. Multi-element array for OR. **BREAKING 2026-04-25:** array required |
 | `parent`            | array&lt;string&gt;  | —       | Filter by parent class name. Multi-element array for OR. **BREAKING 2026-04-25:** array required |
 | `containsLine`      | integer | —       | Find definition containing a line number (requires `file`). With `includeBody=true`, body is emitted only for innermost definition; parents get `bodyOmitted` |
 | `regex`             | boolean | false   | Treat `name` as regex                                                                    |
@@ -652,7 +652,7 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 | `minParams`         | integer | —       | Filter: min parameter count. Auto-enables `includeCodeStats`                             |
 | `minReturns`        | integer | —       | Filter: min return/throw count. Auto-enables `includeCodeStats`                          |
 | `minCalls`          | integer | —       | Filter: min call count (fan-out). Auto-enables `includeCodeStats`                         |
-| `exactNameOnly`     | boolean | false   | Match `name` exactly instead of by substring. Also disables name auto-correction for the request |
+| `exactNameOnly`     | boolean | false   | Match `name` exactly instead of by substring. Also disables name auto-correction and XML text-content matching for the request |
 | `autoCorrect`       | boolean | true    | Allow best-effort kind/name correction when the first pass returns 0 definitions. Set `false` to keep a not-found result exact. Ignored when `exactNameOnly=true` |
 | `includeUsageCount` | boolean | false   | Add `usageCount` per definition — how many files contain that name in the content index (not a call count; includes comments and strings). Useful for dead-code scans |
 | `bodyLineStart`     | integer | —       | Clip bodies to start at this absolute file line (1-based, inclusive). Pair with `bodyLineEnd` to slice a large body without truncation |
@@ -1430,7 +1430,7 @@ Default cached history is intentionally direct-path, not rename-followed history
 | `maxResults` | number | — | Maximum results to return (default: 50) |
 | `top`        | number | — | Maximum authors to return (default: 10, `xray_git_authors` only) |
 | `author`     | string | — | Filter by author name or email (case-insensitive substring match). Available on `xray_git_history`, `xray_git_diff`, `xray_git_activity` |
-| `message`    | string | — | Filter by commit message (case-insensitive substring match). Available on `xray_git_history`, `xray_git_diff`, `xray_git_activity`, `xray_git_authors` |
+| `message`    | string | — | Filter by the full commit message, including body (case-insensitive literal substring). Message-filtered history/authors/activity requests bypass the subject-only cache; diff is always CLI-backed. Available on `xray_git_history`, `xray_git_diff`, `xray_git_activity`, `xray_git_authors` |
 | `noCache`    | boolean | — | Bypass the workspace cache. For `xray_git_history`, use `git --follow` to recover rename/copy lineage; for authors/activity, query Git CLI directly. Available on `xray_git_history`, `xray_git_authors`, `xray_git_activity` |
 | `includeDeleted` | boolean | — | If true, restrict `xray_git_activity` results to files that are NOT in the current HEAD (i.e. deleted files). The activity list itself is unchanged — only the post-filter differs. Implementation uses a single `git ls-files` spawn (HashSet lookup), so it scales O(1) per result regardless of repo size. Available on `xray_git_activity`. |
 
