@@ -239,7 +239,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "ext": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "File extensions to parse, e.g., [\"rs\",\"toml\"] (default: server's --ext)"
+                        "description": "File extensions to parse, e.g., [\"rs\",\"toml\"] (default: the server's definition-parser extensions)"
                     }
                 },
                 "required": []
@@ -2100,12 +2100,24 @@ fn build_or_load_content_index(
     Ok((reloaded, "rebuilt"))
 }
 
+fn effective_definition_build_extensions(ctx: &HandlerContext) -> Vec<String> {
+    if !ctx.def_extensions.is_empty() {
+        return ctx.def_extensions.clone();
+    }
+
+    crate::definitions::definition_extensions()
+        .first()
+        .map(|extension| vec![(*extension).to_string()])
+        .unwrap_or_else(|| vec!["cs".to_string()])
+}
+
+
 /// Cross-load definition index on workspace switch.
 /// Returns the action taken: "loaded_cache", "background_build", or None.
 fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'static str> {
     let def_arc = ctx.def_index.as_ref()?;
-    let def_ext_str = ctx.def_extensions.join(",");
-    let def_ext_vec: Vec<String> = ctx.def_extensions.clone();
+    let def_ext_vec = effective_definition_build_extensions(ctx);
+    let def_ext_str = def_ext_vec.join(",");
 
     // Try cache load
     let def_loaded = crate::definitions::load_definition_index(dir, &def_ext_str, &ctx.index_base).ok()
@@ -2670,7 +2682,7 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
     // 2026-04-25 list-params migration: `ext` is array<string>. Bridge into a
     // comma-joined String for downstream `build_definition_index`.
     let ext = match utils::read_string_array(args, "ext") {
-        Ok(v) if v.is_empty() => ctx.server_ext.clone(),
+        Ok(v) if v.is_empty() => effective_definition_build_extensions(ctx).join(","),
         Ok(v) => v.join(","),
         Err(e) => return ToolCallResult::error(e),
     };

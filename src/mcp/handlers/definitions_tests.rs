@@ -6233,6 +6233,59 @@ fn perf_hint_nearest_name_bounded_on_large_name_index() {
 
 #[test]
 #[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_incompatible_kind_filter_returns_empty() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    std::fs::write(root.join("service.xml"), "<Root><Item>value</Item></Root>").unwrap();
+
+    let context = HandlerContext {
+        index: Arc::new(RwLock::new(crate::ContentIndex {
+            root: root.to_string_lossy().into_owned(),
+            ..Default::default()
+        })),
+        def_index: Some(Arc::new(RwLock::new(make_test_def_index()))),
+        server_ext: "xml".to_string(),
+        workspace: Arc::new(RwLock::new(
+            WorkspaceBinding::pinned(root.to_string_lossy().into_owned()),
+        )),
+        ..Default::default()
+    };
+
+    let result = handle_xray_definitions(
+        &context,
+        &json!({
+            "file": ["service.xml"],
+            "name": ["Item"],
+            "kind": ["class"],
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["definitions"].as_array().unwrap().is_empty(), "{output}");
+    assert!(
+        output["summary"]["hint"]
+            .as_str()
+            .is_some_and(|hint| hint.contains("xmlElement")),
+        "{output}"
+    );
+
+    let compatible_result = handle_xray_definitions(
+        &context,
+        &json!({
+            "file": ["service.xml"],
+            "name": ["Item"],
+            "kind": ["xmlElement"],
+        }),
+    );
+    assert!(!compatible_result.is_error, "{}", compatible_result.content[0].text);
+    let compatible_output: Value = serde_json::from_str(&compatible_result.content[0].text).unwrap();
+    assert_eq!(compatible_output["definitions"].as_array().unwrap().len(), 1, "{compatible_output}");
+}
+
+
+
+#[test]
+#[cfg(feature = "lang-xml")]
 fn test_xml_on_demand_literal_brackets_in_filename_resolved() {
     // Regression guard for the glob-detection trade-off (see
     // xml_on_demand.rs glob-detection comment): `[` is a legal filename

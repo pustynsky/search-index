@@ -112,6 +112,25 @@ pub(crate) fn try_intercept(
             suggestion,
         )));
     }
+
+    if let Some(kind_filter) = &args.kind_filter {
+        let compatible = kind_filter
+            .split(',')
+            .map(str::trim)
+            .any(|kind| kind.eq_ignore_ascii_case("xmlElement"));
+        if !compatible {
+            return Some(ToolCallResult::success(json_to_string(&json!({
+                "definitions": [],
+                "summary": {
+                    "totalResults": 0,
+                    "xmlOnDemand": true,
+                    "hint": format!(
+                        "XML on-demand only produces `xmlElement` definitions; kind filter '{kind_filter}' excludes all results."
+                    ),
+                }
+            }))));
+        }
+    }
     let file_filter = &args.file_filter_raw[0];
     // Sole entry in a 1-element array: must be XML to reach here, since
     // `xml_indices` was non-empty and len == 1 implies index 0 is XML.
