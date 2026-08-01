@@ -1,6 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+#[cfg(test)]
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ignore::WalkBuilder;
@@ -595,7 +597,7 @@ pub(crate) struct ReindexStats {
     /// True iff def index lock was poisoned — caller should report a warning.
     pub def_lock_poisoned: bool,
     // Sub-timings for lock-contention diagnosis:
-    /// Residual time: tokenize + parse + filtering + read-lock purge IDs.
+    /// Residual time: tokenization, parsing, and filtering.
     pub tokenize_ms: f64,
     /// Time waiting to acquire content index write lock.
     pub content_lock_wait_ms: f64,
@@ -636,8 +638,8 @@ struct DefUpdateResult {
 /// `update_definition_index`): tokenize/parse OUTSIDE the lock, apply INSIDE.
 /// Write-lock window is < 1 ms per file.
 ///
-/// Idempotent — safe to call concurrently with the watcher (which may pick up
-/// the FS event later); double-update produces an identical index state.
+/// Concurrent duplicate updates are idempotent: purge IDs are resolved under
+/// the write lock, so a watcher replay cannot append a second posting set.
 #[cfg(test)]
 pub(crate) fn reindex_paths_sync(
     index: &Arc<RwLock<ContentIndex>>,
@@ -838,9 +840,8 @@ fn process_batch_scoped(
     //     in the next batch — draining ensures the pending sets are empty
     //     even on early return.
     //   * Applying an index update is the side-effect the watcher performs
-    //     "at most once" per debounced batch. A retry after partial apply
-    //     would double-index postings (we rely on the FS watcher, not the
-    //     pending set, to redeliver missed events).
+    //     "at most once" per debounced batch. After partial work, the FS
+    //     watcher/rescan is the authoritative retry source.
     //   * Path normalization (`clean_path`) happens once per path here
     //     instead of inside every hot loop in the `update_*` helpers.
 
@@ -873,15 +874,70 @@ fn process_batch_scoped(
     true
 }
 
+#[cfg(test)]
+struct ContentUpdateBeforeWriteHook {
+    path: PathBuf,
+    parties: usize,
+    arrived: Mutex<usize>,
+    ready: Condvar,
+}
+
+#[cfg(test)]
+impl ContentUpdateBeforeWriteHook {
+    fn new(path: &Path, parties: usize) -> Self {
+        Self {
+            path: content_path_key(path),
+            parties,
+            arrived: Mutex::new(0),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn wait(&self) {
+        let mut arrived = self.arrived.lock().unwrap();
+        *arrived += 1;
+        if *arrived >= self.parties {
+            self.ready.notify_all();
+            return;
+        }
+        let (arrived, timeout) = self.ready.wait_timeout_while(
+            arrived,
+            Duration::from_secs(5),
+            |arrived| *arrived < self.parties,
+        ).unwrap();
+        drop(arrived);
+        assert!(!timeout.timed_out(), "content update rendezvous timed out");
+    }
+}
+
+#[cfg(test)]
+static CONTENT_UPDATE_BEFORE_WRITE_HOOK: Mutex<Option<Arc<ContentUpdateBeforeWriteHook>>> =
+    Mutex::new(None);
+
+#[cfg(test)]
+fn set_content_update_before_write_hook(hook: Option<Arc<ContentUpdateBeforeWriteHook>>) {
+    *CONTENT_UPDATE_BEFORE_WRITE_HOOK.lock().unwrap() = hook;
+}
+
+#[cfg(test)]
+fn wait_at_content_update_before_write_hook(tokenized_paths: &HashSet<PathBuf>) {
+    let hook = CONTENT_UPDATE_BEFORE_WRITE_HOOK.lock().unwrap()
+        .as_ref()
+        .filter(|hook| tokenized_paths.contains(&hook.path))
+        .map(Arc::clone);
+    if let Some(hook) = hook {
+        hook.wait();
+    }
+}
+
 /// Update the content index: purge stale postings, remove deleted files,
 /// re-tokenize modified/new files, and shrink oversized collections.
 ///
 /// **Non-blocking:** Tokenizes all dirty files OUTSIDE the lock (Phase 1),
-/// determines purge IDs under a brief READ lock (Phase 2), then applies
-/// purge + insertions under WRITE lock (Phase 3).
-/// Write lock time: from `500ms + N × 5ms` → `500ms + N × 0.1ms`.
+/// then resolves current purge IDs and applies under WRITE lock (Phase 2).
+/// Steady-state write-lock work is proportional to affected postings and batch paths.
 ///
-/// Returns `false` if the RwLock is poisoned (prior panic), signaling the caller to stop.
+/// Returns `ok=false` if the RwLock is poisoned, signaling the caller to stop.
 fn update_content_index(
     index: &Arc<RwLock<ContentIndex>>,
     removed_clean: &[PathBuf],
@@ -889,81 +945,51 @@ fn update_content_index(
 ) -> ContentUpdateResult {
     // ── Phase 1: Tokenize all dirty files OUTSIDE the lock (~5ms × N) ──
     // During this phase, MCP requests work normally on the current index data.
+    let mut unique_dirty_paths = HashSet::new();
     let tokenized: Vec<TokenizedFileResult> = dirty_clean.iter()
+        .filter(|path| unique_dirty_paths.insert(content_path_key(path)))
         .filter_map(|path| tokenize_file_standalone(path))
+        .collect();
+    let tokenized_paths: HashSet<PathBuf> = tokenized.iter()
+        .map(|result| content_path_key(&result.path))
         .collect();
     // Only successfully tokenized dirty files are safe to purge. If a dirty
     // file becomes temporarily unreadable between the fs event and tokenization,
     // dropping its old postings would make search lose a still-known file and
     // break total_tokens == sum(file_token_counts). The watcher/rescan can retry
     // on a later event; until then the old index entry is safer than deletion.
-    let removed_keys: Vec<PathBuf> = removed_clean.iter()
+    let removed_keys: HashSet<PathBuf> = removed_clean.iter()
         .map(|path| content_path_key(path))
-        .collect();
-    let tokenized_paths: HashSet<PathBuf> = tokenized.iter()
-        .map(|result| content_path_key(&result.path))
         .collect();
     // This drives sync-reindex response booleans and autosave scheduling. It is
     // deliberately the number of dirty files actually tokenized, not the number
     // of dirty paths requested.
     let applied_dirty_count = tokenized.len();
 
-    // ── Phase 2: Determine purge IDs (READ LOCK — instant when path lookup exists) ──
-    let mut path_lookup_missing = false;
-    let mut purge_ids: HashSet<u32> = match index.read() {
-        Ok(idx) => {
-            let mut ids = HashSet::new();
-            if let Some(ref p2id) = idx.path_to_id {
-                for path_key in &removed_keys {
-                    if let Some(fid) = content_file_id(p2id, path_key) {
-                        ids.insert(fid);
-                    }
-                }
-                // Dirty paths that failed tokenization are deliberately absent
-                // here; see `tokenized_paths` above for the stale-but-consistent
-                // fallback contract.
-                for path in &tokenized_paths {
-                    if let Some(fid) = content_file_id(p2id, path) {
-                        ids.insert(fid);
-                    }
-                }
-            } else {
-                path_lookup_missing = true;
-            }
-            ids
-        }
-        Err(e) => {
-            error!(error = %e, "Failed to acquire content index read lock (poisoned)");
-            return ContentUpdateResult {
-                ok: false,
-                lock_wait_ms: 0.0,
-                update_ms: 0.0,
-                applied_dirty: 0,
-                applied_changes: false,
-            };
-        }
-    };
-    // READ lock released here
+    #[cfg(test)]
+    wait_at_content_update_before_write_hook(&tokenized_paths);
 
-    // ── Phase 3: Apply under WRITE LOCK (targeted purge + ~0.1ms × N insert) ──
+    // ── Phase 2: Apply under WRITE LOCK (targeted purge + ~0.1ms × N insert) ──
     let write_wait_start = std::time::Instant::now();
     match index.write() {
         Ok(mut idx) => {
             let lock_wait_ms = write_wait_start.elapsed().as_secs_f64() * 1000.0;
             let update_start = std::time::Instant::now();
             let idx = &mut *idx;
-            if path_lookup_missing {
+            if idx.path_to_id.is_none() {
                 ensure_path_to_id(idx);
-                if let Some(ref p2id) = idx.path_to_id {
-                    for path_key in &removed_keys {
-                        if let Some(fid) = content_file_id(p2id, path_key) {
-                            purge_ids.insert(fid);
-                        }
+            }
+            // Re-resolve IDs after waiting: a concurrent update may have inserted the path.
+            let mut purge_ids = HashSet::new();
+            if let Some(ref p2id) = idx.path_to_id {
+                for path_key in &removed_keys {
+                    if let Some(fid) = content_file_id(p2id, path_key) {
+                        purge_ids.insert(fid);
                     }
-                    for path in &tokenized_paths {
-                        if let Some(fid) = content_file_id(p2id, path) {
-                            purge_ids.insert(fid);
-                        }
+                }
+                for path in &tokenized_paths {
+                    if let Some(fid) = content_file_id(p2id, path) {
+                        purge_ids.insert(fid);
                     }
                 }
             }
@@ -1011,9 +1037,9 @@ fn update_content_index(
             // a live file (see ContentIndex::live_file_count) but file_id
             // assignments remain stable.
             for path_key in &removed_keys {
-                let entry = idx.path_to_id.as_ref()
-                    .and_then(|p2id| content_path_entry(p2id, path_key));
-                if let Some((stored_key, fid)) = entry {
+                let file_id = idx.path_to_id.as_ref()
+                    .and_then(|p2id| content_file_id(p2id, path_key));
+                if let Some(fid) = file_id {
                     if (fid as usize) < idx.file_token_counts.len() {
                         idx.file_token_counts[fid as usize] = 0;
                     }
@@ -1021,7 +1047,7 @@ fn update_content_index(
                         idx.files[fid as usize].clear();
                     }
                     if let Some(ref mut p2id) = idx.path_to_id {
-                        p2id.remove(&stored_key);
+                        p2id.remove(path_key);
                     }
                 }
             }
@@ -1091,7 +1117,7 @@ fn update_content_index(
 /// then applies results + removals under a brief write lock (Phase 2).
 /// Write lock time: from `N × 30ms` → `N × 0.1ms`.
 ///
-/// Returns `false` if the RwLock is poisoned (prior panic), signaling the caller to stop.
+/// Returns `ok=false` if the RwLock is poisoned, signaling the caller to stop.
 fn update_definition_index(
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
     removed_clean: &[PathBuf],
@@ -1224,11 +1250,7 @@ fn apply_tokenized_file(
     // unstable file_ids.
     let path_key = content_path_key(&result.path);
     let file_id = if let Some(ref mut p2id) = index.path_to_id {
-        if let Some((stored_key, fid)) = content_path_entry(p2id, &result.path) {
-            if stored_key != path_key {
-                p2id.remove(&stored_key);
-                p2id.insert(path_key.clone(), fid);
-            }
+        if let Some(fid) = content_file_id(p2id, &result.path) {
             fid  // existing file (already purged via batch_purge)
         } else {
             // new file — assign new file_id
@@ -1530,24 +1552,8 @@ fn content_path_key(path: &Path) -> PathBuf {
     crate::path_identity_key(path)
 }
 
-fn content_path_entry(
-    path_to_id: &HashMap<PathBuf, u32>,
-    path: &Path,
-) -> Option<(PathBuf, u32)> {
-    let path_key = content_path_key(path);
-    path_to_id.get(&path_key)
-        .copied()
-        .map(|file_id| (path_key.clone(), file_id))
-        .or_else(|| {
-            path_to_id.iter().find_map(|(candidate, &file_id)| {
-                (content_path_key(candidate) == path_key)
-                    .then(|| (candidate.clone(), file_id))
-            })
-        })
-}
-
 fn content_file_id(path_to_id: &HashMap<PathBuf, u32>, path: &Path) -> Option<u32> {
-    content_path_entry(path_to_id, path).map(|(_, file_id)| file_id)
+    path_to_id.get(&content_path_key(path)).copied()
 }
 
 fn content_files_by_key(
@@ -1686,11 +1692,7 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
     };
 
     if let Some(ref mut path_to_id) = index.path_to_id {
-        if let Some((stored_key, file_id)) = content_path_entry(path_to_id, path) {
-            if stored_key != path_key {
-                path_to_id.remove(&stored_key);
-                path_to_id.insert(path_key.clone(), file_id);
-            }
+        if let Some(file_id) = content_file_id(path_to_id, path) {
             // EXISTING FILE — remove old tokens, add new ones
             // Subtract old token count from total before re-tokenizing
             let old_count = if (file_id as usize) < index.file_token_counts.len() {
@@ -1871,8 +1873,9 @@ fn purge_file_from_inverted_index(
 /// Used by tests. Production code uses batch_purge-based removal.
 #[cfg(test)]
 fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
+    let path_key = content_path_key(path);
     if let Some(ref mut path_to_id) = index.path_to_id
-        && let Some((stored_key, file_id)) = content_path_entry(path_to_id, path) {
+        && let Some(file_id) = content_file_id(path_to_id, &path_key) {
             // Subtract this file's token count from total
             let old_count = if (file_id as usize) < index.file_token_counts.len() {
                 index.file_token_counts[file_id as usize] as u64
@@ -1888,7 +1891,7 @@ fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
             // Remove all postings for this file from inverted index (brute-force scan)
             purge_file_from_inverted_index(&mut index.index, file_id);
 
-            path_to_id.remove(&stored_key);
+            path_to_id.remove(&path_key);
             // Don't remove from files vec to preserve file_id stability
         }
 }

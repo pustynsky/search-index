@@ -3,6 +3,8 @@
 
 ## 0.5.1 (Unreleased)
 
+- **Made synchronous edit reindexing idempotent with watcher updates.** Content updates now deduplicate path identities and resolve purge targets under the write lock, preventing concurrent new-file indexing from appending duplicate postings. Persisted pre-normalization path maps are upgraded on load without requiring an index rebuild.
+
 - **Clarified Git history totals and excluded repository metadata from definition indexes.** `xray_git_history` now reports `totalCommitsExact` and `hasMoreCommits` so bounded CLI lower bounds are distinguishable from exact counts; full and incremental definition walks skip exact `.git` path components while preserving similarly named paths such as `.github`.
 
 - **Corrected XML kind filtering and definition reindex defaults.** XML on-demand returns an empty result when `kind` excludes `xmlElement`, and omitted `ext` on `xray_reindex_definitions` now uses the server's definition extensions rather than every content extension.

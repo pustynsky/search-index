@@ -862,6 +862,22 @@ pub struct ContentIndexHead {
 }
 
 impl ContentIndex {
+    /// Normalizes keys persisted before path identity was unified. Collisions
+    /// defer to mutation-time rebuild, which can also purge duplicate file IDs.
+    #[doc(hidden)]
+    pub fn normalize_loaded_path_to_id(&mut self) {
+        let Some(path_to_id) = self.path_to_id.take() else {
+            return;
+        };
+        let mut normalized = HashMap::with_capacity(path_to_id.len());
+        for (path, file_id) in path_to_id {
+            if normalized.insert(path_identity_key(&path), file_id).is_some() {
+                return;
+            }
+        }
+        self.path_to_id = Some(normalized);
+    }
+
     /// Build a `ContentIndexHead` snapshot from this index. The head clones
     /// the small/medium metadata fields (root, files, trigram, etc.) but does
     /// NOT touch the heavy `index: HashMap<String, Vec<Posting>>` — callers

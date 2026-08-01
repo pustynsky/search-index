@@ -753,6 +753,99 @@ fn test_total_tokens_consistency_after_multiple_ops() {
         index.total_tokens, sum);
 }
 
+#[cfg(windows)]
+#[test]
+fn test_loaded_legacy_path_map_reindexes_without_duplicate_postings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let file = root.join("LegacyCase.cs");
+    std::fs::write(&file, "LegacyOldUnique\n").unwrap();
+    let clean_file = crate::clean_path(&file.to_string_lossy());
+    let legacy_key = PathBuf::from(clean_file.to_ascii_uppercase());
+    let legacy_index = ContentIndex {
+        root: crate::clean_path(&root.to_string_lossy()),
+        format_version: code_xray::CONTENT_INDEX_VERSION,
+        files: vec![clean_file],
+        index: HashMap::from([(
+            "legacyoldunique".to_string(),
+            vec![Posting { file_id: 0, lines: vec![1] }],
+        )]),
+        total_tokens: 1,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![1],
+        path_to_id: Some(HashMap::from([(legacy_key, 0)])),
+        ..Default::default()
+    };
+    crate::save_content_index(&legacy_index, tmp.path()).unwrap();
+    let loaded = crate::load_content_index(&legacy_index.root, "cs", tmp.path()).unwrap();
+    assert_eq!(
+        loaded.path_to_id.as_ref().unwrap().get(&crate::path_identity_key(&file)),
+        Some(&0),
+    );
+
+    std::fs::write(&file, "LegacyNewUnique\n").unwrap();
+    let index = Arc::new(RwLock::new(loaded));
+    assert!(update_content_index(&index, &[], std::slice::from_ref(&file)).ok);
+
+    let index = index.read().unwrap();
+    assert_eq!(index.files.len(), 1);
+    assert_eq!(index.path_to_id.as_ref().unwrap().len(), 1);
+    assert!(!index.index.contains_key("legacyoldunique"));
+    assert_eq!(index.index["legacynewunique"].len(), 1);
+    assert_eq!(
+        index.total_tokens,
+        index.file_token_counts.iter().map(|&count| count as u64).sum::<u64>(),
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn test_loaded_colliding_legacy_path_map_rebuilds_one_live_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let file = root.join("LegacyCollision.cs");
+    std::fs::write(&file, "LegacyCollisionOld\n").unwrap();
+    let clean_file = crate::clean_path(&file.to_string_lossy());
+    let upper_file = clean_file.to_ascii_uppercase();
+    let legacy_index = ContentIndex {
+        root: crate::clean_path(&root.to_string_lossy()),
+        format_version: code_xray::CONTENT_INDEX_VERSION,
+        files: vec![upper_file.clone(), clean_file.clone()],
+        index: HashMap::from([(
+            "legacycollisionold".to_string(),
+            vec![
+                Posting { file_id: 0, lines: vec![1] },
+                Posting { file_id: 1, lines: vec![1] },
+            ],
+        )]),
+        total_tokens: 2,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![1, 1],
+        path_to_id: Some(HashMap::from([
+            (PathBuf::from(upper_file), 0),
+            (PathBuf::from(clean_file), 1),
+        ])),
+        ..Default::default()
+    };
+    crate::save_content_index(&legacy_index, tmp.path()).unwrap();
+    let loaded = crate::load_content_index(&legacy_index.root, "cs", tmp.path()).unwrap();
+    assert!(loaded.path_to_id.is_none(), "colliding legacy keys must defer to rebuild");
+
+    std::fs::write(&file, "LegacyCollisionNew\n").unwrap();
+    let index = Arc::new(RwLock::new(loaded));
+    assert!(update_content_index(&index, &[], std::slice::from_ref(&file)).ok);
+
+    let index = index.read().unwrap();
+    assert_eq!(index.path_to_id.as_ref().unwrap().len(), 1);
+    assert!(index.files[0].is_empty());
+    assert!(!index.index.contains_key("legacycollisionold"));
+    assert_eq!(index.index["legacycollisionnew"].len(), 1);
+    assert_eq!(
+        index.total_tokens,
+        index.file_token_counts.iter().map(|&count| count as u64).sum::<u64>(),
+    );
+}
+
 #[test]
 fn test_watch_index_survives_save_load_roundtrip() {
     // Verify that a ContentIndex with path_to_id (watch-mode field)
@@ -2486,6 +2579,61 @@ fn test_sync_reindex_skips_git_dir() {
 
     assert_eq!(stats.content_updated, 0, ".git/* must NOT be content-indexed");
     assert_eq!(stats.skipped_filtered, 1, "file inside .git/ → 1 skipped");
+}
+
+#[test]
+fn test_concurrent_new_file_updates_do_not_duplicate_postings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = crate::canonicalize_test_root(tmp.path()).join("concurrent.cs");
+    std::fs::write(&file, "ConcurrentMarkerUnique\n").unwrap();
+    let index = Arc::new(RwLock::new(build_watch_index_from(ContentIndex {
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    })));
+    let hook = Arc::new(ContentUpdateBeforeWriteHook::new(&file, 2));
+    set_content_update_before_write_hook(Some(hook));
+
+    let first_index = Arc::clone(&index);
+    let first_file = file.clone();
+    let first = std::thread::spawn(move || {
+        update_content_index(&first_index, &[], std::slice::from_ref(&first_file))
+    });
+    let second_index = Arc::clone(&index);
+    let second_file = file.clone();
+    let second = std::thread::spawn(move || {
+        update_content_index(&second_index, &[], std::slice::from_ref(&second_file))
+    });
+
+    assert!(first.join().unwrap().ok);
+    assert!(second.join().unwrap().ok);
+    set_content_update_before_write_hook(None);
+
+    let idx = index.read().unwrap();
+    let postings = idx.index.get("concurrentmarkerunique").unwrap();
+    assert_eq!(postings.len(), 1, "concurrent new-file updates must leave one posting");
+    let counted_tokens: u64 = idx.file_token_counts.iter().map(|&count| count as u64).sum();
+    assert_eq!(idx.total_tokens, counted_tokens, "concurrent updates must preserve token counts");
+}
+
+#[test]
+fn test_duplicate_dirty_paths_are_indexed_once() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = crate::canonicalize_test_root(tmp.path()).join("duplicate.cs");
+    std::fs::write(&file, "DuplicateMarkerUnique\n").unwrap();
+    let index = Arc::new(RwLock::new(ContentIndex {
+        extensions: vec!["cs".to_string()],
+        path_to_id: Some(HashMap::new()),
+        ..Default::default()
+    }));
+
+    let result = update_content_index(&index, &[], &[file.clone(), file]);
+
+    assert!(result.ok);
+    assert_eq!(result.applied_dirty, 1);
+    let idx = index.read().unwrap();
+    assert_eq!(idx.index.get("duplicatemarkerunique").unwrap().len(), 1);
+    let counted_tokens: u64 = idx.file_token_counts.iter().map(|&count| count as u64).sum();
+    assert_eq!(idx.total_tokens, counted_tokens);
 }
 
 #[test]
