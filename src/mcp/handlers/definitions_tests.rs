@@ -1293,6 +1293,246 @@ fn make_test_def_index() -> DefinitionIndex {
     }
 }
 
+#[test]
+fn test_definitions_rejects_pagination_for_non_page_modes() {
+    let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+    for args in [
+        json!({ "audit": true, "offset": 1 }),
+        json!({ "file": ["QueryService.cs"], "containsLine": 10, "offset": 1 }),
+    ] {
+        let result = handle_xray_definitions(&ctx, &args);
+        assert!(result.is_error, "{}", result.content[0].text);
+        assert!(result.content[0].text.contains("not supported"));
+    }
+}
+
+#[cfg(feature = "lang-xml")]
+#[test]
+fn test_definitions_pages_xml_on_demand_name_results() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    std::fs::write(
+        root.join("app.config"),
+        "<configuration><item/><item/><item/></configuration>\n",
+    ).unwrap();
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(
+            root.to_string_lossy().to_string(),
+        ))),
+        def_index: Some(Arc::new(RwLock::new(DefinitionIndex::default()))),
+        ..Default::default()
+    };
+    let full_result = handle_xray_definitions(&ctx, &json!({
+        "file": ["app.config"],
+        "name": ["item"],
+        "maxResults": 100,
+    }));
+    assert!(!full_result.is_error, "{}", full_result.content[0].text);
+    let full: Value = serde_json::from_str(&full_result.content[0].text).unwrap();
+    let full_definitions = full["definitions"].as_array().unwrap();
+    assert_eq!(full_definitions.len(), 3, "{full:#}");
+
+    let page_result = handle_xray_definitions(&ctx, &json!({
+        "file": ["app.config"],
+        "name": ["item"],
+        "offset": 1,
+        "maxResults": 1,
+    }));
+    assert!(!page_result.is_error, "{}", page_result.content[0].text);
+    let page: Value = serde_json::from_str(&page_result.content[0].text).unwrap();
+    assert_eq!(page["definitions"].as_array().unwrap(), &full_definitions[1..2]);
+    assert_eq!(page["resultStatus"]["page"]["offset"], 1);
+    assert_eq!(page["resultStatus"]["page"]["total"], 3);
+    assert_eq!(page["resultStatus"]["page"]["nextOffset"], 2);
+    assert!(page["resultStatus"]["page"]["continuationToken"].as_str().is_some());
+
+    let exhausted_result = handle_xray_definitions(&ctx, &json!({
+        "file": ["app.config"],
+        "name": ["item"],
+        "offset": 99,
+        "maxResults": 1,
+    }));
+    assert!(!exhausted_result.is_error, "{}", exhausted_result.content[0].text);
+    let exhausted: Value = serde_json::from_str(&exhausted_result.content[0].text).unwrap();
+    assert!(exhausted["resultStatus"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "offset_out_of_range"));
+}
+
+
+#[test]
+fn test_definitions_offset_returns_sorted_second_page() {
+    let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+    let full_result = handle_xray_definitions(&ctx, &json!({
+        "file": ["QueryService.cs"],
+        "name": ["Query"],
+        "kind": ["method"],
+        "maxResults": 100,
+    }));
+    assert!(!full_result.is_error, "{}", full_result.content[0].text);
+    let full: Value = serde_json::from_str(&full_result.content[0].text).unwrap();
+    let full_definitions = full["definitions"].as_array().unwrap();
+    assert!(full_definitions.len() >= 3, "fixture needs at least three methods");
+
+    let page_result = handle_xray_definitions(&ctx, &json!({
+        "file": ["QueryService.cs"],
+        "name": ["Query"],
+        "kind": ["method"],
+        "offset": 1,
+        "maxResults": 2,
+    }));
+    assert!(!page_result.is_error, "{}", page_result.content[0].text);
+    let page: Value = serde_json::from_str(&page_result.content[0].text).unwrap();
+    assert_eq!(page["definitions"].as_array().unwrap(), &full_definitions[1..3]);
+    assert_eq!(page["resultStatus"]["page"]["unit"], "definitions");
+    assert_eq!(page["resultStatus"]["page"]["offset"], 1);
+    assert_eq!(page["resultStatus"]["page"]["returned"], 2);
+    assert_eq!(page["resultStatus"]["page"]["total"], full_definitions.len());
+    assert!(page["resultStatus"]["page"].get("nextOffset").is_none());
+    assert!(page["resultStatus"]["page"].get("continuationToken").is_none());
+}
+
+#[test]
+fn test_definitions_attribute_filter_uses_same_pagination_contract() {
+    let mut index = make_test_def_index();
+    for definition in &mut index.definitions {
+        definition.attributes.push("paged".to_string());
+    }
+    index.attribute_index.insert("paged".to_string(), vec![0, 1, 2, 3]);
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(crate::ContentIndex::default())),
+        def_index: Some(Arc::new(RwLock::new(index))),
+        ..Default::default()
+    };
+
+    let full_result = handle_xray_definitions(&ctx, &json!({
+        "name": ["Service", "Get"],
+        "attribute": "paged",
+        "maxResults": 100,
+    }));
+    assert!(!full_result.is_error, "{}", full_result.content[0].text);
+    let full: Value = serde_json::from_str(&full_result.content[0].text).unwrap();
+    let full_definitions = full["definitions"].as_array().unwrap();
+    assert_eq!(full_definitions.len(), 4);
+
+    let page_result = handle_xray_definitions(&ctx, &json!({
+        "name": ["Service", "Get"],
+        "attribute": "paged",
+        "offset": 2,
+        "maxResults": 1,
+    }));
+    assert!(!page_result.is_error, "{}", page_result.content[0].text);
+    let page: Value = serde_json::from_str(&page_result.content[0].text).unwrap();
+    assert_eq!(page["definitions"].as_array().unwrap(), &full_definitions[2..3]);
+    assert_eq!(page["resultStatus"]["page"]["offset"], 2);
+    assert_eq!(page["resultStatus"]["page"]["nextOffset"], 3);
+    let token = page["resultStatus"]["page"]["continuationToken"]
+        .as_str()
+        .unwrap();
+    assert_eq!(page["resultStatus"]["total"]["definitions"], 4);
+
+    let continued_result = handle_xray_definitions(&ctx, &json!({
+        "name": ["Service", "Get"],
+        "attribute": "paged",
+        "maxResults": 1,
+        "continuationToken": token,
+    }));
+    assert!(!continued_result.is_error, "{}", continued_result.content[0].text);
+    let continued: Value = serde_json::from_str(&continued_result.content[0].text).unwrap();
+    assert_eq!(continued["definitions"].as_array().unwrap(), &full_definitions[3..4]);
+    assert_eq!(continued["resultStatus"]["page"]["offset"], 3);
+}
+
+#[test]
+fn test_attribute_results_byte_cap_returns_recoverable_page() {
+    let definitions: Vec<DefinitionEntry> = (0..40)
+        .map(|index| DefinitionEntry {
+            name: format!("PagedService{index:02}"),
+            kind: DefinitionKind::Class,
+            file_id: 0,
+            line_start: index + 1,
+            line_end: index + 1,
+            signature: Some(format!("public sealed class PagedService{index:02}")),
+            parent: None,
+            modifiers: vec!["public".to_string()],
+            attributes: vec!["paged".to_string()],
+            base_types: vec![],
+        })
+        .collect();
+    let mut name_index = HashMap::new();
+    let mut kind_index = HashMap::new();
+    let mut file_index = HashMap::new();
+    for (index, definition) in definitions.iter().enumerate() {
+        let definition_index = index as u32;
+        name_index
+            .entry(definition.name.to_lowercase())
+            .or_insert_with(Vec::new)
+            .push(definition_index);
+        kind_index
+            .entry(definition.kind)
+            .or_insert_with(Vec::new)
+            .push(definition_index);
+        file_index
+            .entry(definition.file_id)
+            .or_insert_with(Vec::new)
+            .push(definition_index);
+    }
+    let definition_index = DefinitionIndex {
+        root: ".".to_string(),
+        files: vec!["src/PagedServices.cs".to_string()],
+        definitions,
+        name_index,
+        kind_index,
+        attribute_index: HashMap::from([(
+            "paged".to_string(),
+            (0..40).collect(),
+        )]),
+        file_index,
+        ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(crate::ContentIndex::default())),
+        def_index: Some(Arc::new(RwLock::new(definition_index))),
+        max_response_bytes: 5_000,
+        ..Default::default()
+    };
+    ctx.def_ready.store(true, std::sync::atomic::Ordering::Release);
+
+    let args = json!({
+        "name": ["PagedService"],
+        "attribute": "paged",
+        "maxResults": 40,
+    });
+    let first_result = super::super::dispatch_tool(&ctx, "xray_definitions", &args);
+    assert!(!first_result.is_error, "{}", first_result.content[0].text);
+    assert!(first_result.content[0].text.len() <= 5_000);
+    let first: Value = serde_json::from_str(&first_result.content[0].text).unwrap();
+    let first_definitions = first["definitions"].as_array().unwrap();
+    assert!(!first_definitions.is_empty() && first_definitions.len() < 40, "{first:#}");
+    assert_eq!(first["resultStatus"]["page"]["returned"], first_definitions.len());
+    assert_eq!(first["resultStatus"]["page"]["nextOffset"], first_definitions.len());
+    let token = first["resultStatus"]["page"]["continuationToken"]
+        .as_str()
+        .unwrap();
+
+    let second_result = super::super::dispatch_tool(&ctx, "xray_definitions", &json!({
+        "name": ["PagedService"],
+        "attribute": "paged",
+        "maxResults": 40,
+        "continuationToken": token,
+    }));
+    assert!(!second_result.is_error, "{}", second_result.content[0].text);
+    assert!(second_result.content[0].text.len() <= 5_000);
+    let second: Value = serde_json::from_str(&second_result.content[0].text).unwrap();
+    assert_eq!(second["resultStatus"]["page"]["offset"], first_definitions.len());
+    assert_ne!(
+        first_definitions[0]["name"],
+        second["definitions"][0]["name"],
+    );
+}
+
 /// Test fixture tuple: (component class name, selector, selectors used in its template).
 fn make_angular_definitions_ctx(entries: Vec<(&str, &str, Vec<&str>)>) -> HandlerContext {
     let definitions: Vec<DefinitionEntry> = entries
@@ -3022,12 +3262,17 @@ fn test_exact_name_only_does_not_substring_match() {
 
 #[test]
 fn test_exact_semantics_false_for_fuzzy_file_and_parent_filters() {
+    let page_request = parse_page_request(
+        &HandlerContext::default(),
+        "xray_definitions",
+        &json!({}),
+    ).unwrap();
     let exact_args = parse_definition_args(&json!({
         "name": ["GetUser"],
         "exactNameOnly": true,
         "includeBody": true
     })).unwrap();
-    let exact_status = build_definitions_result_status(&exact_args, 1, 1, 10, 10);
+    let exact_status = build_definitions_result_status(&exact_args, &page_request, 1, 1, 10, 10);
     assert_eq!(exact_status["safeForExactSemantics"], true);
 
     let file_args = parse_definition_args(&json!({
@@ -3036,7 +3281,7 @@ fn test_exact_semantics_false_for_fuzzy_file_and_parent_filters() {
         "file": ["Service"],
         "includeBody": true
     })).unwrap();
-    let file_status = build_definitions_result_status(&file_args, 1, 1, 10, 10);
+    let file_status = build_definitions_result_status(&file_args, &page_request, 1, 1, 10, 10);
     assert_eq!(file_status["safeForExactSemantics"], false);
 
     let parent_args = parse_definition_args(&json!({
@@ -3045,7 +3290,7 @@ fn test_exact_semantics_false_for_fuzzy_file_and_parent_filters() {
         "parent": ["User"],
         "includeBody": true
     })).unwrap();
-    let parent_status = build_definitions_result_status(&parent_args, 1, 1, 10, 10);
+    let parent_status = build_definitions_result_status(&parent_args, &page_request, 1, 1, 10, 10);
     assert_eq!(parent_status["safeForExactSemantics"], false);
 }
 

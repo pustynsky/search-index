@@ -139,6 +139,7 @@ pub fn cmd_serve(args: ServeArgs) {
     let file_index_dirty = Arc::new(AtomicBool::new(true));
     let content_building = Arc::new(AtomicBool::new(false));
     let def_building = Arc::new(AtomicBool::new(false));
+    let index_epoch = Arc::new(AtomicU64::new(1));
 
     let primary_build_lock = acquire_or_wait_primary_build_lock(&dir_str, &idx_base, is_unresolved);
 
@@ -191,7 +192,7 @@ pub fn cmd_serve(args: ServeArgs) {
     let (index, effective_respect_content) = load_or_build_content_index(
         &dir_str, &exts_for_load, &extensions, &idx_base,
         is_unresolved, args.watch, args.respect_git_exclude,
-        &content_ready, &content_build_terminal, &content_building,
+        &content_ready, &content_build_terminal, &content_building, &index_epoch,
         content_thread_budget,
         &trigram_build_gate,
     );
@@ -279,6 +280,7 @@ pub fn cmd_serve(args: ServeArgs) {
             Arc::clone(&file_index_dirty),
             Arc::clone(&watcher_generation),
             0, // initial generation
+            Arc::clone(&index_epoch),
             Arc::clone(&watcher_stats),
             effective_respect_git_exclude,
             Arc::clone(&autosave_dirty),
@@ -303,6 +305,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 args.rescan_interval_sec,
                 Arc::clone(&watcher_generation),
                 0,
+                Arc::clone(&index_epoch),
                 Arc::clone(&watcher_stats),
                 effective_respect_git_exclude,
                 Arc::clone(&autosave_dirty),
@@ -359,6 +362,7 @@ pub fn cmd_serve(args: ServeArgs) {
         file_index_dirty: Arc::clone(&file_index_dirty),
         content_building,
         def_building,
+        index_epoch,
         watcher_generation,
         watch_enabled: args.watch,
         watch_debounce_ms: args.debounce_ms,
@@ -1056,6 +1060,7 @@ fn load_or_build_content_index(
     content_ready: &Arc<AtomicBool>,
     content_build_terminal: &Arc<AtomicBool>,
     content_building: &Arc<AtomicBool>,
+    index_epoch: &Arc<AtomicU64>,
     build_threads: usize,
     trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
 ) -> (Arc<RwLock<ContentIndex>>, bool) {
@@ -1155,6 +1160,7 @@ fn load_or_build_content_index(
         let shrink_elapsed = shrink_start.elapsed();
         let publish_start = Instant::now();
         *index.write().unwrap_or_else(|e| e.into_inner()) = idx;
+        crate::mcp::handlers::utils::record_content_index_publish(index_epoch);
         let publish_elapsed = publish_start.elapsed();
         // ── Trigram warm-up: phase-1 SYNCHRONOUS on this thread. ──
         // `start_warm_trigram_index` snapshots tokens + clears `trigram_dirty`
@@ -1199,6 +1205,7 @@ fn load_or_build_content_index(
         ]);
         // Build in background — don't block the event loop
         let bg_index = Arc::clone(&index);
+        let bg_index_epoch = Arc::clone(index_epoch);
         let bg_ready = Arc::clone(content_ready);
         let bg_terminal = Arc::clone(content_build_terminal);
         let bg_building = Arc::clone(content_building);
@@ -1306,6 +1313,7 @@ fn load_or_build_content_index(
                 "Content index ready (background build complete)"
             );
             *bg_index.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
+            crate::mcp::handlers::utils::record_content_index_publish(&bg_index_epoch);
             // See cache-load path above for rationale.
             if watch {
                 mcp::watcher::schedule_rebuild_file_tokens(Arc::clone(&bg_index));
@@ -2432,6 +2440,7 @@ mod serve_respect_git_exclude_tests {
             &content_ready,
             &content_build_terminal,
             &content_building,
+            &Arc::new(AtomicU64::new(1)),
             1,     // build_threads (unused — cache hit path)
             &trigram_build_gate,
         );
@@ -2538,6 +2547,7 @@ mod serve_respect_git_exclude_tests {
             &content_ready,
             &content_build_terminal,
             &content_building,
+            &Arc::new(AtomicU64::new(1)),
             1,     // build_threads
             &trigram_build_gate,
         );
@@ -2589,6 +2599,7 @@ mod serve_respect_git_exclude_tests {
         let content_ready = Arc::new(AtomicBool::new(false));
         let content_build_terminal = Arc::new(AtomicBool::new(false));
         let content_building = Arc::new(AtomicBool::new(false));
+        let index_epoch = Arc::new(AtomicU64::new(1));
         let trigram_build_gate = Arc::new(crate::mcp::handlers::utils::TrigramRebuildGate::new());
 
         let (index, _effective) = load_or_build_content_index(
@@ -2602,6 +2613,7 @@ mod serve_respect_git_exclude_tests {
             &content_ready,
             &content_build_terminal,
             &content_building,
+            &index_epoch,
             1,     // build_threads
             &trigram_build_gate,
         );
@@ -2616,6 +2628,10 @@ mod serve_respect_git_exclude_tests {
         assert!(
             content_build_terminal.load(Ordering::Acquire),
             "background build did not signal content_build_terminal within timeout"
+        );
+        assert!(
+            index_epoch.load(Ordering::Acquire) > 1,
+            "background content publication must invalidate continuation tokens"
         );
 
         // Verify the in-memory content index has fresh tokens despite save failure.

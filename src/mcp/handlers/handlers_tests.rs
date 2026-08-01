@@ -94,6 +94,7 @@ fn test_handler_context_field_count_guard() {
         file_index_dirty: Arc::new(AtomicBool::new(true)),
         content_building: Arc::new(AtomicBool::new(false)),
         def_building: Arc::new(AtomicBool::new(false)),
+        index_epoch: Arc::new(AtomicU64::new(1)),
         watcher_generation: Arc::new(AtomicU64::new(0)),
         watch_enabled: false,
         watch_debounce_ms: 500,

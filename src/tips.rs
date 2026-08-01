@@ -838,6 +838,23 @@ pub const KNOWN_TOOL_NAMES: &[&str] = &[
 ///
 /// Returns `Err` with the list of known tool names when `tool_name` is not
 /// recognised, so the caller can self-correct in one round-trip.
+fn pagination_workflow() -> Value {
+    json!({
+        "appliesTo": ["xray_definitions", "xray_callers"],
+        "steps": [
+            "Send the first request with the desired query arguments and maxResults.",
+            "If resultStatus.page.continuationToken is present, repeat the same tool call with every non-pagination argument unchanged and add that continuationToken.",
+            "Stop when resultStatus.page.continuationToken is absent."
+        ],
+        "rules": [
+            "Do not send offset together with continuationToken.",
+            "Use offset only for a manual starting position; prefer continuationToken for subsequent pages.",
+            "If the token is stale, the index changed; restart from the first page."
+        ]
+    })
+}
+
+
 pub fn tool_help(tool_name: &str, def_extensions: &[String]) -> Result<Value, String> {
     if !KNOWN_TOOL_NAMES.contains(&tool_name) {
         return Err(format!(
@@ -860,6 +877,10 @@ pub fn tool_help(tool_name: &str, def_extensions: &[String]) -> Result<Value, St
     // xray_edit is the only tool with two valid mode shapes — surface both
     // canonical examples up front so the caller does not need to reconstruct
     // them from the parameter description.
+    if matches!(tool_name, "xray_definitions" | "xray_callers") {
+        payload["paginationWorkflow"] = pagination_workflow();
+    }
+
     if tool_name == "xray_edit" {
         payload["canonicalExamples"] = json!({
             "modeA_lineRange": CANONICAL_MODE_A_EXAMPLE,
@@ -919,6 +940,7 @@ pub fn render_json(def_extensions: &[String]) -> Value {
         "performanceTiers": tiers,
         "toolPriority": priority,
         "parameterExamples": parameter_examples(def_extensions),
+        "paginationWorkflow": pagination_workflow(),
     })
 }
 

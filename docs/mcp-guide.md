@@ -438,6 +438,9 @@ Legacy `method + class` discovery remains supported. When it matches multiple C#
 | `direction`          | `"up"` = find callers (default), `"down"` = find callees                                                                                            |
 | `depth`              | Max recursion depth (default: 3, max: 10)                                                                                                           |
 | `maxCallersPerLevel` | Max caller/callee nodes emitted per tree level (default: 10). Prevents explosion.                                                                   |
+| `maxResults`        | Top-level roots per single-method page, or methods per batch page (default: 0, all remaining).                                                     |
+| `offset`            | Top-level root or input-method offset; mutually exclusive with `continuationToken`.                                                            |
+| `continuationToken` | Snapshot-bound token from `resultStatus.page` for the next page.                                                                              |
 | `maxTotalNodes`      | Max total nodes emitted in the tree (default: 200). Caps output size.                                                                                |
 | `excludeDir`         | Directory substrings to exclude, e.g. `["\\test\\", "\\Mock\\"]`                                                                                    |
 | `excludeFile`        | File path substrings to exclude                                                                                                                     |
@@ -598,6 +601,14 @@ Query multiple methods in a single call to reduce MCP round trips. Each method g
 - `maxTotalBodyLines` — shared across all methods
 - Response size auto-scales: `max(base, 32KB × N methods)`, capped at 128KB
 
+Definitions, top-level call-tree roots, and multi-method results are recoverable pages. `resultStatus.page` reports `unit`, `offset`, `returned`, `total`, `totalKnown`, `workspaceGeneration`, `indexEpoch`, `queryFingerprint`, `nextOffset`, and `continuationToken`. The token is bound to the normalized query and content/definition index epoch; watcher edits and reindex operations invalidate stale tokens. Byte fitting keeps complete structural entries after optional body stripping and advances by the number actually returned. If one complete item cannot fit, the tool returns `single_item_exceeds_response_budget` with `isError=true` and does not advance the offset.
+
+Use `xray_help(tool="xray_definitions")` or `xray_help(tool="xray_callers")` for the pagination loop. Keep non-pagination arguments unchanged, pass the returned `continuationToken` without `offset`, and stop when the token is absent.
+
+For callers, `page.total` describes the root universe admitted by `maxCallersPerLevel` and `maxTotalNodes`, not an uncapped workspace total. When protective limits omit candidates, or handler-level paging skips traversal of roots or methods, `resultStatus.totalKnown=false` and `page.totalKnown=false`; node totals are lower bounds. A byte-fitted prefix can retain exact node totals because fitting runs after full traversal. With `impactAnalysis=true`, `testsCovering` is page-scoped when traversal was skipped and reason `impact_analysis_page_scoped` is reported.
+
+Definitions reject `offset` and `continuationToken` with `audit=true` or `containsLine`. Supplying `offset=0` explicitly opts into individual definition pages and bypasses broad-query `autoSummary`; omit both pagination fields to preserve automatic summaries.
+
 When `maxTotalNodes` or `maxCallersPerLevel` omits an otherwise eligible node, `resultStatus` reports `status="partial"`, `complete=false`, `totalKnown=false`, and `safeForExhaustiveClaims=false`. `shown.nodes` is exact; `total.nodes` and `omitted.nodes` are lower bounds because traversal stops at the protective cap. Filling a cap exactly without finding another eligible node remains complete.
 
 `complete` and `safeForExhaustiveClaims` are independent. With `includeGrepReferences=true`, an in-scope definition-indexed code reference outside the AST graph adds reason `grep_references_outside_call_graph` and sets `safeForExhaustiveClaims=false`, even when traversal is complete. Excluded and text-only references stay advisory; test references do too when `productionOnly=true`.
@@ -635,7 +646,9 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 | `parent`            | array&lt;string&gt;  | —       | Filter by parent class name. Multi-element array for OR. **BREAKING 2026-04-25:** array required |
 | `containsLine`      | integer | —       | Find definition containing a line number (requires `file`). With `includeBody=true`, body is emitted only for innermost definition; parents get `bodyOmitted` |
 | `regex`             | boolean | false   | Treat `name` as regex                                                                    |
-| `maxResults`        | integer | 100     | Max results returned                                                                     |
+| `maxResults`        | integer | 100     | Page size (0 = all remaining)                                                            |
+| `offset`            | integer | 0       | Offset in the stable sorted definitions list; mutually exclusive with `continuationToken` |
+| `continuationToken` | string  | —       | Snapshot-bound token from `resultStatus.page` for the next page                           |
 | `excludeDir`        | array   | —       | Exclude directories                                                                      |
 | `includeBody`       | boolean | false   | Include source code body inline                                                          |
 | `includeDocComments`| boolean | false   | Expand body upward to include `///` (C#/Rust) or `/** */` (TypeScript) doc-comments. Implies `includeBody=true`. Adds `docCommentLines` field |

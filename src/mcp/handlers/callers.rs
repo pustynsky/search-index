@@ -70,6 +70,20 @@ fn compute_body_lines_from_tree(tree: &[Value], root_method: Option<&Value>) -> 
     (emitted, available)
 }
 
+fn paginate_top_level_values(
+    mut values: Vec<Value>,
+    page_request: &utils::PageRequest,
+    max_results: usize,
+) -> (Vec<Value>, usize) {
+    let total = values.len();
+    let offset = page_request.offset.min(total);
+    values.drain(..offset);
+    if max_results > 0 && values.len() > max_results {
+        values.truncate(max_results);
+    }
+    (values, total)
+}
+
 fn callers_evidence_level(include_body: bool, body_complete: bool, template_navigation: bool) -> &'static str {
     if include_body && body_complete {
         "full_body"
@@ -153,6 +167,59 @@ fn build_callers_result_status(
         "builtInExcludes": if production_only { json!(["test files", "test methods"]) } else { Value::Array(Vec::new()) },
     });
     result_status
+}
+
+fn page_omits_items(
+    page_request: &utils::PageRequest,
+    returned: usize,
+    total: usize,
+) -> bool {
+    total > 0
+        && (page_request.offset > 0
+            || page_request.offset.saturating_add(returned) < total)
+}
+
+fn add_result_status_reason(result_status: &mut Value, reason: &str) {
+    if let Some(reasons) = result_status["reasons"].as_array_mut()
+        && !reasons.iter().any(|entry| entry.as_str() == Some(reason))
+    {
+        reasons.push(json!(reason));
+    }
+}
+
+fn attach_traversal_page_status(
+    result_status: &mut Value,
+    unit: &str,
+    page_request: &utils::PageRequest,
+    returned: usize,
+    total: usize,
+    omitted_nodes_lower_bound: usize,
+    impact_analysis: bool,
+) {
+    utils::attach_page_status(result_status, unit, page_request, returned, total);
+    if !page_omits_items(page_request, returned, total) {
+        return;
+    }
+
+    result_status["totalKnown"] = json!(false);
+    result_status["page"]["totalKnown"] = json!(false);
+    if omitted_nodes_lower_bound > 0 {
+        let total_nodes = result_status["total"]["nodes"].as_u64().unwrap_or(0);
+        let omitted_nodes = result_status["omitted"]["nodes"].as_u64().unwrap_or(0);
+        result_status["total"]["nodes"] =
+            json!(total_nodes.saturating_add(omitted_nodes_lower_bound as u64));
+        result_status["omitted"]["nodes"] =
+            json!(omitted_nodes.saturating_add(omitted_nodes_lower_bound as u64));
+    }
+    if page_request.offset >= total {
+        if let Some(reasons) = result_status["reasons"].as_array_mut() {
+            reasons.retain(|reason| reason.as_str() != Some("no_call_graph_matches"));
+        }
+        add_result_status_reason(result_status, "offset_out_of_range");
+    }
+    if impact_analysis {
+        add_result_status_reason(result_status, "impact_analysis_page_scoped");
+    }
 }
 
 
@@ -701,6 +768,14 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         }
         methods
     };
+    let page_request = match utils::parse_page_request(ctx, "xray_callers", args) {
+        Ok(request) => request,
+        Err(message) => return ToolCallResult::error(message),
+    };
+    let max_results = match utils::read_non_negative_usize(args, "maxResults", 0) {
+        Ok(value) => value,
+        Err(message) => return ToolCallResult::error(message),
+    };
     let mut class_filter = match read_string(args, "class") {
         Ok(value) => value,
         Err(error) => return ToolCallResult::error(error),
@@ -710,7 +785,15 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         return ToolCallResult::error("class cannot be combined with targets".to_string());
     }
     if methods.len() > 1 {
-        return handle_multi_method_callers(ctx, args, def_index, &methods, class_filter.as_deref());
+        return handle_multi_method_callers(
+            ctx,
+            args,
+            def_index,
+            &methods,
+            class_filter.as_deref(),
+            &page_request,
+            max_results,
+        );
     }
 
     let mut method_name = methods.into_iter().next().unwrap_or_default();
@@ -878,12 +961,25 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
 
     if template_navigation_requested {
         let search_elapsed = search_start.elapsed();
+        let next_step_hint = template_navigation_next_step_hint(
+            &template_results,
+            &def_idx,
+            &method_name,
+            direction,
+        );
+        let total_template_roots = template_results.len();
+        let total_template_nodes = count_tree_nodes(&template_results);
+        let (template_results, _) = paginate_top_level_values(
+            template_results,
+            &page_request,
+            max_results,
+        );
         let mut summary = json!({
-            "totalNodes": template_results.len(),
+            "totalNodes": total_template_nodes,
             "templateNavigation": true,
             "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
         });
-        if let Some(hint) = template_navigation_next_step_hint(&template_results, &def_idx, &method_name, direction) {
+        if let Some(hint) = next_step_hint {
             summary["nextStepHint"] = json!(hint);
         }
         inject_branch_warning(&mut summary, ctx);
@@ -904,9 +1000,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         if let Some(ref cls) = class_filter {
             output["query"]["class"] = json!(cls);
         }
-        let result_status = build_callers_result_status(
+        let mut result_status = build_callers_result_status(
             template_node_count,
-            template_node_count,
+            total_template_nodes,
             false,
             0,
             false,
@@ -915,6 +1011,13 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             production_only,
             true,
             false,
+        );
+        utils::attach_page_status(
+            &mut result_status,
+            "topLevelRoots",
+            &page_request,
+            template_results.len(),
+            total_template_roots,
         );
         let output = attach_result_status(output, result_status);
         return ToolCallResult::success(json_to_string(&output));
@@ -979,6 +1082,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             total_limit_hit: false,
             tests_found: Vec::new(),
             per_level_dropped: 0,
+            root_page_offset: page_request.offset,
+            root_page_size: max_results,
+            root_total_candidates: 0,
             interface_lookup_cache: HashMap::new(),
         };
         let tree = if let Some(root_definition) = exact_root_definition {
@@ -1005,6 +1111,17 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         // walk + per-node `format!()` allocations are pure waste on the hot path.
         let tree = if resolve_interfaces { dedup_caller_tree(tree) } else { tree };
         let ambiguous_references = count_nodes_by_kind(&tree, "ambiguousCaller");
+        let total_top_level_roots = builder.root_total_candidates;
+        let full_body_lines_available = if include_body {
+            compute_body_lines_from_tree(&tree, root_method.as_ref()).1
+        } else {
+            0
+        };
+        let page_body_lines_emitted = if include_body {
+            compute_body_lines_from_tree(&tree, root_method.as_ref()).0
+        } else {
+            0
+        };
 
         let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
         let truncated = builder.total_limit_hit;
@@ -1030,10 +1147,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             summary["callersDroppedPerLevel"] = json!(builder.per_level_dropped);
         }
         if include_body {
-            summary["totalBodyLinesReturned"] = json!(builder.total_body_lines_emitted);
-            let (_, tree_available) = compute_body_lines_from_tree(&tree, root_method.as_ref());
-            if builder.total_body_lines_emitted < tree_available {
-                summary["totalBodyLinesAvailable"] = json!(tree_available);
+            summary["totalBodyLinesReturned"] = json!(page_body_lines_emitted);
+            if page_body_lines_emitted < full_body_lines_available {
+                summary["totalBodyLinesAvailable"] = json!(full_body_lines_available);
             }
         }
         inject_branch_warning(&mut summary, ctx);
@@ -1083,7 +1199,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         }
 
         // Nearest-match hints when callTree is empty
-        if tree.is_empty() {
+        if total_top_level_roots == 0 {
             let hint = generate_callers_hint(&method_name, class_filter.as_deref(), &def_idx);
             if let Some(h) = hint {
                 output["hint"] = json!(h);
@@ -1109,7 +1225,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             advisories.push(h);
         }
         if !result_truncated
-            && let Some(h) = low_count_caveat(&method_name, tree.len())
+            && let Some(h) = low_count_caveat(&method_name, total_top_level_roots)
         {
             advisories.push(h);
         }
@@ -1142,18 +1258,14 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         if let Some(root_definition) = exact_root_definition {
             inject_exact_root_resolution(&mut output, &def_idx, root_definition);
         }
-        let body_lines_available = if include_body {
-            compute_body_lines_from_tree(&tree, root_method.as_ref()).1
-        } else {
-            0
-        };
+        let body_lines_available = full_body_lines_available;
         let mut result_status = build_callers_result_status(
             count_tree_nodes(&tree),
             total_nodes_lower_bound,
             truncated,
             builder.per_level_dropped,
             include_body,
-            builder.total_body_lines_emitted,
+            page_body_lines_emitted,
             body_lines_available,
             production_only,
             false,
@@ -1181,6 +1293,15 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             mark_legacy_ambiguous_fanout(&mut result_status);
             output["warning"] = json!("ambiguityPolicy=legacy traverses ambiguous C# roots and is deprecated for exact analysis.");
         }
+        attach_traversal_page_status(
+            &mut result_status,
+            "topLevelRoots",
+            &page_request,
+            tree.len(),
+            total_top_level_roots,
+            total_top_level_roots.saturating_sub(tree.len()),
+            impact_analysis,
+        );
         let output = attach_result_status(output, result_status);
         ToolCallResult::success(json_to_string(&output))
     } else {
@@ -1192,6 +1313,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             total_body_lines_emitted,
             total_limit_hit: false,
             per_level_dropped: 0,
+            root_page_offset: page_request.offset,
+            root_page_size: max_results,
+            root_total_candidates: 0,
         };
         let tree = if let Some(root_definition) = exact_root_definition {
             builder.build_exact_root(
@@ -1208,6 +1332,17 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             )
         };
         let ambiguous_edges = count_nodes_by_kind(&tree, "ambiguousCall");
+        let total_top_level_roots = builder.root_total_candidates;
+        let full_body_lines_available = if include_body {
+            compute_body_lines_from_tree(&tree, root_method.as_ref()).1
+        } else {
+            0
+        };
+        let page_body_lines_emitted = if include_body {
+            compute_body_lines_from_tree(&tree, root_method.as_ref()).0
+        } else {
+            0
+        };
 
         let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
         let truncated = builder.total_limit_hit;
@@ -1230,10 +1365,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             summary["callersDroppedPerLevel"] = json!(builder.per_level_dropped);
         }
         if include_body {
-            summary["totalBodyLinesReturned"] = json!(builder.total_body_lines_emitted);
-            let (_, tree_available) = compute_body_lines_from_tree(&tree, root_method.as_ref());
-            if builder.total_body_lines_emitted < tree_available {
-                summary["totalBodyLinesAvailable"] = json!(tree_available);
+            summary["totalBodyLinesReturned"] = json!(page_body_lines_emitted);
+            if page_body_lines_emitted < full_body_lines_available {
+                summary["totalBodyLinesAvailable"] = json!(full_body_lines_available);
             }
         }
         inject_branch_warning(&mut summary, ctx);
@@ -1255,7 +1389,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             output["rootMethod"] = root.clone();
         }
         // Nearest-match hints when callTree is empty
-        if tree.is_empty() {
+        if total_top_level_roots == 0 {
             let hint = generate_callers_hint(&method_name, class_filter.as_deref(), &def_idx);
             if let Some(h) = hint {
                 output["hint"] = json!(h);
@@ -1287,18 +1421,14 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         if let Some(root_definition) = exact_root_definition {
             inject_exact_root_resolution(&mut output, &def_idx, root_definition);
         }
-        let body_lines_available = if include_body {
-            compute_body_lines_from_tree(&tree, root_method.as_ref()).1
-        } else {
-            0
-        };
+        let body_lines_available = full_body_lines_available;
         let mut result_status = build_callers_result_status(
             count_tree_nodes(&tree),
             total_nodes_lower_bound,
             truncated,
             builder.per_level_dropped,
             include_body,
-            builder.total_body_lines_emitted,
+            page_body_lines_emitted,
             body_lines_available,
             production_only,
             false,
@@ -1325,6 +1455,15 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             mark_legacy_ambiguous_fanout(&mut result_status);
             output["warning"] = json!("ambiguityPolicy=legacy traverses ambiguous C# roots and is deprecated for exact analysis.");
         }
+        attach_traversal_page_status(
+            &mut result_status,
+            "topLevelRoots",
+            &page_request,
+            tree.len(),
+            total_top_level_roots,
+            total_top_level_roots.saturating_sub(tree.len()),
+            false,
+        );
 
         let output = attach_result_status(output, result_status);
         ToolCallResult::success(json_to_string(&output))
@@ -1342,6 +1481,8 @@ fn handle_multi_method_callers(
     def_index: &std::sync::Arc<std::sync::RwLock<DefinitionIndex>>,
     methods: &[String],
     class_filter: Option<&str>,
+    page_request: &utils::PageRequest,
+    max_results: usize,
 ) -> ToolCallResult {
     // Parse common parameters (same as single-method)
     let max_depth = {
@@ -1414,7 +1555,15 @@ fn handle_multi_method_callers(
     // MINOR-7: aggregate per-level truncation across all methods in the batch.
     let mut total_per_level_dropped: usize = 0;
 
-    let mut results: Vec<Value> = Vec::new();
+    let total_methods = methods.len();
+    let offset = page_request.offset.min(total_methods);
+    let remaining_methods = &methods[offset..];
+    let page_methods = if max_results > 0 && remaining_methods.len() > max_results {
+        &remaining_methods[..max_results]
+    } else {
+        remaining_methods
+    };
+    let mut results: Vec<Value> = Vec::with_capacity(page_methods.len());
 
     // Pre-compute filter patterns once for all methods
     let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&exclude_dir);
@@ -1428,7 +1577,7 @@ fn handle_multi_method_callers(
     // MINOR-9: see `handle_xray_callers` — same single-threaded Relaxed invariant applies.
     let impact_analysis_truncated = AtomicBool::new(false);
 
-    for method_name in methods {
+    for method_name in page_methods {
         // Each method gets its OWN node_count and visited set (per-method budget)
         let node_count = AtomicUsize::new(0);
         let limits = CallerLimits { max_callers_per_level, max_total_nodes };
@@ -1490,6 +1639,9 @@ fn handle_multi_method_callers(
                 total_limit_hit: false,
                 tests_found: Vec::new(),
                 per_level_dropped: 0,
+                root_page_offset: 0,
+                root_page_size: 0,
+                root_total_candidates: 0,
                 interface_lookup_cache: HashMap::new(),
             };
             let tree = builder.build(
@@ -1577,6 +1729,9 @@ fn handle_multi_method_callers(
                 total_body_lines_emitted,
                 total_limit_hit: false,
                 per_level_dropped: 0,
+                root_page_offset: 0,
+                root_page_size: 0,
+                root_total_candidates: 0,
             };
             let tree = builder.build(
                 method_name,
@@ -1624,7 +1779,7 @@ fn handle_multi_method_callers(
 
     let search_elapsed = search_start.elapsed();
     let mut summary = json!({
-        "totalMethods": methods.len(),
+        "totalMethods": total_methods,
         "totalNodes": total_nodes_all,
         "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
     });
@@ -1689,7 +1844,7 @@ fn handle_multi_method_callers(
         }
     }
 
-    let result_status = build_callers_result_status(
+    let mut result_status = build_callers_result_status(
         shown_nodes,
         total_nodes_lower_bound_all,
         any_truncated,
@@ -1702,6 +1857,15 @@ fn handle_multi_method_callers(
         methods
             .iter()
             .any(|method| is_sql_routine_query(&def_idx, method, class_filter)),
+    );
+    attach_traversal_page_status(
+        &mut result_status,
+        "methods",
+        page_request,
+        results.len(),
+        total_methods,
+        0,
+        impact_analysis && direction == "up",
     );
     let output = attach_result_status(output, result_status);
 
@@ -2259,6 +2423,9 @@ struct CallerTreeBuilder<'a> {
     /// Exposed in the summary as `perLevelTruncated` / `callersDroppedPerLevel` so
     /// LLM clients can distinguish "full result set" from "result set that was capped".
     per_level_dropped: usize,
+    root_page_offset: usize,
+    root_page_size: usize,
+    root_total_candidates: usize,
     /// Per-class cache of `interfaces_declaring_method` results. Keyed by
     /// `(class_lower, method_lower)`. Mid-tree interface expansion calls this
     /// once per (class, method) node to gate `expand_interface_callers`; the
@@ -3327,12 +3494,29 @@ impl CallerTreeBuilder<'_> {
                 None => continue,
             };
 
+            let root_position = if current_depth == 0 {
+                let position = self.root_total_candidates;
+                if position < self.root_page_offset
+                    || (self.root_page_size > 0
+                        && position >= self.root_page_offset.saturating_add(self.root_page_size))
+                {
+                    self.root_total_candidates += 1;
+                    continue;
+                }
+                Some(position)
+            } else {
+                None
+            };
+
             if !try_reserve_graph_node(
                 self.ctx.node_count,
                 self.ctx.limits.max_total_nodes,
                 &mut self.total_limit_hit,
             ) {
                 break;
+            }
+            if root_position.is_some() {
+                self.root_total_candidates += 1;
             }
             let mut sorted_call_sites = info.call_sites.clone();
             sorted_call_sites.sort();
@@ -3647,9 +3831,31 @@ struct CalleeTreeBuilder<'a> {
     total_body_lines_emitted: usize,
     total_limit_hit: bool,
     per_level_dropped: usize,
+    root_page_offset: usize,
+    root_page_size: usize,
+    root_total_candidates: usize,
 }
 
 impl CalleeTreeBuilder<'_> {
+    fn select_root_candidate(&mut self, current_depth: usize, position: usize) -> bool {
+        if current_depth != 0 {
+            return true;
+        }
+        let selected = position >= self.root_page_offset
+            && (self.root_page_size == 0
+                || position < self.root_page_offset.saturating_add(self.root_page_size));
+        if !selected {
+            self.root_total_candidates = position.saturating_add(1);
+        }
+        selected
+    }
+
+    fn record_selected_root(&mut self, current_depth: usize, position: usize) {
+        if current_depth == 0 {
+            self.root_total_candidates = position.saturating_add(1);
+        }
+    }
+
     fn build(
         &mut self,
         method_name: &str,
@@ -3744,6 +3950,7 @@ impl CalleeTreeBuilder<'_> {
 
         let mut callees: Vec<Value> = Vec::new();
         let mut seen_callees: HashSet<String> = HashSet::new();
+        let mut level_candidates_seen = 0usize;
 
         'methods: for &method_di in &method_def_indices {
             // Get pre-computed call sites for this method
@@ -3772,9 +3979,15 @@ impl CalleeTreeBuilder<'_> {
                         if seen_callees.contains(&callee_key) {
                             continue;
                         }
-                        if callees.len() >= limits.max_callers_per_level {
+                        if level_candidates_seen >= limits.max_callers_per_level {
                             seen_callees.insert(callee_key);
                             self.per_level_dropped += 1;
+                            continue;
+                        }
+                        let candidate_position = level_candidates_seen;
+                        level_candidates_seen += 1;
+                        seen_callees.insert(callee_key);
+                        if !self.select_root_candidate(current_depth, candidate_position) {
                             continue;
                         }
                         if !try_reserve_graph_node(
@@ -3784,7 +3997,7 @@ impl CalleeTreeBuilder<'_> {
                         ) {
                             break 'methods;
                         }
-                        seen_callees.insert(callee_key);
+                        self.record_selected_root(current_depth, candidate_position);
 
                         let candidate_values: Vec<_> = candidates.iter()
                             .take(10)
@@ -3839,9 +4052,15 @@ impl CalleeTreeBuilder<'_> {
                     );
 
                     if seen_callees.contains(&callee_key) { continue; }
-                    if callees.len() >= limits.max_callers_per_level {
+                    if level_candidates_seen >= limits.max_callers_per_level {
                         seen_callees.insert(callee_key);
                         self.per_level_dropped += 1;
+                        continue;
+                    }
+                    let candidate_position = level_candidates_seen;
+                    level_candidates_seen += 1;
+                    seen_callees.insert(callee_key);
+                    if !self.select_root_candidate(current_depth, candidate_position) {
                         continue;
                     }
                     if !try_reserve_graph_node(
@@ -3851,7 +4070,7 @@ impl CalleeTreeBuilder<'_> {
                     ) {
                         break 'methods;
                     }
-                    seen_callees.insert(callee_key);
+                    self.record_selected_root(current_depth, candidate_position);
 
                     let sub_callees = self.build_with_root(
                         &callee_def.name,
