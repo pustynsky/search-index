@@ -12,6 +12,8 @@ Tests for `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_act
 
 - `commits` array (non-empty), each with `hash`, `date`, `author`, `email`, `message`
 - `summary.totalCommits` ≥ 1, `summary.returned` ≤ maxResults
+- `summary.hasMoreCommits` is true when `summary.totalCommits > summary.returned`
+- `summary.totalCommitsExact=true` for the reported lineage on cache and untruncated CLI results; bounded CLI totals may be lower bounds
 - Default cache: `source="git-cache"`, `lineage="direct-path"`, `safeForFullHistory=false`
 - `noCache=true`: `source="git-cli"`, `lineage="follow"`, `safeForFullHistory=true`
 - No `patch` field (history mode)

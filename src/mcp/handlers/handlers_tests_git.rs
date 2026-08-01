@@ -255,6 +255,19 @@ fn test_git_history_cached_direct_path_contract() {
     let commits = output["commits"].as_array().unwrap();
     assert_eq!(commits.len(), 3, "src/main.rs should have 3 commits");
 
+    let limited_result = dispatch_tool(&ctx, "xray_git_history", &json!({
+        "repo": ".",
+        "file": "src/main.rs",
+        "maxResults": 2
+    }));
+    assert!(!limited_result.is_error, "{}", limited_result.content[0].text);
+    let limited_output: Value = serde_json::from_str(&limited_result.content[0].text).unwrap();
+    assert_eq!(limited_output["summary"]["totalCommits"], 3);
+    assert_eq!(limited_output["summary"]["returned"], 2);
+    assert_eq!(limited_output["summary"]["hasMoreCommits"], true);
+    assert_eq!(limited_output["summary"]["totalCommitsExact"], true);
+
+
     // Verify commits are sorted newest first
     let ts0 = commits[0]["date"].as_str().unwrap();
     let ts2 = commits[2]["date"].as_str().unwrap();
@@ -335,6 +348,8 @@ fn test_git_history_rename_direct_path_and_follow_contracts() {
     );
     assert_eq!(history_messages(&limited_body), vec!["rename middle to final"]);
     assert_eq!(limited_body["summary"]["totalCommits"], 2);
+    assert_eq!(limited_body["summary"]["hasMoreCommits"], true);
+    assert_eq!(limited_body["summary"]["totalCommitsExact"], true);
     assert_followed_history_contract(&limited_body);
 
     let existing_cached = dispatch_git_json(
@@ -385,6 +400,8 @@ fn test_git_history_rename_direct_path_and_follow_contracts() {
         ]
     );
     assert_eq!(unlimited["summary"]["totalCommits"], 4);
+    assert_eq!(unlimited["summary"]["hasMoreCommits"], false);
+    assert_eq!(unlimited["summary"]["totalCommitsExact"], true);
     assert_followed_history_contract(&unlimited);
 
     let limited = dispatch_git_json(
@@ -406,6 +423,8 @@ fn test_git_history_rename_direct_path_and_follow_contracts() {
         ]
     );
     assert_eq!(limited["summary"]["totalCommits"], 4);
+    assert_eq!(limited["summary"]["hasMoreCommits"], true);
+    assert_eq!(limited["summary"]["totalCommitsExact"], false);
     assert_followed_history_contract(&limited);
 
     let author_filtered = dispatch_git_json(
@@ -435,6 +454,8 @@ fn test_git_history_rename_direct_path_and_follow_contracts() {
     );
     assert_eq!(history_messages(&limited_author), vec!["rename middle to final"]);
     assert_eq!(limited_author["summary"]["totalCommits"], 2);
+    assert_eq!(limited_author["summary"]["hasMoreCommits"], true);
+    assert_eq!(limited_author["summary"]["totalCommitsExact"], true);
     assert_followed_history_contract(&limited_author);
 
     let message_filtered = dispatch_git_json(
@@ -577,6 +598,8 @@ fn test_git_diff_does_not_use_cache() {
     assert_eq!(output["summary"]["source"], "git-cli");
     assert_eq!(output["summary"]["lineage"], "follow");
     assert_eq!(output["summary"]["safeForFullHistory"], true);
+    assert_eq!(output["summary"]["hasMoreCommits"], false);
+    assert_eq!(output["summary"]["totalCommitsExact"], true);
     let commits = output["commits"].as_array().unwrap();
     assert_eq!(commits.len(), 1);
     assert!(commits[0]["patch"].as_str().is_some_and(|patch| !patch.is_empty()));

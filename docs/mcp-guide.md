@@ -1460,9 +1460,11 @@ Get commit history for a specific existing or deleted file. The default sub-mill
   "commits": [
     {"hash":"abc123...","date":"2025-01-15 10:30:00 +0000","author":"Alice","email":"alice@example.com","message":"Fix null check in main"}
   ],
-  "summary": {"totalCommits":1,"returned":1,"file":"src/main.rs","elapsedMs":0.15,"hint":"Fast direct-path cache; may omit history before renames/copies. Set noCache=true for git --follow.","tool":"xray_git_history","source":"git-cache","lineage":"direct-path","safeForFullHistory":false}
+  "summary": {"totalCommits":1,"totalCommitsExact":true,"hasMoreCommits":false,"returned":1,"file":"src/main.rs","elapsedMs":0.15,"hint":"Fast direct-path cache; may omit history before renames/copies. Set noCache=true for git --follow.","tool":"xray_git_history","source":"git-cache","lineage":"direct-path","safeForFullHistory":false}
 }
 ```
+
+`summary.totalCommitsExact` states whether `totalCommits` is exact for the reported `lineage`; bounded CLI queries may return `false` when the count is only a lower bound. `summary.hasMoreCommits` is `true` when more matching commits exist than the returned page.
 
 ### xray_git_diff
 
@@ -1482,7 +1484,7 @@ Get commit history with full diff/patch for a specific file. Same as `xray_git_h
       "patch":"--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,3 +10,4 @@\n+    if value.is_none() { return; }\n"
     }
   ],
-  "summary": {"totalCommits":1,"returned":1,"file":"src/main.rs","elapsedMs":1250.5,"tool":"xray_git_diff"}
+  "summary": {"totalCommits":1,"totalCommitsExact":true,"hasMoreCommits":false,"returned":1,"file":"src/main.rs","elapsedMs":1250.5,"tool":"xray_git_diff","source":"git-cli","lineage":"follow","safeForFullHistory":true}
 }
 ```
 
@@ -1633,7 +1635,7 @@ When `xray_git_history`, `xray_git_authors`, or `xray_git_activity` return 0 res
 ```json
 {
   "commits": [],
-  "summary": { "totalCommits": 0, "tool": "xray_git_history" },
+  "summary": { "totalCommits": 0, "totalCommitsExact": true, "hasMoreCommits": false, "tool": "xray_git_history" },
   "warning": "File not found in git: path/to/file.cs. Check the path."
 }
 ```

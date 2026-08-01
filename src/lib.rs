@@ -78,6 +78,24 @@ pub fn path_identity_key(path: &std::path::Path) -> std::path::PathBuf {
     }
 }
 
+/// Returns true only for an exact `.git` component, never prefixes such as `.github`.
+#[must_use]
+pub fn is_inside_git_dir(path: &std::path::Path) -> bool {
+    path.components().any(|component| {
+        #[cfg(windows)]
+        {
+            component
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(".git")
+        }
+        #[cfg(not(windows))]
+        {
+            component.as_os_str() == ".git"
+        }
+    })
+}
+
 /// Compare two path strings using platform-appropriate case sensitivity.
 ///
 /// On Windows the comparison is case-insensitive (ASCII), matching the
