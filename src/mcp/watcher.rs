@@ -246,6 +246,7 @@ pub fn start_watcher(
     file_index_dirty: Arc<AtomicBool>,
     watcher_generation: Arc<AtomicU64>,
     my_generation: u64,
+    index_epoch: Arc<AtomicU64>,
     stats: Arc<WatcherStats>,
     respect_git_exclude: bool,
     autosave_dirty: Arc<AtomicBool>,
@@ -366,6 +367,10 @@ pub fn start_watcher(
             false
         };
 
+        if content_added + content_modified + content_removed > 0 || def_changed {
+            index_epoch.fetch_add(1, Ordering::AcqRel);
+        }
+
         let mut batch_start: Option<Instant> = None;
         const MAX_ACCUMULATE: Duration = Duration::from_secs(3);
 
@@ -373,7 +378,7 @@ pub fn start_watcher(
         let mut removed_files: HashSet<PathBuf> = HashSet::new();
         let flush_batch = |dirty_files: &mut HashSet<PathBuf>,
                            removed_files: &mut HashSet<PathBuf>| {
-            process_watcher_batch(
+            let outcome = process_watcher_batch(
                 &index,
                 &def_index,
                 dirty_files,
@@ -383,7 +388,11 @@ pub fn start_watcher(
                 &definition_extensions,
                 respect_git_exclude,
                 &trigram_build_gate,
-            )
+            );
+            if outcome.index_changed {
+                index_epoch.fetch_add(1, Ordering::AcqRel);
+            }
+            outcome.healthy
         };
         let mut last_autosave = std::time::Instant::now();
         // MCP-WCH-007 (PR-B, Hole #2): tracks whether `process_batch` has
@@ -624,6 +633,12 @@ struct DefUpdateResult {
     lock_wait_ms: f64,
     update_ms: f64,
     applied_dirty: usize,
+    applied_changes: bool,
+}
+
+struct BatchProcessResult {
+    healthy: bool,
+    index_changed: bool,
 }
 
 /// Synchronously reindex a small set of paths (typically 1–20 files), bypassing
@@ -750,7 +765,7 @@ fn process_watcher_batch(
     definition_extensions: &[String],
     respect_git_exclude: bool,
     trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
-) -> bool {
+) -> BatchProcessResult {
     let dirty_paths: Vec<PathBuf> = dirty_files.drain().collect();
     let content_candidates: Vec<PathBuf> = dirty_paths.iter()
         .filter(|path| matches_extensions(path, content_extensions))
@@ -805,7 +820,7 @@ fn process_batch(
         &mut definition_dirty_files,
         removed_files,
         trigram_build_gate,
-    )
+    ).healthy
 }
 
 
@@ -816,7 +831,7 @@ fn process_batch_scoped(
     definition_dirty_files: &mut HashSet<PathBuf>,
     removed_files: &mut HashSet<PathBuf>,
     trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
-) -> bool {
+) -> BatchProcessResult {
     let content_update_count = content_dirty_files.len();
     let definition_update_count = definition_dirty_files.len();
     let remove_count = removed_files.len();
@@ -850,7 +865,7 @@ fn process_batch_scoped(
     // Update content index using batch_purge for O(total_postings) instead of O(N × total_postings)
     let content_result = update_content_index(index, &removed_clean, &content_dirty_clean);
     if !content_result.ok {
-        return false;
+        return BatchProcessResult { healthy: false, index_changed: false };
     }
     if content_result.applied_changes {
         trigram_build_gate.mark_dirty(
@@ -859,8 +874,13 @@ fn process_batch_scoped(
     }
 
     // Update definition index (if available)
-    if !update_definition_index(def_index, &removed_clean, &definition_dirty_clean).ok {
-        return false;
+    let definition_result =
+        update_definition_index(def_index, &removed_clean, &definition_dirty_clean);
+    if !definition_result.ok {
+        return BatchProcessResult {
+            healthy: false,
+            index_changed: content_result.applied_changes,
+        };
     }
 
     let elapsed_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
@@ -871,7 +891,10 @@ fn process_batch_scoped(
         elapsed_ms = format_args!("{:.1}", elapsed_ms),
         "Incremental index update complete"
     );
-    true
+    BatchProcessResult {
+        healthy: true,
+        index_changed: content_result.applied_changes || definition_result.applied_changes,
+    }
 }
 
 #[cfg(test)]
@@ -1124,7 +1147,13 @@ fn update_definition_index(
     dirty_clean: &[PathBuf],
 ) -> DefUpdateResult {
     let Some(def_idx) = def_index else {
-        return DefUpdateResult { ok: true, lock_wait_ms: 0.0, update_ms: 0.0, applied_dirty: 0 };
+        return DefUpdateResult {
+            ok: true,
+            lock_wait_ms: 0.0,
+            update_ms: 0.0,
+            applied_dirty: 0,
+            applied_changes: false,
+        };
     };
 
     // ── Phase 1: Parse all dirty files OUTSIDE the lock (~30ms × N) ──
@@ -1145,6 +1174,11 @@ fn update_definition_index(
         Ok(mut idx) => {
             let lock_wait_ms = write_wait_start.elapsed().as_secs_f64() * 1000.0;
             let update_start = std::time::Instant::now();
+            let removed_indexed = removed_clean
+                .iter()
+                .chain(dirty_clean)
+                .any(|path| idx.path_to_id.contains_key(&crate::path_identity_key(path)));
+            let applied_changes = !parsed.is_empty() || removed_indexed;
 
             // Remove deleted files
             for path in removed_clean {
@@ -1164,17 +1198,31 @@ fn update_definition_index(
             }
 
             // Update created_at — watcher detects subsequent changes via fsnotify, so now() is safe
-            idx.created_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or(std::time::Duration::ZERO)
-                .as_secs();
+            if applied_changes {
+                idx.created_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or(std::time::Duration::ZERO)
+                    .as_secs();
+            }
 
             let update_ms = update_start.elapsed().as_secs_f64() * 1000.0;
-            DefUpdateResult { ok: true, lock_wait_ms, update_ms, applied_dirty }
+            DefUpdateResult {
+                ok: true,
+                lock_wait_ms,
+                update_ms,
+                applied_dirty,
+                applied_changes,
+            }
         }
         Err(e) => {
             error!(error = %e, "Failed to acquire definition index write lock (poisoned)");
-            DefUpdateResult { ok: false, lock_wait_ms: 0.0, update_ms: 0.0, applied_dirty: 0 }
+            DefUpdateResult {
+                ok: false,
+                lock_wait_ms: 0.0,
+                update_ms: 0.0,
+                applied_dirty: 0,
+                applied_changes: false,
+            }
         }
     }
 }
@@ -1992,6 +2040,8 @@ pub(crate) struct RescanOutcome {
     pub file_index_added: usize,
     /// `true` iff at least one of the above counters is non-zero.
     pub drift_detected: bool,
+    /// `true` iff content or definition data changed in memory.
+    pub index_changed: bool,
 }
 
 /// Compare the on-disk state in `state.ext_matched` against the
@@ -2175,6 +2225,7 @@ pub(crate) fn periodic_rescan_once(
     let content_drift = content_added + content_removed + content_modified > 0;
     let file_drift = file_index_added + file_index_removed > 0;
     let drift_detected = content_drift || file_drift;
+    let mut index_changed = false;
 
     // Any drift — content or file-list — means the file-list index
     // is stale relative to disk. Setting the dirty flag is cheap and
@@ -2239,7 +2290,8 @@ pub(crate) fn periodic_rescan_once(
                 crate::mcp::handlers::utils::TrigramDirtyTrigger::Watcher,
             );
         }
-        if content_changed || definition_changed {
+        index_changed = content_changed || definition_changed;
+        if index_changed {
             autosave_dirty.store(true, Ordering::Relaxed);
         }
     }
@@ -2270,6 +2322,7 @@ pub(crate) fn periodic_rescan_once(
         file_index_added,
         file_index_removed,
         drift_detected,
+        index_changed,
     }
 }
 
@@ -2311,6 +2364,7 @@ pub fn start_periodic_rescan(
     interval_sec: u64,
     watcher_generation: Arc<AtomicU64>,
     my_generation: u64,
+    index_epoch: Arc<AtomicU64>,
     stats: Arc<WatcherStats>,
     respect_git_exclude: bool,
     autosave_dirty: Arc<AtomicBool>,
@@ -2350,7 +2404,7 @@ pub fn start_periodic_rescan(
                 return;
             }
 
-            let _ = periodic_rescan_once(
+            let outcome = periodic_rescan_once(
                 &index,
                 &def_index,
                 &file_index,
@@ -2363,6 +2417,9 @@ pub fn start_periodic_rescan(
                 &autosave_dirty,
                 &trigram_build_gate,
             );
+            if outcome.index_changed {
+                index_epoch.fetch_add(1, Ordering::AcqRel);
+            }
         }
     });
 }

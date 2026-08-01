@@ -490,6 +490,9 @@ fn test_prefilter_does_not_expand_by_base_types() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let callers = builder.build(
@@ -606,6 +609,9 @@ fn test_callee_tree_depth2_no_cross_class_pollution() {
         total_body_lines_emitted: 0,
         total_limit_hit: false,
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
     };
     let callees = callee_builder.build("process", Some("ClassA"), 0);
 
@@ -1679,6 +1685,9 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let callers = builder.build(
@@ -2085,6 +2094,9 @@ fn test_sql_callee_tree_exec_dependencies() {
         total_body_lines_emitted: 0,
         total_limit_hit: false,
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
     };
     let callees = callee_builder.build("usp_ProcessBatch", Some("dbo"), 0);
 
@@ -2205,6 +2217,9 @@ fn test_sql_caller_tree_who_calls_sp() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let callers = builder.build(
@@ -2301,6 +2316,9 @@ fn test_sql_function_definition_is_not_reported_as_unscoped_self_caller() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
 
@@ -2607,6 +2625,9 @@ END
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let callers = caller_builder.build("ufn_WR_Value", None, 0, &[]);
@@ -2623,6 +2644,9 @@ END
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let target_callers = masked_exec_builder.build("TargetProc", Some("dbo"), 0, &[]);
@@ -2652,6 +2676,9 @@ END
             total_limit_hit: false,
             tests_found: Vec::new(),
             per_level_dropped: 0,
+            root_page_offset: 0,
+            root_page_size: 0,
+            root_total_candidates: 0,
             interface_lookup_cache: HashMap::new(),
         };
         let quoted_callers = quoted_caller_builder.build(target, Some(parent), 0, &[]);
@@ -2680,6 +2707,9 @@ END
             total_body_lines_emitted: 0,
             total_limit_hit: false,
             per_level_dropped: 0,
+            root_page_offset: 0,
+            root_page_size: 0,
+            root_total_candidates: 0,
         };
         let quoted_callees = quoted_callee_builder.build(caller, Some(parent), 0);
         assert_eq!(
@@ -2700,6 +2730,9 @@ END
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let recursive_callers =
@@ -2721,6 +2754,9 @@ END
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let collision_callers = collision_builder.build("value", None, 0, &[]);
@@ -2741,6 +2777,9 @@ END
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let spatial_collision_callers =
@@ -2758,6 +2797,9 @@ END
         total_body_lines_emitted: 0,
         total_limit_hit: false,
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
     };
     let callees = callee_builder.build("usp_WR_Root", Some("dbo"), 0);
     let callee_names: HashSet<_> = callees
@@ -3542,6 +3584,9 @@ fn test_impact_analysis_finds_test_methods() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let callers = builder.build(
@@ -3592,6 +3637,9 @@ fn test_impact_analysis_finds_test_methods() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let production_callers = production_builder.build(
@@ -3714,6 +3762,9 @@ fn test_impact_analysis_non_test_method_recurses_normally() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let callers = builder.build(
@@ -3789,6 +3840,232 @@ fn test_multi_method_returns_results_array() {
     // Query should have methods array
     let methods = v["query"]["methods"].as_array().expect("Should have methods in query");
     assert_eq!(methods.len(), 2);
+}
+
+#[test]
+fn test_single_callers_offset_pages_top_level_roots() {
+    let ctx = build_callers_fixture_with_n_callers(5);
+    let full_result = handle_xray_callers(&ctx, &json!({
+        "method": ["process"],
+        "class": "OrderService",
+        "depth": 1,
+        "maxCallersPerLevel": 10,
+    }));
+    assert!(!full_result.is_error, "{}", full_result.content[0].text);
+    let full: Value = serde_json::from_str(&full_result.content[0].text).unwrap();
+    let full_roots = full["callTree"].as_array().unwrap();
+    assert_eq!(full_roots.len(), 5);
+
+    let page_result = handle_xray_callers(&ctx, &json!({
+        "method": ["process"],
+        "class": "OrderService",
+        "depth": 1,
+        "maxCallersPerLevel": 10,
+        "offset": 1,
+        "maxResults": 2,
+    }));
+    assert!(!page_result.is_error, "{}", page_result.content[0].text);
+    let page: Value = serde_json::from_str(&page_result.content[0].text).unwrap();
+    assert_eq!(page["callTree"].as_array().unwrap(), &full_roots[1..3]);
+    assert_eq!(page["resultStatus"]["page"]["unit"], "topLevelRoots");
+    assert_eq!(page["resultStatus"]["page"]["offset"], 1);
+    assert_eq!(page["resultStatus"]["page"]["returned"], 2);
+    assert_eq!(page["resultStatus"]["page"]["total"], 5);
+    assert_eq!(page["resultStatus"]["page"]["nextOffset"], 3);
+    assert_eq!(page["resultStatus"]["totalKnown"], false);
+    assert_eq!(page["resultStatus"]["page"]["totalKnown"], false);
+    assert_eq!(page["resultStatus"]["total"]["nodes"], 5);
+    assert_eq!(page["resultStatus"]["omitted"]["nodes"], 3);
+
+    let exhausted_result = handle_xray_callers(&ctx, &json!({
+        "method": ["process"],
+        "class": "OrderService",
+        "depth": 1,
+        "maxCallersPerLevel": 10,
+        "offset": 99,
+        "maxResults": 1,
+        "impactAnalysis": true,
+    }));
+    assert!(!exhausted_result.is_error, "{}", exhausted_result.content[0].text);
+    let exhausted: Value = serde_json::from_str(&exhausted_result.content[0].text).unwrap();
+    let reasons = exhausted["resultStatus"]["reasons"].as_array().unwrap();
+    assert!(reasons.iter().any(|reason| reason == "offset_out_of_range"));
+    assert!(reasons.iter().any(|reason| reason == "impact_analysis_page_scoped"));
+    assert!(!reasons.iter().any(|reason| reason == "no_call_graph_matches"));
+    assert_eq!(exhausted["resultStatus"]["omitted"]["nodes"], 5);
+}
+
+#[test]
+fn test_single_callers_offset_does_not_spend_body_budget_on_skipped_roots() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let ctx = build_callers_fixture_with_n_callers(5);
+    let source = (1..=60)
+        .map(|line| format!("// line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    {
+        let mut definitions = ctx.def_index.as_ref().unwrap().write().unwrap();
+        let mut path_to_id = HashMap::new();
+        for (file_id, file) in definitions.files.iter_mut().enumerate() {
+            let path = root.join(format!("file{file_id}.cs"));
+            std::fs::write(&path, &source).unwrap();
+            *file = path.to_string_lossy().to_string();
+            path_to_id.insert(crate::path_identity_key(&path), file_id as u32);
+        }
+        definitions.path_to_id = path_to_id;
+    }
+    {
+        let definitions = ctx.def_index.as_ref().unwrap().read().unwrap();
+        let mut content = ctx.index.write().unwrap();
+        content.files = definitions.files.clone();
+        content.path_to_id = Some(definitions.path_to_id.clone());
+    }
+
+    let result = handle_xray_callers(&ctx, &json!({
+        "method": ["process"],
+        "class": "OrderService",
+        "depth": 1,
+        "maxCallersPerLevel": 10,
+        "offset": 3,
+        "maxResults": 1,
+        "includeBody": true,
+        "maxBodyLines": 0,
+        "maxTotalBodyLines": 40,
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let roots = output["callTree"].as_array().unwrap();
+    assert_eq!(roots.len(), 1, "{output:#}");
+    assert_eq!(roots[0]["method"], "run3");
+    assert!(roots[0]["body"].as_array().is_some_and(|body| !body.is_empty()), "{output:#}");
+    assert!(roots[0].get("bodyOmitted").is_none(), "{output:#}");
+}
+
+#[test]
+fn test_callees_offset_pages_top_level_roots() {
+    let ctx = build_down_limit_fixture();
+    let full_result = handle_xray_callers(&ctx, &json!({
+        "method": ["start"],
+        "class": "Root",
+        "direction": "down",
+        "depth": 1,
+        "maxCallersPerLevel": 10,
+    }));
+    assert!(!full_result.is_error, "{}", full_result.content[0].text);
+    let full: Value = serde_json::from_str(&full_result.content[0].text).unwrap();
+    let full_roots = full["callTree"].as_array().unwrap();
+    assert_eq!(full_roots.len(), 3);
+
+    let page_result = handle_xray_callers(&ctx, &json!({
+        "method": ["start"],
+        "class": "Root",
+        "direction": "down",
+        "depth": 1,
+        "maxCallersPerLevel": 10,
+        "offset": 1,
+        "maxResults": 1,
+    }));
+    assert!(!page_result.is_error, "{}", page_result.content[0].text);
+    let page: Value = serde_json::from_str(&page_result.content[0].text).unwrap();
+    assert_eq!(page["callTree"].as_array().unwrap(), &full_roots[1..2]);
+    assert_eq!(page["resultStatus"]["page"]["unit"], "topLevelRoots");
+    assert_eq!(page["resultStatus"]["page"]["offset"], 1);
+    assert_eq!(page["resultStatus"]["page"]["total"], 3);
+    assert_eq!(page["resultStatus"]["page"]["nextOffset"], 2);
+    assert_eq!(page["resultStatus"]["totalKnown"], false);
+    assert_eq!(page["resultStatus"]["page"]["totalKnown"], false);
+    assert_eq!(page["resultStatus"]["total"]["nodes"], 3);
+    assert_eq!(page["resultStatus"]["omitted"]["nodes"], 2);
+}
+
+#[test]
+fn test_large_call_tree_byte_cap_returns_recoverable_root_page() {
+    let mut ctx = build_callers_fixture_with_n_callers(30);
+    ctx.max_response_bytes = 5_000;
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &json!({
+        "method": ["process"],
+        "class": "OrderService",
+        "depth": 1,
+        "maxCallersPerLevel": 40,
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    assert!(result.content[0].text.len() <= 5_000);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let roots = output["callTree"].as_array().unwrap();
+    assert!(!roots.is_empty() && roots.len() < 30, "{output:#}");
+    assert_eq!(output["resultStatus"]["page"]["returned"], roots.len());
+    assert_eq!(output["resultStatus"]["page"]["nextOffset"], roots.len());
+    assert!(output["resultStatus"]["page"]["continuationToken"].as_str().is_some());
+    assert_eq!(output["resultStatus"]["shown"]["nodes"], roots.len());
+    assert_eq!(output["resultStatus"]["totalKnown"], true);
+    assert_eq!(output["resultStatus"]["page"]["totalKnown"], true);
+    assert_eq!(output["resultStatus"]["total"]["nodes"], 30);
+    assert_eq!(output["resultStatus"]["omitted"]["nodes"], 30 - roots.len());
+}
+
+
+#[test]
+fn test_byte_fitted_offset_caller_page_preserves_lower_bound_accounting() {
+    let mut ctx = build_callers_fixture_with_n_callers(30);
+    ctx.max_response_bytes = 3_000;
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &json!({
+        "method": ["process"],
+        "class": "OrderService",
+        "depth": 1,
+        "maxCallersPerLevel": 40,
+        "offset": 5,
+        "maxResults": 20,
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    assert!(result.content[0].text.len() <= 3_000);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let roots = output["callTree"].as_array().unwrap();
+    assert!(!roots.is_empty() && roots.len() < 20, "{output:#}");
+    assert_eq!(output["resultStatus"]["page"]["offset"], 5);
+    assert_eq!(output["resultStatus"]["page"]["returned"], roots.len());
+    assert_eq!(output["resultStatus"]["page"]["total"], 30);
+    assert_eq!(output["resultStatus"]["page"]["nextOffset"], 5 + roots.len());
+    assert_eq!(output["resultStatus"]["totalKnown"], false);
+    assert_eq!(output["resultStatus"]["page"]["totalKnown"], false);
+    let shown_nodes = output["resultStatus"]["shown"]["nodes"].as_u64().unwrap();
+    let total_nodes = output["resultStatus"]["total"]["nodes"].as_u64().unwrap();
+    assert!(total_nodes >= shown_nodes + (30 - roots.len()) as u64, "{output:#}");
+}
+
+#[test]
+fn test_multi_method_offset_pages_input_order() {
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "process", "OrderService", 5, 15),
+        method_def(0, "validate", "OrderService", 20, 30),
+    ];
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(crate::ContentIndex::default())),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(
+            make_def_index(definitions, HashMap::new()),
+        ))),
+        ..Default::default()
+    };
+
+    let result = handle_xray_callers(&ctx, &json!({
+        "method": ["process", "validate", "missing"],
+        "depth": 1,
+        "offset": 1,
+        "maxResults": 1,
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let results = output["results"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["method"], "validate");
+    assert_eq!(output["summary"]["totalMethods"], 3);
+    assert_eq!(output["resultStatus"]["page"]["unit"], "methods");
+    assert_eq!(output["resultStatus"]["page"]["offset"], 1);
+    assert_eq!(output["resultStatus"]["page"]["nextOffset"], 2);
+    assert!(output["resultStatus"]["page"]["continuationToken"].as_str().is_some());
+    assert_eq!(output["resultStatus"]["totalKnown"], false);
+    assert_eq!(output["resultStatus"]["page"]["totalKnown"], false);
 }
 
 #[test]
@@ -4556,6 +4833,9 @@ fn test_per_level_truncation_reports_dropped_count() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let callers = builder.build("Process", None, 0, &[]);
@@ -4648,6 +4928,9 @@ fn test_per_level_truncation_not_set_when_under_limit() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let _ = builder.build("Process", Some("ClassA"), 0, &[]);
@@ -4678,6 +4961,126 @@ fn make_ctx_with_idx(def_idx: DefinitionIndex) -> super::HandlerContext {
         ..Default::default()
     }
 }
+
+#[test]
+fn test_interface_expansion_pages_unique_root_sequence() {
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0,
+            name: "IDatabaseClient".to_string(),
+            kind: DefinitionKind::Interface,
+            line_start: 1,
+            line_end: 20,
+            parent: None,
+            signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        },
+        method_def(0, "UpsertMappingAsync", "IDatabaseClient", 5, 6),
+        class_def(0, "DatabaseClient", vec!["IDatabaseClient"]),
+        method_def(0, "UpsertMappingAsync", "DatabaseClient", 40, 50),
+        class_def(0, "AlternateDatabaseClient", vec!["IDatabaseClient"]),
+        method_def(0, "UpsertMappingAsync", "AlternateDatabaseClient", 120, 130),
+        class_def(1, "Bridge", vec![]),
+        method_def(1, "Run", "Bridge", 10, 40),
+        class_def(1, "AlternateOnly", vec![]),
+        method_def(1, "RunAlternate", "AlternateOnly", 110, 140),
+    ];
+    let mut method_calls = HashMap::new();
+    method_calls.insert(7, vec![
+        CallSite {
+            method_name: "UpsertMappingAsync".to_string(),
+            receiver_type: Some("DatabaseClient".to_string()),
+            line: 20,
+            call_kind: Default::default(),
+            receiver_is_generic: false,
+        },
+        CallSite {
+            method_name: "UpsertMappingAsync".to_string(),
+            receiver_type: Some("AlternateDatabaseClient".to_string()),
+            line: 21,
+            call_kind: Default::default(),
+            receiver_is_generic: false,
+        },
+    ]);
+    method_calls.insert(9, vec![CallSite {
+        method_name: "UpsertMappingAsync".to_string(),
+        receiver_type: Some("AlternateDatabaseClient".to_string()),
+        line: 120,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
+    }]);
+    let mut definition_index = make_def_index(definitions, method_calls);
+    definition_index.path_to_id = definition_index
+        .files
+        .iter()
+        .enumerate()
+        .map(|(file_id, file)| {
+            (
+                crate::path_identity_key(std::path::Path::new(file)),
+                file_id as u32,
+            )
+        })
+        .collect();
+    definition_index
+        .base_type_index
+        .insert("idatabaseclient".to_string(), vec![2, 4]);
+    let content_index = crate::ContentIndex {
+        root: ".".to_string(),
+        files: definition_index.files.clone(),
+        index: HashMap::from([(
+            "upsertmappingasync".to_string(),
+            vec![crate::Posting { file_id: 1, lines: vec![20, 21, 120] }],
+        )]),
+        total_tokens: 3,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![0, 3],
+        ..Default::default()
+    };
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(definition_index))),
+        server_ext: "ts".to_string(),
+        ..Default::default()
+    };
+    let base_args = json!({
+        "method": ["UpsertMappingAsync"],
+        "class": "DatabaseClient",
+        "depth": 1,
+        "resolveInterfaces": true,
+        "maxCallersPerLevel": 10,
+        "maxResults": 1,
+    });
+
+    let first_result = handle_xray_callers(&ctx, &base_args);
+    assert!(!first_result.is_error, "{}", first_result.content[0].text);
+    let first: Value = serde_json::from_str(&first_result.content[0].text).unwrap();
+    assert_eq!(first["callTree"].as_array().unwrap().len(), 1, "{first:#}");
+    assert_eq!(first["resultStatus"]["page"]["returned"], 1);
+    assert_eq!(first["resultStatus"]["page"]["total"], 2);
+    let token = first["resultStatus"]["page"]["continuationToken"]
+        .as_str()
+        .unwrap();
+
+    let second_result = handle_xray_callers(&ctx, &json!({
+        "method": ["UpsertMappingAsync"],
+        "class": "DatabaseClient",
+        "depth": 1,
+        "resolveInterfaces": true,
+        "maxCallersPerLevel": 10,
+        "maxResults": 1,
+        "continuationToken": token,
+    }));
+    assert!(!second_result.is_error, "{}", second_result.content[0].text);
+    let second: Value = serde_json::from_str(&second_result.content[0].text).unwrap();
+    assert_eq!(second["callTree"].as_array().unwrap().len(), 1, "{second:#}");
+    assert_eq!(second["resultStatus"]["page"]["returned"], 1);
+    assert_eq!(second["resultStatus"]["page"]["total"], 2);
+    assert_ne!(first["callTree"][0]["method"], second["callTree"][0]["method"]);
+    assert!(second["resultStatus"]["page"].get("continuationToken").is_none());
+}
+
 
 #[test]
 fn test_advisory_interface_vias_emitted_when_class_implements_interface() {
@@ -5412,6 +5815,9 @@ fn test_impact_analysis_cap_sets_truncation_flag_when_collection_capped() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let _ = builder.build("Process", None, 0, &[]);
@@ -5457,6 +5863,9 @@ fn test_impact_analysis_bounded_collection_starves_late_test_callers() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let _ = builder.build("Process", None, 0, &[]);
@@ -5512,6 +5921,9 @@ fn test_impact_analysis_with_class_filter_avoids_starvation() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let _ = builder.build("Process", Some("ClassA"), 0, &[]);
@@ -5689,6 +6101,9 @@ fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let tree = builder.build("Foo", Some("Worker"), 0, &[]);
@@ -5729,6 +6144,9 @@ fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let tree_off = builder_off.build("Foo", Some("Worker"), 0, &[]);
@@ -5763,6 +6181,9 @@ fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let tree_d1 = builder_d1.build("Foo", Some("Worker"), 0, &[]);
@@ -5921,6 +6342,9 @@ fn test_root_iface_expansion_honors_visible_depth_budget() {
         total_limit_hit: false,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        root_page_offset: 0,
+        root_page_size: 0,
+        root_total_candidates: 0,
         interface_lookup_cache: HashMap::new(),
     };
     let tree = builder.build("Method", Some("ConcreteImpl1"), 0, &[]);

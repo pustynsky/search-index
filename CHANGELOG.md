@@ -3,6 +3,8 @@
 
 ## 0.5.1 (Unreleased)
 
+- **Made response-size truncation recoverable for definitions and call trees.** `xray_definitions` and `xray_callers` now expose stable pages with offsets and index-epoch-bound continuation tokens; byte fitting preserves complete structural entries after optional body stripping, covers attribute-filtered definitions and caller/callee roots, and returns a bounded error when one item cannot fit.
+
 - **Made `xray_info` file reachability truthful.** Per-file `indexed` now reflects actual content-index inclusion rather than extension eligibility alone; additive content/definition reachability fields and exclusion reasons expose hidden, ignored, `.git`, and extension-policy outcomes.
 
 - **Made cached Git totals revision-honest.** Cache-backed Git responses now expose their detected default-branch snapshot as `cacheBranch`/`cacheHead`, while live fallbacks report `source=git-cli`; `xray_git_history` reports `totalCommitsExact=false` unless history is queried live. This avoids exact-count claims after branch or HEAD changes without adding a Git subprocess to the cache hot path.

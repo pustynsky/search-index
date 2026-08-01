@@ -337,7 +337,15 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "maxResults": {
                         "type": "integer",
-                        "description": "Max results (default: 100, 0=unlimited)"
+                        "description": "Page size (default: 100, 0=all remaining)"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Sorted result offset (default: 0). Cannot be combined with continuationToken."
+                    },
+                    "continuationToken": {
+                        "type": "string",
+                        "description": "Next page: repeat this query with the token, omit offset; stop when absent."
                     },
                     "excludeDir": {
                         "type": "array",
@@ -503,6 +511,18 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "maxCallersPerLevel": {
                         "type": "integer",
                         "description": "Max callers per tree node (default: 10)"
+                    },
+                    "maxResults": {
+                        "type": "integer",
+                        "description": "Top-level roots or methods per page (default: 0, all remaining)"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Top-level root or method offset (default: 0). Cannot be combined with continuationToken."
+                    },
+                    "continuationToken": {
+                        "type": "string",
+                        "description": "Next page: repeat this query with the token, omit offset; stop when absent."
                     },
                     "maxTotalNodes": {
                         "type": "integer",
@@ -918,6 +938,9 @@ pub struct HandlerContext {
     /// Whether a definition index build is currently in progress.
     /// Used to prevent concurrent builds. Different from `def_ready`.
     pub def_building: Arc<AtomicBool>,
+    /// Incremented after content/definition index mutations. Continuation tokens
+    /// are bound to this epoch so pages cannot cross index snapshots.
+    pub index_epoch: Arc<AtomicU64>,
     /// Generation counter for the file watcher. Each watcher thread receives its
     /// generation at start, and exits when the counter changes (workspace switch).
     /// Supports unlimited sequential workspace switches (unlike a boolean stop flag).
@@ -1076,6 +1099,7 @@ impl Default for HandlerContext {
             file_index_dirty: Arc::new(AtomicBool::new(true)),
             content_building: Arc::new(AtomicBool::new(false)),
             def_building: Arc::new(AtomicBool::new(false)),
+            index_epoch: Arc::new(AtomicU64::new(1)),
             watcher_generation: Arc::new(AtomicU64::new(0)),
             watch_enabled: false,
             watch_debounce_ms: 500,
@@ -2297,6 +2321,8 @@ fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static 
         match ctx.index.write() {
             Ok(mut current) => {
                 *current = idx;
+                drop(current);
+                utils::record_content_index_publish(&ctx.index_epoch);
                 ctx.content_ready.store(true, Ordering::Release);
                 info!(dir = %dir, "Content index cross-loaded from cache on workspace switch");
             }
@@ -2326,6 +2352,7 @@ fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static 
         (ws.generation, ws.dir.clone())
     };
     let bg_index = Arc::clone(&ctx.index);
+    let bg_index_epoch = Arc::clone(&ctx.index_epoch);
     let bg_dir = dir.to_string();
     let bg_ext = content_ext;
     let bg_idx_base = ctx.index_base.clone();
@@ -2369,6 +2396,7 @@ fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static 
                         idx
                     };
                     *bg_index.write().unwrap_or_else(|e| e.into_inner()) = idx;
+                    utils::record_content_index_publish(&bg_index_epoch);
                     if had_watch {
                         crate::mcp::watcher::schedule_rebuild_file_tokens(Arc::clone(&bg_index));
                     }
@@ -2416,6 +2444,7 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
         Arc::clone(&ctx.file_index_dirty),
         Arc::clone(&ctx.watcher_generation),
         new_gen,
+        Arc::clone(&ctx.index_epoch),
         Arc::clone(&ctx.watcher_stats),
         ctx.respect_git_exclude,
         Arc::clone(&ctx.autosave_dirty),
@@ -2445,6 +2474,7 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
             ctx.rescan_interval_sec,
             Arc::clone(&ctx.watcher_generation),
             new_gen,
+            Arc::clone(&ctx.index_epoch),
             Arc::clone(&ctx.watcher_stats),
             ctx.respect_git_exclude,
             Arc::clone(&ctx.autosave_dirty),
@@ -2665,6 +2695,7 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
             return ToolCallResult::error(format!("Failed to update in-memory index: {}", e));
         }
     }
+    ctx.index_epoch.fetch_add(1, Ordering::AcqRel);
 
     // Warm `file_tokens` in background so the first user edit avoids the
     // ~2.6 s rebuild under the watcher write lock. Lazy guard remains as
@@ -2883,6 +2914,7 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
             return ToolCallResult::error(format!("Failed to update in-memory definition index: {}", e));
         }
     }
+    ctx.index_epoch.fetch_add(1, Ordering::AcqRel);
 
     // Mark workspace as resolved and def index as ready.
     // CRITICAL: def_ready must be set to true here because Fix B

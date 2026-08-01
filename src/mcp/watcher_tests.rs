@@ -1079,7 +1079,7 @@ fn test_process_watcher_batch_preserves_index_scope() {
         &extensions,
         false,
         &test_trigram_build_gate(),
-    ));
+    ).healthy);
 
     let content = index.read().unwrap();
     assert_eq!(content.live_file_count(), 2);
@@ -1175,6 +1175,33 @@ fn test_process_batch_dirty_file() {
         trigram.last_dirty_trigger,
         crate::mcp::handlers::utils::TrigramDirtyTrigger::Watcher,
     );
+}
+
+#[test]
+fn test_process_watcher_batch_ignores_filtered_path_for_index_epoch() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let filtered = root.join("notes.json");
+    std::fs::write(&filtered, "{}\n").unwrap();
+    let index = Arc::new(RwLock::new(ContentIndex::default()));
+    let mut dirty = HashSet::from([filtered]);
+    let mut removed = HashSet::new();
+    let extensions = vec!["cs".to_string()];
+
+    let outcome = process_watcher_batch(
+        &index,
+        &None,
+        &mut dirty,
+        &mut removed,
+        &root.to_string_lossy(),
+        &extensions,
+        &extensions,
+        false,
+        &test_trigram_build_gate(),
+    );
+
+    assert!(outcome.healthy);
+    assert!(!outcome.index_changed);
 }
 
 #[cfg(windows)]
@@ -1826,7 +1853,7 @@ public sealed class RenameLifecycleCaller {
         &extensions,
         false,
         &test_trigram_build_gate(),
-    ));
+    ).healthy);
     assert!(dirty.is_empty());
     assert!(removed.is_empty());
 
@@ -1919,7 +1946,7 @@ fn test_case_only_rename_keeps_one_content_and_definition_identity() {
         &extensions,
         false,
         &test_trigram_build_gate(),
-    ));
+    ).healthy);
 
     let content = content.read().unwrap();
     assert_eq!(content.live_file_count(), 2);
@@ -3232,6 +3259,7 @@ fn periodic_rescan_uses_definition_extensions_subset() {
     );
 
     assert_eq!(outcome.content_added, 1, "content reconcile should see data.json");
+    assert!(outcome.index_changed);
     let def_guard = def_index.read().unwrap_or_else(|e| e.into_inner());
     assert_eq!(
         def_guard.created_at,
@@ -3503,6 +3531,7 @@ fn periodic_rescan_file_index_drift_sets_dirty_flag() {
     assert!(outcome.drift_detected, "file-list drift must be detected");
     assert_eq!(outcome.content_added, 0, ".json must NOT touch content index");
     assert_eq!(outcome.file_index_added, 1);
+    assert!(!outcome.index_changed, "file-list-only drift must preserve continuation tokens");
     assert!(file_index_dirty.load(Ordering::Relaxed),
         "file_index_dirty must be set so the next xray_fast rebuilds");
 }
@@ -3541,6 +3570,7 @@ fn start_periodic_rescan_runs_at_least_one_tick_and_exits_on_generation_change()
         super::MIN_RESCAN_INTERVAL_SEC,
         Arc::clone(&generation),
         0,
+        Arc::new(AtomicU64::new(1)),
         Arc::clone(&stats),
         false,
         autosave_dirty,
@@ -3606,6 +3636,7 @@ fn periodic_rescan_thread_recovers_lost_create_event() {
     let file_index_dirty = Arc::new(AtomicBool::new(false));
     let file_index = Arc::new(RwLock::new(None));
     let generation = Arc::new(AtomicU64::new(0));
+    let index_epoch = Arc::new(AtomicU64::new(1));
 
     let autosave_dirty = Arc::new(AtomicBool::new(false));
     super::start_periodic_rescan(
@@ -3619,6 +3650,7 @@ fn periodic_rescan_thread_recovers_lost_create_event() {
         super::MIN_RESCAN_INTERVAL_SEC,
         Arc::clone(&generation),
         0,
+        Arc::clone(&index_epoch),
         Arc::clone(&stats),
         false,
         autosave_dirty,
@@ -3665,6 +3697,10 @@ fn periodic_rescan_thread_recovers_lost_create_event() {
     assert!(
         file_index_dirty.load(Ordering::Relaxed),
         "file_index_dirty must be set so the next xray_fast rebuilds"
+    );
+    assert!(
+        index_epoch.load(Ordering::Acquire) > 1,
+        "periodic drift reconciliation must invalidate continuation tokens",
     );
 }
 

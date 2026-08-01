@@ -1597,6 +1597,23 @@ fn test_tool_help_xray_edit_includes_decision_card() {
 }
 
 #[test]
+fn test_tool_help_definitions_and_callers_explain_pagination_loop() {
+    let ext = vec!["rs".to_string()];
+    for tool in ["xray_definitions", "xray_callers"] {
+        let help = tool_help(tool, &ext).unwrap();
+        let workflow = &help["paginationWorkflow"];
+        assert!(workflow["steps"].as_array().is_some_and(|steps| steps.len() == 3));
+        assert!(workflow["rules"].as_array().unwrap().iter().any(|rule| {
+            rule.as_str().is_some_and(|text| text.contains("Do not send offset"))
+        }));
+    }
+
+    let catalog = render_json(&ext);
+    assert_eq!(catalog["paginationWorkflow"]["appliesTo"][0], "xray_definitions");
+}
+
+
+#[test]
 fn test_tool_help_unknown_tool_returns_error_with_valid_names() {
     let ext = vec!["rs".to_string()];
     let err = tool_help("xray_nonexistent", &ext).unwrap_err();

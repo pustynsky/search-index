@@ -5,6 +5,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 
 use crate::mcp::protocol::ToolCallResult;
 use crate::clean_path;
@@ -246,6 +247,194 @@ pub(crate) fn add_collection_accounting(result_status: &mut Value, shown: Value,
     result_status["totalKnown"] = json!(true);
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct PageRequest {
+    pub offset: usize,
+    pub requested: bool,
+    pub workspace_generation: u64,
+    pub index_epoch: u64,
+    pub query_fingerprint: String,
+}
+
+fn canonicalize_json(value: Value) -> Value {
+    match value {
+        Value::Object(object) => {
+            let mut entries: Vec<_> = object.into_iter().collect();
+            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            Value::Object(
+                entries
+                    .into_iter()
+                    .map(|(key, value)| (key, canonicalize_json(value)))
+                    .collect(),
+            )
+        }
+        Value::Array(values) => {
+            Value::Array(values.into_iter().map(canonicalize_json).collect())
+        }
+        other => other,
+    }
+}
+
+fn pagination_query_fingerprint(tool_name: &str, args: &Value) -> String {
+    let mut normalized_args = args.clone();
+    if let Some(object) = normalized_args.as_object_mut() {
+        object.remove("offset");
+        object.remove("continuationToken");
+    }
+    let payload = canonicalize_json(json!({
+        "tool": tool_name,
+        "arguments": normalized_args,
+    }));
+    let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+pub(crate) fn record_content_index_publish(
+    index_epoch: &std::sync::atomic::AtomicU64,
+) {
+    index_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+}
+
+
+pub(crate) fn continuation_token(
+    index_epoch: u64,
+    next_offset: usize,
+    query_fingerprint: &str,
+) -> String {
+    format!(
+        "xrp1.{index_epoch}.{next_offset}.{query_fingerprint}"
+    )
+}
+
+pub(crate) fn read_non_negative_usize(
+    args: &Value,
+    key: &str,
+    default: usize,
+) -> Result<usize, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(value) => {
+            let raw = value
+                .as_u64()
+                .ok_or_else(|| format!("{key} must be a non-negative integer"))?;
+            usize::try_from(raw).map_err(|_| format!("{key} is too large"))
+        }
+    }
+}
+
+
+pub(crate) fn parse_page_request(
+    ctx: &HandlerContext,
+    tool_name: &str,
+    args: &Value,
+) -> Result<PageRequest, String> {
+    let explicit_offset = match args.get("offset") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            let raw = value
+                .as_u64()
+                .ok_or_else(|| "offset must be a non-negative integer".to_string())?;
+            Some(usize::try_from(raw).map_err(|_| "offset is too large".to_string())?)
+        }
+    };
+    let token = match args.get("continuationToken") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) if !value.is_empty() => Some(value.as_str()),
+        Some(_) => return Err("continuationToken must be a non-empty string".to_string()),
+    };
+    if explicit_offset.is_some() && token.is_some() {
+        return Err("offset cannot be combined with continuationToken".to_string());
+    }
+
+    let workspace_generation = ctx
+        .workspace
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .generation;
+    let index_epoch = ctx.index_epoch.load(std::sync::atomic::Ordering::Acquire);
+    let query_fingerprint = pagination_query_fingerprint(tool_name, args);
+    let offset = if let Some(token) = token {
+        let mut parts = token.split('.');
+        let version = parts.next();
+        let generation = parts.next().and_then(|value| value.parse::<u64>().ok());
+        let offset = parts.next().and_then(|value| value.parse::<usize>().ok());
+        let fingerprint = parts.next();
+        if version != Some("xrp1")
+            || generation.is_none()
+            || offset.is_none()
+            || fingerprint.is_none()
+            || parts.next().is_some()
+        {
+            return Err("continuationToken is malformed".to_string());
+        }
+        if generation != Some(index_epoch) {
+            return Err(format!(
+                "stale continuationToken: index epoch changed from {} to {}",
+                generation.unwrap_or_default(),
+                index_epoch,
+            ));
+        }
+        if fingerprint != Some(query_fingerprint.as_str()) {
+            return Err("continuationToken does not match this query".to_string());
+        }
+        offset.unwrap_or_default()
+    } else {
+        explicit_offset.unwrap_or(0)
+    };
+
+    Ok(PageRequest {
+        offset,
+        requested: explicit_offset.is_some() || token.is_some(),
+        workspace_generation,
+        index_epoch,
+        query_fingerprint,
+    })
+}
+
+pub(crate) fn attach_page_status(
+    result_status: &mut Value,
+    unit: &str,
+    page_request: &PageRequest,
+    returned: usize,
+    total: usize,
+) {
+    let next_offset = page_request.offset.saturating_add(returned);
+    let total_known = result_status
+        .get("totalKnown")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let mut page = json!({
+        "unit": unit,
+        "offset": page_request.offset,
+        "returned": returned,
+        "total": total,
+        "workspaceGeneration": page_request.workspace_generation,
+        "indexEpoch": page_request.index_epoch,
+        "queryFingerprint": page_request.query_fingerprint,
+        "totalKnown": total_known,
+    });
+    if returned > 0 && next_offset < total {
+        page["nextOffset"] = json!(next_offset);
+        page["continuationToken"] = json!(continuation_token(
+            page_request.index_epoch,
+            next_offset,
+            &page_request.query_fingerprint,
+        ));
+    }
+    result_status["page"] = page;
+    if page_request.offset > 0 || next_offset < total {
+        result_status["status"] = json!("partial");
+        result_status["complete"] = json!(false);
+        result_status["safeForExhaustiveClaims"] = json!(false);
+        let reasons = result_status["reasons"].as_array_mut();
+        if let Some(reasons) = reasons
+            && !reasons.iter().any(|reason| reason == "pagination")
+        {
+            reasons.push(json!("pagination"));
+        }
+    }
+}
+
 fn add_generic_accounting_from_output(result_status: &mut Value, output: &Value) {
     let Some(summary) = output.get("summary") else {
         result_status["totalKnown"] = json!(false);
@@ -337,7 +526,14 @@ pub(crate) fn mark_result_status_response_truncated(output: &mut Value, reasons:
     if !reasons.is_empty() {
         status["truncationDetails"] = json!(reasons);
     }
-    add_generic_accounting_from_output(&mut status, output);
+    let page_accounting_is_lower_bound = status
+        .get("page")
+        .and_then(|page| page.get("totalKnown"))
+        .and_then(Value::as_bool)
+        == Some(false);
+    if !page_accounting_is_lower_bound {
+        add_generic_accounting_from_output(&mut status, output);
+    }
     set_result_status(output, status);
 }
 
@@ -1884,6 +2080,15 @@ fn phase_strip_body_fields(output: &mut Value, reasons: &mut Vec<String>) {
                 }
             }
         }
+        if let Some(root_method) = obj.get_mut("rootMethod")
+            && let Some(root_object) = root_method.as_object_mut()
+        {
+            for field in body_fields {
+                if root_object.remove(*field).is_some() {
+                    stripped = true;
+                }
+            }
+        }
         // Strip bodies from multi-method batch results: results[].callTree[]
         if let Some(results_arr) = obj.get_mut("results").and_then(|v| v.as_array_mut()) {
             for result_entry in results_arr.iter_mut() {
@@ -1917,6 +2122,25 @@ fn phase_strip_body_fields(output: &mut Value, reasons: &mut Vec<String>) {
             reasons.push("stripped body fields to preserve signatures".to_string());
             if let Some(summary) = obj.get_mut("summary") {
                 summary["bodiesStrippedForSize"] = json!(true);
+                if summary.get("totalBodyLinesReturned").is_some() {
+                    summary["totalBodyLinesReturned"] = json!(0);
+                }
+            }
+            let evidence_level = if obj.contains_key("definitions") {
+                "index_map"
+            } else {
+                "ast_call_graph"
+            };
+            if let Some(result_status) = obj.get_mut("resultStatus") {
+                result_status["evidenceLevel"] = json!(evidence_level);
+                result_status["safeForExactSemantics"] = json!(false);
+                let total_body_lines = result_status["total"]["bodyLines"].as_u64();
+                if result_status["shown"]["bodyLines"].is_number() {
+                    result_status["shown"]["bodyLines"] = json!(0);
+                }
+                if let Some(total_body_lines) = total_body_lines {
+                    result_status["omitted"]["bodyLines"] = json!(total_body_lines);
+                }
             }
         }
     }
@@ -1940,6 +2164,205 @@ fn phase_remove_line_content(output: &mut Value, reasons: &mut Vec<String>) {
 }
 
 /// Phase 5c: Generic fallback — truncate the largest top-level array (not "files"/"summary").
+fn recoverable_page_array_key(output: &Value) -> Option<&'static str> {
+    let unit = output
+        .get("resultStatus")?
+        .get("page")?
+        .get("unit")?
+        .as_str()?;
+    let key = match unit {
+        "definitions" => "definitions",
+        "topLevelRoots" => "callTree",
+        "methods" => "results",
+        _ => return None,
+    };
+    output.get(key).and_then(Value::as_array).map(|_| key)
+}
+
+fn update_recoverable_page(output: &mut Value, array_key: &str, keep: usize) {
+    if let Some(array) = output.get_mut(array_key).and_then(Value::as_array_mut) {
+        array.truncate(keep);
+    }
+
+    let (offset, total, generation, fingerprint) = {
+        let page = &output["resultStatus"]["page"];
+        (
+            page.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize,
+            page.get("total").and_then(Value::as_u64).unwrap_or(keep as u64) as usize,
+            page.get("indexEpoch").and_then(Value::as_u64).unwrap_or(0),
+            page.get("queryFingerprint").and_then(Value::as_str).unwrap_or("").to_string(),
+        )
+    };
+    let next_offset = offset.saturating_add(keep);
+    if let Some(page) = output
+        .get_mut("resultStatus")
+        .and_then(|status| status.get_mut("page"))
+        .and_then(Value::as_object_mut)
+    {
+        page.insert("returned".to_string(), json!(keep));
+        page.remove("nextOffset");
+        page.remove("continuationToken");
+        if keep > 0 && next_offset < total {
+            page.insert("nextOffset".to_string(), json!(next_offset));
+            page.insert(
+                "continuationToken".to_string(),
+                json!(continuation_token(generation, next_offset, &fingerprint)),
+            );
+        }
+    }
+
+    if let Some(summary) = output.get_mut("summary")
+        && summary.get("returned").is_some()
+    {
+        summary["returned"] = json!(keep);
+    }
+
+    let shown_nodes = match array_key {
+        "callTree" => output
+            .get("callTree")
+            .and_then(Value::as_array)
+            .map(|nodes| count_tree_nodes(nodes) as u64),
+        "results" => output
+            .get("results")
+            .and_then(Value::as_array)
+            .map(|results| {
+                results
+                    .iter()
+                    .filter_map(|result| result.get("callTree").and_then(Value::as_array))
+                    .map(|nodes| count_tree_nodes(nodes) as u64)
+                    .sum()
+            }),
+        _ => None,
+    };
+    if let Some(status) = output.get_mut("resultStatus") {
+        if array_key == "definitions" {
+            status["shown"]["definitions"] = json!(keep);
+            if let Some(total_definitions) = status["total"]["definitions"].as_u64() {
+                status["omitted"]["definitions"] =
+                    json!(total_definitions.saturating_sub(keep as u64));
+            }
+        } else if let Some(shown_nodes) = shown_nodes {
+            status["shown"]["nodes"] = json!(shown_nodes);
+            if let Some(total_nodes) = status["total"]["nodes"].as_u64() {
+                status["omitted"]["nodes"] = json!(total_nodes.saturating_sub(shown_nodes));
+            }
+        }
+    }
+}
+
+fn oversized_page_item_error(output: &Value, max_bytes: usize) -> Value {
+    let page = &output["resultStatus"]["page"];
+    let item_offset = page.get("offset").and_then(Value::as_u64).unwrap_or(0);
+    let unit = page.get("unit").and_then(Value::as_str).unwrap_or("items");
+    let total = page.get("total").and_then(Value::as_u64).unwrap_or(0);
+    let mut result = json!({
+        "error": {
+            "code": "single_item_exceeds_response_budget",
+            "message": "The next complete result item exceeds the response byte budget.",
+            "itemOffset": item_offset,
+            "maxResponseBytes": max_bytes,
+            "unit": unit,
+        },
+        "summary": {
+            "responseTruncated": true,
+            "hint": "Narrow the query, reduce depth/body limits, or disable body inclusion before retrying the same offset.",
+        },
+        "resultStatus": {
+            "status": "partial",
+            "complete": false,
+            "safeForExhaustiveClaims": false,
+            "safeForExactSemantics": false,
+            "totalKnown": true,
+            "evidenceLevel": "metadata",
+            "reasons": ["single_item_exceeds_response_budget"],
+            "page": {
+                "unit": unit,
+                "offset": item_offset,
+                "returned": 0,
+                "total": total,
+            },
+        },
+    });
+    if measure_json_size(&result) > max_bytes {
+        result = json!({
+            "error": {
+                "code": "single_item_exceeds_response_budget",
+                "itemOffset": item_offset,
+            }
+        });
+    }
+    if measure_json_size(&result) > max_bytes {
+        result = json!({ "error": 1 });
+    }
+    if measure_json_size(&result) > max_bytes {
+        result = if max_bytes >= 2 { json!({}) } else { json!(0) };
+    }
+    result
+}
+
+fn fit_recoverable_page(
+    output: Value,
+    array_key: &str,
+    max_bytes: usize,
+    reasons: &[String],
+    original_bytes: usize,
+) -> Value {
+    let original_count = output
+        .get(array_key)
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    if original_count == 0 {
+        return output;
+    }
+
+    let build_candidate = |keep: usize, measurement: bool| {
+        let mut candidate = output.clone();
+        update_recoverable_page(&mut candidate, array_key, keep);
+        if measurement
+            && candidate["resultStatus"]["page"].get("continuationToken").is_none()
+        {
+            let (offset, epoch, fingerprint) = {
+                let page = &candidate["resultStatus"]["page"];
+                (
+                    page["offset"].as_u64().unwrap_or(0) as usize,
+                    page["indexEpoch"].as_u64().unwrap_or(0),
+                    page["queryFingerprint"].as_str().unwrap_or("").to_string(),
+                )
+            };
+            candidate["resultStatus"]["page"]["nextOffset"] = json!(offset + keep);
+            candidate["resultStatus"]["page"]["continuationToken"] =
+                json!(continuation_token(epoch, offset + keep, &fingerprint));
+        }
+        let mut candidate_reasons = reasons.to_vec();
+        candidate_reasons.push(format!(
+            "byte-fitted '{}' page from {} to {} complete entries",
+            array_key, original_count, keep,
+        ));
+        inject_truncation_metadata(&mut candidate, &candidate_reasons, original_bytes);
+        candidate
+    };
+
+    let mut low = 1usize;
+    let mut high = original_count;
+    let mut best_keep: Option<usize> = None;
+    while low <= high {
+        let midpoint = low + (high - low) / 2;
+        let candidate = build_candidate(midpoint, true);
+        if measure_json_size(&candidate) <= max_bytes {
+            best_keep = Some(midpoint);
+            low = midpoint.saturating_add(1);
+        } else {
+            high = midpoint.saturating_sub(1);
+        }
+    }
+
+    best_keep
+        .map(|keep| build_candidate(keep, false))
+        .unwrap_or_else(|| oversized_page_item_error(&output, max_bytes))
+}
+
+
 fn phase_truncate_largest_array(output: &mut Value, max_bytes: usize, reasons: &mut Vec<String>) {
     let current_size = measure_json_size(output);
     if current_size <= max_bytes {
@@ -2029,8 +2452,11 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
         return output;
     }
 
-    phase_truncate_largest_array(&mut output, max_bytes, &mut reasons);
+    if let Some(array_key) = recoverable_page_array_key(&output) {
+        return fit_recoverable_page(output, array_key, max_bytes, &reasons, initial_size);
+    }
 
+    phase_truncate_largest_array(&mut output, max_bytes, &mut reasons);
     inject_truncation_metadata(&mut output, &reasons, initial_size);
     output
 }
@@ -2080,6 +2506,24 @@ fn inject_truncation_metadata(output: &mut Value, reasons: &[String], original_b
 
 /// Apply response size truncation to a ToolCallResult (no metrics injection).
 /// Used when metrics are disabled but we still need to cap response size.
+fn is_single_item_budget_error(output: &Value, truncation_applied: bool) -> bool {
+    let structured_error = output
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(Value::as_str)
+        == Some("single_item_exceeds_response_budget");
+    structured_error
+        || (truncation_applied
+            && match output {
+                Value::Object(object) => {
+                    object.is_empty() || object.get("error").and_then(Value::as_u64) == Some(1)
+                }
+                Value::Number(number) => number.as_u64() == Some(0),
+                _ => false,
+            })
+}
+
+
 pub(crate) fn truncate_response_if_needed(result: ToolCallResult, max_bytes: usize) -> ToolCallResult {
     if max_bytes == 0 {
         return result;
@@ -2096,13 +2540,10 @@ pub(crate) fn truncate_response_if_needed(result: ToolCallResult, max_bytes: usi
 
     if let Ok(output) = serde_json::from_str::<Value>(text) {
         let truncated = truncate_large_response(output, max_bytes);
-        // Preserve is_error flag: truncation must not flip errors into success.
-        let was_error = result.is_error;
-        let new_result = ToolCallResult::success(json_to_string(&truncated));
-        if was_error {
-            ToolCallResult { is_error: true, ..new_result }
-        } else {
-            new_result
+        let is_error = result.is_error || is_single_item_budget_error(&truncated, true);
+        ToolCallResult {
+            is_error,
+            ..ToolCallResult::success(json_to_string(&truncated))
         }
     } else {
         result
@@ -2144,17 +2585,27 @@ pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start
             }
         }
 
-        output = truncate_large_response(output, max_bytes);
+        let truncation_budget = if max_bytes > 128 {
+            max_bytes - 128
+        } else {
+            max_bytes
+        };
+        let truncation_applied =
+            truncation_budget > 0 && measure_json_size(&output) > truncation_budget;
+        output = truncate_large_response(output, truncation_budget);
+        let force_error = is_single_item_budget_error(&output, truncation_applied);
 
-        // Measure response size after truncation
-        let json_str = json_to_string(&output);
-        let bytes = json_str.len();
+        // Measure response size after truncation.
+        let bytes = json_to_string(&output).len();
         if let Some(summary) = output.get_mut("summary") {
             summary["responseBytes"] = json!(bytes);
             summary["estimatedTokens"] = json!(bytes / 4);
         }
 
-        ToolCallResult { is_error: was_error, ..ToolCallResult::success(json_to_string(&output)) }
+        ToolCallResult {
+            is_error: was_error || force_error,
+            ..ToolCallResult::success(json_to_string(&output))
+        }
     } else {
         // Not valid JSON or no summary -- return as-is
         result

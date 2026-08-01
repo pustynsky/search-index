@@ -19,7 +19,7 @@ use crate::definitions::{DefinitionEntry, DefinitionIndex, DefinitionKind, CodeS
 use crate::ContentIndex;
 use crate::mcp::lock_order;
 
-use super::utils::{add_collection_accounting, attach_result_status, build_result_status, inject_body_into_obj, inject_branch_warning, inject_index_degraded, best_match_tier, json_to_string, name_similarity, read_enum_string_opt, read_string};
+use super::utils::{add_collection_accounting, attach_page_status, attach_result_status, best_match_tier, build_result_status, inject_body_into_obj, inject_branch_warning, inject_index_degraded, json_to_string, name_similarity, parse_page_request, read_enum_string_opt, read_string, PageRequest};
 use super::HandlerContext;
 use super::advisory_hints::value_source_hint;
 use super::file_scope::{intersect_sorted_candidate_ids, ResolvedFileScope};
@@ -295,6 +295,79 @@ fn kind_priority(kind: &DefinitionKind) -> u8 {
 
 // ─── Main entry point (orchestrator) ─────────────────────────────────
 
+#[cfg(feature = "lang-xml")]
+fn paginate_xml_on_demand_result(
+    result: ToolCallResult,
+    args: &DefinitionSearchArgs,
+    page_request: &PageRequest,
+) -> ToolCallResult {
+    if result.is_error {
+        return result;
+    }
+    let Some(content) = result.content.first() else {
+        return result;
+    };
+    let Ok(mut output) = serde_json::from_str::<Value>(&content.text) else {
+        return result;
+    };
+    let total = output
+        .get("summary")
+        .and_then(|summary| summary.get("totalResults"))
+        .and_then(Value::as_u64)
+        .and_then(|total| usize::try_from(total).ok())
+        .or_else(|| output.get("definitions").and_then(Value::as_array).map(Vec::len))
+        .unwrap_or(0);
+    let Some(definitions) = output.get_mut("definitions").and_then(Value::as_array_mut) else {
+        return result;
+    };
+    let offset = page_request.offset.min(definitions.len());
+    definitions.drain(..offset);
+    if args.max_results > 0 && definitions.len() > args.max_results {
+        definitions.truncate(args.max_results);
+    }
+    let returned = definitions.len();
+    if let Some(summary) = output.get_mut("summary") {
+        summary["returned"] = json!(returned);
+        summary["totalResults"] = json!(total);
+    }
+    let complete = page_request.offset == 0 && returned == total;
+    let reasons = if total == 0 {
+        vec!["no_matches".to_string()]
+    } else if page_request.offset >= total {
+        vec!["offset_out_of_range".to_string()]
+    } else {
+        Vec::new()
+    };
+    let mut result_status = build_result_status(
+        if total == 0 {
+            "not_found"
+        } else if complete {
+            "complete"
+        } else {
+            "partial"
+        },
+        complete,
+        complete,
+        false,
+        if args.include_body { "full_body" } else { "index_map" },
+        reasons,
+    );
+    add_collection_accounting(
+        &mut result_status,
+        json!({ "definitions": returned }),
+        json!({ "definitions": total }),
+    );
+    attach_page_status(
+        &mut result_status,
+        "definitions",
+        page_request,
+        returned,
+        total,
+    );
+    ToolCallResult::success(json_to_string(&attach_result_status(output, result_status)))
+}
+
+
 pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index = match &ctx.def_index {
         Some(idx) => idx,
@@ -333,6 +406,22 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
         Ok(a) => a,
         Err(msg) => return ToolCallResult::error(msg),
     };
+    let page_request = match parse_page_request(ctx, "xray_definitions", args) {
+        Ok(request) => request,
+        Err(message) => return ToolCallResult::error(message),
+    };
+    if page_request.requested {
+        if parsed.audit {
+            return ToolCallResult::error(
+                "offset and continuationToken are not supported with audit=true".to_string(),
+            );
+        }
+        if parsed.contains_line.is_some() {
+            return ToolCallResult::error(
+                "offset and continuationToken are not supported with containsLine".to_string(),
+            );
+        }
+    }
 
     // 2. Audit mode — early return
     if parsed.audit {
@@ -349,8 +438,28 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
     // user gives a basename / partial path that does not exist verbatim
     // under server_dir. See `todo_2026-04-25_definitions-file-suffix-matching.md`.
     #[cfg(feature = "lang-xml")]
-    if let Some(result) = super::xml_on_demand::try_intercept(&parsed, search_start, ctx, &index.files) {
-        return result;
+    {
+        let mut xml_args = parsed.clone();
+        let xml_page_query = parsed.contains_line.is_none() && parsed.name_filter.is_some();
+        if xml_page_query {
+            xml_args.max_results = if parsed.max_results == 0 {
+                usize::MAX
+            } else {
+                page_request.offset.saturating_add(parsed.max_results)
+            };
+        }
+        if let Some(result) = super::xml_on_demand::try_intercept(
+            &xml_args,
+            search_start,
+            ctx,
+            &index.files,
+        ) {
+            return if xml_page_query {
+                paginate_xml_on_demand_result(result, &parsed, &page_request)
+            } else {
+                result
+            };
+        }
     }
 
     // 3. ContainsLine mode — early return
@@ -398,7 +507,14 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
 
     // 6a. Auto-correction: if 0 results, try kind/name correction before generating hints
     if total_results == 0
-        && let Some(corrected_result) = attempt_auto_correction(&index, &parsed, search_start, ctx, content_idx) {
+        && let Some(corrected_result) = attempt_auto_correction(
+            &index,
+            &parsed,
+            search_start,
+            ctx,
+            content_idx,
+            &page_request,
+        ) {
             return corrected_result;
         }
 
@@ -409,7 +525,7 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
     sort_results(&mut results, &index, &parsed);
 
     // 9. Auto-summary: if results won't fit AND it's a broad query, return grouped summary
-    if should_auto_summary(&parsed, total_results) {
+    if !page_request.requested && should_auto_summary(&parsed, total_results) {
         return build_auto_summary_with_scope(
             &index,
             &results,
@@ -421,7 +537,9 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
         );
     }
 
-    // 10. Apply max results
+    // 10. Apply the stable sorted page.
+    let offset = page_request.offset.min(results.len());
+    results.drain(..offset);
     if parsed.max_results > 0 && results.len() > parsed.max_results {
         results.truncate(parsed.max_results);
     }
@@ -440,6 +558,7 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
         ctx,
         content_idx,
         scope_telemetry.as_ref(),
+        &page_request,
     )
 }
 
@@ -1516,13 +1635,14 @@ fn definitions_evidence_level(
 
 fn build_definitions_result_status(
     args: &DefinitionSearchArgs,
+    page_request: &PageRequest,
     returned: usize,
     total_results: usize,
     total_body_lines_emitted: usize,
     total_body_lines_available: usize,
 ) -> Value {
     let body_complete = !args.include_body || total_body_lines_emitted >= total_body_lines_available;
-    let complete = returned == total_results && body_complete;
+    let complete = page_request.offset == 0 && returned == total_results && body_complete;
     let status = if total_results == 0 {
         "not_found"
     } else if complete {
@@ -1534,8 +1654,14 @@ fn build_definitions_result_status(
     if total_results == 0 {
         reasons.push("no_matches".to_string());
     }
-    if returned < total_results {
+    if page_request.offset > 0 {
+        reasons.push("pagination_offset".to_string());
+    }
+    if page_request.offset.saturating_add(returned) < total_results {
         reasons.push("max_results_limit".to_string());
+    }
+    if page_request.offset >= total_results && total_results > 0 {
+        reasons.push("offset_out_of_range".to_string());
     }
     if args.include_body && !body_complete {
         reasons.push("body_line_budget".to_string());
@@ -1567,6 +1693,13 @@ fn build_definitions_result_status(
         json!({ "definitions": total_results })
     };
     add_collection_accounting(&mut result_status, shown, total);
+    attach_page_status(
+        &mut result_status,
+        "definitions",
+        page_request,
+        returned,
+        total_results,
+    );
     result_status["request"] = json!({
         "exactNameOnly": args.exact_name_only,
         "autoCorrect": args.auto_correct,
@@ -1662,6 +1795,7 @@ fn format_search_output(
     ctx: &HandlerContext,
     content_idx: Option<&ContentIndex>,
     scope_telemetry: Option<&DefinitionScopeTelemetry>,
+    page_request: &PageRequest,
 ) -> ToolCallResult {
     let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
@@ -1707,6 +1841,7 @@ fn format_search_output(
     };
     let mut result_status = build_definitions_result_status(
         args,
+        page_request,
         defs_json.len(),
         total_results,
         total_body_lines_emitted,
@@ -2204,6 +2339,7 @@ fn attempt_auto_correction(
     search_start: Instant,
     ctx: &HandlerContext,
     content_idx: Option<&ContentIndex>,
+    page_request: &PageRequest,
 ) -> Option<ToolCallResult> {
     if !original_args.auto_correct || original_args.exact_name_only {
         return None;
@@ -2212,14 +2348,14 @@ fn attempt_auto_correction(
     // A. Kind mismatch: kind filter is set + name/file filter exists
     if let Some(ref original_kind) = original_args.kind_filter
         && (original_args.name_filter.is_some() || original_args.file_filter.is_some())
-            && let Some(result) = try_kind_correction(index, original_args, original_kind, search_start, ctx, content_idx) {
+            && let Some(result) = try_kind_correction(index, original_args, original_kind, search_start, ctx, content_idx, page_request) {
                 return Some(result);
             }
 
     // B. Nearest name match (≥85% similarity)
     if let Some(ref original_name) = original_args.name_filter
         && !original_args.use_regex
-            && let Some(result) = try_name_correction(index, original_args, original_name, search_start, ctx, content_idx) {
+            && let Some(result) = try_name_correction(index, original_args, original_name, search_start, ctx, content_idx, page_request) {
                 return Some(result);
             }
 
@@ -2236,6 +2372,7 @@ fn try_kind_correction(
     search_start: Instant,
     ctx: &HandlerContext,
     content_idx: Option<&ContentIndex>,
+    page_request: &PageRequest,
 ) -> Option<ToolCallResult> {
     let mut probe_args = original_args.clone();
     probe_args.kind_filter = None;
@@ -2273,7 +2410,7 @@ fn try_kind_correction(
     let mut corrected_args = original_args.clone();
     corrected_args.kind_filter = None;
 
-    run_corrected_search(index, &corrected_args, search_start, ctx, content_idx, json!({
+    run_corrected_search(index, &corrected_args, search_start, ctx, content_idx, page_request, json!({
         "type": "kindCorrected",
         "original": { "kind": original_kind },
         "corrected": { "kind": null },
@@ -2299,6 +2436,7 @@ fn try_name_correction(
     search_start: Instant,
     ctx: &HandlerContext,
     content_idx: Option<&ContentIndex>,
+    page_request: &PageRequest,
 ) -> Option<ToolCallResult> {
     let search_lower = original_name.to_lowercase();
     let mut best_name: Option<String> = None;
@@ -2339,7 +2477,7 @@ fn try_name_correction(
     let mut corrected_args = original_args.clone();
     corrected_args.name_filter = Some(corrected_name.clone());
 
-    run_corrected_search(index, &corrected_args, search_start, ctx, content_idx, json!({
+    run_corrected_search(index, &corrected_args, search_start, ctx, content_idx, page_request, json!({
         "type": "nameCorrected",
         "original": { "name": original_name },
         "corrected": { "name": &corrected_name },
@@ -2359,6 +2497,7 @@ fn run_corrected_search(
     search_start: Instant,
     ctx: &HandlerContext,
     content_idx: Option<&ContentIndex>,
+    page_request: &PageRequest,
     auto_correction: Value,
 ) -> Option<ToolCallResult> {
     let file_scope = args.file_filter_terms.as_ref()
@@ -2390,6 +2529,8 @@ fn run_corrected_search(
     let term_breakdown = compute_term_breakdown(&results, &def_to_term, args);
     sort_results(&mut results, index, args);
 
+    let offset = page_request.offset.min(results.len());
+    results.drain(..offset);
     if args.max_results > 0 && results.len() > args.max_results {
         results.truncate(args.max_results);
     }
@@ -2399,7 +2540,7 @@ fn run_corrected_search(
     let tool_result = format_search_output(
         index, &results, args, total_results, &stats_info,
         &term_breakdown, search_elapsed, ctx, content_idx,
-        scope_telemetry.as_ref(),
+        scope_telemetry.as_ref(), page_request,
     );
 
     if let Some(content) = tool_result.content.first()

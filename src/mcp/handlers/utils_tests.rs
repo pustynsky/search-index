@@ -2097,6 +2097,266 @@ fn test_phase_truncate_largest_array_noop_when_under_budget() {
     assert!(reasons.is_empty(), "Should not add reason when under budget");
 }
 
+#[test]
+fn test_continuation_token_rejects_query_and_generation_drift() {
+    let ctx = HandlerContext::default();
+    let first = parse_page_request(
+        &ctx,
+        "xray_definitions",
+        &json!({ "name": ["Service"], "maxResults": 2, "offset": 0 }),
+    ).unwrap();
+    let token = continuation_token(
+        first.index_epoch,
+        2,
+        &first.query_fingerprint,
+    );
+    let continued = parse_page_request(
+        &ctx,
+        "xray_definitions",
+        &json!({
+            "name": ["Service"],
+            "maxResults": 2,
+            "continuationToken": token,
+        }),
+    ).unwrap();
+    assert_eq!(continued.offset, 2);
+
+    let query_error = parse_page_request(
+        &ctx,
+        "xray_definitions",
+        &json!({
+            "name": ["Other"],
+            "maxResults": 2,
+            "continuationToken": continuation_token(
+                first.index_epoch,
+                2,
+                &first.query_fingerprint,
+            ),
+        }),
+    ).unwrap_err();
+    assert!(query_error.contains("does not match"), "{query_error}");
+
+    ctx.index_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let stale_error = parse_page_request(
+        &ctx,
+        "xray_definitions",
+        &json!({
+            "name": ["Service"],
+            "maxResults": 2,
+            "continuationToken": continuation_token(
+                first.index_epoch,
+                2,
+                &first.query_fingerprint,
+            ),
+        }),
+    ).unwrap_err();
+    assert!(stale_error.contains("stale"), "{stale_error}");
+}
+
+
+#[test]
+fn test_content_index_publication_invalidates_continuation_token() {
+    let ctx = HandlerContext::default();
+    let first = parse_page_request(
+        &ctx,
+        "xray_callers",
+        &json!({ "method": ["process"], "maxResults": 2 }),
+    ).unwrap();
+    let token = continuation_token(first.index_epoch, 2, &first.query_fingerprint);
+
+    *ctx.index.write().unwrap() = crate::ContentIndex {
+        total_tokens: 1,
+        ..Default::default()
+    };
+    record_content_index_publish(&ctx.index_epoch);
+
+    let stale_error = parse_page_request(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["process"],
+            "maxResults": 2,
+            "continuationToken": token,
+        }),
+    ).unwrap_err();
+    assert!(stale_error.contains("stale"), "{stale_error}");
+}
+
+#[test]
+fn test_page_request_nulls_are_unset_and_fingerprint_is_key_order_independent() {
+    let ctx = HandlerContext::default();
+    let mut first_args = serde_json::Map::new();
+    first_args.insert("name".to_string(), json!(["Service"]));
+    first_args.insert("maxResults".to_string(), json!(2));
+    first_args.insert("offset".to_string(), Value::Null);
+    first_args.insert("continuationToken".to_string(), Value::Null);
+    let mut second_args = serde_json::Map::new();
+    second_args.insert("continuationToken".to_string(), Value::Null);
+    second_args.insert("offset".to_string(), Value::Null);
+    second_args.insert("maxResults".to_string(), json!(2));
+    second_args.insert("name".to_string(), json!(["Service"]));
+
+    let first = parse_page_request(
+        &ctx,
+        "xray_definitions",
+        &Value::Object(first_args),
+    ).unwrap();
+    let second = parse_page_request(
+        &ctx,
+        "xray_definitions",
+        &Value::Object(second_args),
+    ).unwrap();
+    assert_eq!(first.offset, 0);
+    assert!(!first.requested);
+    assert_eq!(first.query_fingerprint, second.query_fingerprint);
+    assert_eq!(read_non_negative_usize(&json!({ "maxResults": null }), "maxResults", 7).unwrap(), 7);
+}
+
+#[test]
+fn test_body_stripping_lowers_evidence_level() {
+    let mut output = json!({
+        "definitions": [{ "name": "Run", "body": ["line"] }],
+        "summary": { "totalBodyLinesReturned": 8 },
+        "resultStatus": {
+            "evidenceLevel": "full_body",
+            "safeForExactSemantics": true,
+            "shown": { "nodes": 1, "bodyLines": 8 },
+            "total": { "nodes": 3, "bodyLines": 12 },
+            "omitted": { "nodes": 2, "bodyLines": 4 },
+            "page": { "totalKnown": false },
+        },
+    });
+    let mut reasons = Vec::new();
+    phase_strip_body_fields(&mut output, &mut reasons);
+    assert_eq!(output["resultStatus"]["evidenceLevel"], "index_map");
+    assert_eq!(output["resultStatus"]["safeForExactSemantics"], false);
+    assert_eq!(output["summary"]["totalBodyLinesReturned"], 0);
+    assert_eq!(output["resultStatus"]["shown"]["bodyLines"], 0);
+    assert_eq!(output["resultStatus"]["total"]["bodyLines"], 12);
+    assert_eq!(output["resultStatus"]["omitted"]["bodyLines"], 12);
+}
+
+#[test]
+fn test_recoverable_page_truncation_advances_by_actual_prefix() {
+    let page_request = PageRequest {
+        offset: 4,
+        requested: true,
+        workspace_generation: 7,
+        index_epoch: 7,
+        query_fingerprint: "a".repeat(64),
+    };
+    let definitions: Vec<Value> = (0..10)
+        .map(|index| json!({
+            "name": format!("Definition{index}"),
+            "signature": "x".repeat(240 + index * 17),
+        }))
+        .collect();
+    let mut status = build_result_status(
+        "partial",
+        false,
+        true,
+        false,
+        "index_map",
+        vec!["max_results_limit".to_string()],
+    );
+    attach_page_status(&mut status, "definitions", &page_request, definitions.len(), 30);
+    let output = json!({
+        "definitions": definitions,
+        "summary": { "returned": 10 },
+        "resultStatus": status,
+    });
+
+    let truncated = truncate_large_response(output, 1_600);
+    let returned = truncated["definitions"].as_array().unwrap().len();
+    assert!(returned > 0 && returned < 10, "{truncated:#}");
+    assert_eq!(truncated["resultStatus"]["page"]["returned"], returned);
+    assert_eq!(truncated["resultStatus"]["page"]["nextOffset"], 4 + returned);
+    assert!(truncated["resultStatus"]["page"]["continuationToken"].as_str().is_some());
+    assert!(serde_json::to_vec(&truncated).unwrap().len() <= 1_600, "{truncated:#}");
+}
+
+#[test]
+fn test_recoverable_page_oversized_first_item_returns_bounded_error() {
+    let page_request = PageRequest {
+        offset: 0,
+        requested: false,
+        workspace_generation: 1,
+        index_epoch: 1,
+        query_fingerprint: "b".repeat(64),
+    };
+    let mut status = build_result_status(
+        "complete",
+        true,
+        true,
+        true,
+        "index_map",
+        Vec::new(),
+    );
+    attach_page_status(&mut status, "definitions", &page_request, 1, 1);
+    let output = json!({
+        "definitions": [{
+            "name": "HugeDefinition",
+            "signature": "x".repeat(20_000),
+        }],
+        "summary": { "returned": 1 },
+        "resultStatus": status,
+    });
+
+    let truncated = truncate_large_response(output, 800);
+    assert_eq!(truncated["error"]["code"], "single_item_exceeds_response_budget");
+    assert_eq!(truncated["error"]["itemOffset"], 0);
+    assert!(serde_json::to_vec(&truncated).unwrap().len() <= 800, "{truncated:#}");
+}
+
+#[test]
+fn test_recoverable_page_tiny_budgets_remain_bounded() {
+    let page_request = PageRequest {
+        offset: 0,
+        requested: false,
+        workspace_generation: 1,
+        index_epoch: 1,
+        query_fingerprint: "c".repeat(64),
+    };
+    let mut status = build_result_status(
+        "complete",
+        true,
+        true,
+        true,
+        "index_map",
+        Vec::new(),
+    );
+    attach_page_status(&mut status, "definitions", &page_request, 1, 1);
+    let output = json!({
+        "definitions": [{ "name": "Huge", "signature": "x".repeat(20_000) }],
+        "summary": { "returned": 1 },
+        "resultStatus": status,
+    });
+
+    for budget in [1usize, 2, 10, 50] {
+        let truncated = truncate_large_response(output.clone(), budget);
+        assert!(serde_json::to_vec(&truncated).unwrap().len() <= budget, "budget={budget}: {truncated:#}");
+        assert!(is_single_item_budget_error(&truncated, true));
+
+        let result = truncate_response_if_needed(
+            ToolCallResult::success(json_to_string(&output)),
+            budget,
+        );
+        assert!(result.is_error, "budget={budget}: {}", result.content[0].text);
+    }
+    assert!(!is_single_item_budget_error(&json!({
+        "error": { "code": "domain_specific_error" },
+        "results": [],
+    }), false));
+    assert!(!is_single_item_budget_error(&json!({}), false));
+    let unlimited = inject_metrics(
+        ToolCallResult::success("{}".to_string()),
+        &HandlerContext::default(),
+        std::time::Instant::now(),
+        0,
+    );
+    assert!(!unlimited.is_error);
+}
+
 
 #[test]
 fn test_inject_body_with_doc_comments_jsdoc() {

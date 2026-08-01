@@ -42,6 +42,25 @@ fn create_named_temp_file(dir: &std::path::Path, name: &str, content: &str) -> P
 // ─── Mode A: Line-range operations ──────────────────────────────────
 
 #[test]
+fn test_successful_edit_reindex_increments_index_epoch() {
+    let temp = tempfile::tempdir().unwrap();
+    create_named_temp_file(temp.path(), "tracked.cs", "class Before {}\n");
+    let ctx = make_ctx(temp.path());
+    let before = ctx.index_epoch.load(std::sync::atomic::Ordering::Acquire);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "tracked.cs",
+        "edits": [{ "search": "Before", "replace": "After" }],
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    assert!(
+        ctx.index_epoch.load(std::sync::atomic::Ordering::Acquire) > before,
+        "successful synchronous reindex must invalidate continuation tokens",
+    );
+}
+
+
+#[test]
 fn test_mode_a_replace_single_line() {
     let (tmp, filename, path) = create_temp_file("line1\nline2\nline3\n");
     let ctx = make_ctx(tmp.path());

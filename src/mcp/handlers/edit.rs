@@ -2626,6 +2626,7 @@ fn handle_single_file_edit(
                 }
                 // Signal watcher thread that indexes were mutated outside its event loop.
                 if stats.content_updated > 0 || stats.def_updated > 0 {
+                    ctx.index_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     ctx.autosave_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 response["reindexElapsedMs"] = json!(format!("{:.2}", stats.elapsed_ms));
@@ -2940,6 +2941,7 @@ fn handle_multi_file_edit(
     if let Some(ref stats) = batch_stats
         && (stats.content_updated > 0 || stats.def_updated > 0)
     {
+        ctx.index_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         ctx.autosave_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     if let Some(ref stats) = batch_stats
