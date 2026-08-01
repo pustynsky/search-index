@@ -1562,13 +1562,15 @@ pub fn load_content_index_at_path(path: &std::path::Path) -> Result<ContentIndex
         })?;
     }
 
-    if &magic == SHARD_MAGIC {
+    let mut index: ContentIndex = if &magic == SHARD_MAGIC {
         let (head, entries) = load_sharded::<ContentIndexHead, (String, Vec<Posting>)>(path, "content-index")?;
-        Ok(ContentIndex::from_head_and_entries(head, entries))
+        ContentIndex::from_head_and_entries(head, entries)
     } else {
         // Legacy LZ4_MAGIC or pre-LZ4 plain bincode — keep working for tests.
-        load_compressed(path, "content-index")
-    }
+        load_compressed(path, "content-index")?
+    };
+    index.normalize_loaded_path_to_id();
+    Ok(index)
 }
 
 /// Try to find any content index (.word-search) file matching the given directory.
