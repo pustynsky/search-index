@@ -1415,7 +1415,7 @@ For full parameter documentation, see `xray_help` → `parameterExamples` → `x
 
 Five MCP tools for querying git history, plus `xray_branch_status` for the current checkout. Always available — no flags needed. When the background Git cache is ready and the requested repository canonically matches the bound workspace, `xray_git_history`, `xray_git_authors`, and `xray_git_activity` use sub-millisecond cache lookups. Cache-unavailable, stale, mismatched-repo, and `noCache=true` requests fall back to Git CLI. `xray_git_diff` and `xray_git_blame` are always CLI-only.
 
-Default cached history is intentionally direct-path, not rename-followed history. Its summary reports `source="git-cache"`, `lineage="direct-path"`, and `safeForFullHistory=false`. CLI history reports `source="git-cli"`, `lineage="follow"`, and `safeForFullHistory=true`.
+Default cached history is intentionally direct-path, not rename-followed history. Cache-backed tools report `source="git-cache"` and identify the detected default-branch snapshot with `cacheBranch` and `cacheHead`; when no conventional default branch exists, `cacheBranch` is the fallback ref `HEAD`. Their CLI fallbacks report `source="git-cli"` and omit cache revision fields. History summaries additionally report `lineage="direct-path"`, `safeForFullHistory=false`, and `totalCommitsExact=false` for cache results. CLI history reports `lineage="follow"` and `safeForFullHistory=true`.
 
 ### Parameters (shared across git tools)
 
@@ -1458,13 +1458,13 @@ Get commit history for a specific existing or deleted file. The default sub-mill
 // Response (abbreviated)
 {
   "commits": [
-    {"hash":"abc123...","date":"2025-01-15 10:30:00 +0000","author":"Alice","email":"alice@example.com","message":"Fix null check in main"}
+    {"hash":"commit001...","date":"2025-01-15 10:30:00 +0000","author":"Alice","email":"alice@example.com","message":"Fix null check in main"}
   ],
-  "summary": {"totalCommits":1,"totalCommitsExact":true,"hasMoreCommits":false,"returned":1,"file":"src/main.rs","elapsedMs":0.15,"hint":"Fast direct-path cache; may omit history before renames/copies. Set noCache=true for git --follow.","tool":"xray_git_history","source":"git-cache","lineage":"direct-path","safeForFullHistory":false}
+  "summary": {"totalCommits":1,"totalCommitsExact":false,"hasMoreCommits":false,"returned":1,"file":"src/main.rs","cacheBranch":"main","cacheHead":"snapshot456...","elapsedMs":0.15,"hint":"Fast direct-path cache; may omit history before renames/copies. Set noCache=true for git --follow.","tool":"xray_git_history","source":"git-cache","lineage":"direct-path","safeForFullHistory":false}
 }
 ```
 
-`summary.totalCommitsExact` states whether `totalCommits` is exact for the reported `lineage`; bounded CLI queries may return `false` when the count is only a lower bound. `summary.hasMoreCommits` is `true` when more matching commits exist than the returned page.
+`summary.totalCommitsExact` states whether `totalCommits` is exact against a live Git query. Cache responses are point-in-time snapshots of the detected default branch, identified by `cacheBranch` and `cacheHead`, so their counts are snapshot-scoped and report `false`. Bounded CLI queries may also return `false` when the count is only a lower bound. `summary.hasMoreCommits` is `true` when more matching commits exist than the returned page within the reported source.
 
 ### xray_git_diff
 
@@ -1514,7 +1514,7 @@ The `path` parameter (or its backward-compatible alias `file`) accepts:
     {"rank":2,"name":"Bob","email":"bob@example.com","commits":17,"firstChange":"2024-06-10","lastChange":"2024-12-20"},
     {"rank":3,"name":"Carol","email":"carol@example.com","commits":5,"firstChange":"2024-09-05","lastChange":"2024-11-30"}
   ],
-  "summary": {"totalCommits":64,"totalAuthors":3,"returned":3,"path":"src/main.rs","elapsedMs":0.08,"hint":"(from cache)","tool":"xray_git_authors"}
+  "summary": {"totalCommits":64,"totalAuthors":3,"returned":3,"path":"src/main.rs","elapsedMs":0.08,"hint":"(from cache)","tool":"xray_git_authors","source":"git-cache","cacheBranch":"main","cacheHead":"snapshot456..."}
 }
 ```
 
@@ -1543,7 +1543,7 @@ Path filtering uses native `git log -- <pathspec>` for efficiency — git itself
     {"path":"src/lib.rs","commitCount":8,"lastModified":"2025-01-28 10:20:00 +0000","authors":["Alice"]},
     {"path":"Cargo.toml","commitCount":3,"lastModified":"2025-01-15 09:00:00 +0000","authors":["Carol"]}
   ],
-  "summary": {"filesChanged":3,"totalEntries":23,"commitsProcessed":150,"elapsedMs":0.12,"hint":"(from cache)","tool":"xray_git_activity"}
+  "summary": {"filesChanged":3,"totalEntries":23,"commitsProcessed":150,"elapsedMs":0.12,"hint":"(from cache)","tool":"xray_git_activity","source":"git-cache","cacheBranch":"main","cacheHead":"snapshot456..."}
 }
 ```
 
@@ -1635,12 +1635,12 @@ When `xray_git_history`, `xray_git_authors`, or `xray_git_activity` return 0 res
 ```json
 {
   "commits": [],
-  "summary": { "totalCommits": 0, "totalCommitsExact": true, "hasMoreCommits": false, "tool": "xray_git_history" },
+  "summary": { "totalCommits": 0, "totalCommitsExact": false, "hasMoreCommits": false, "tool": "xray_git_history", "source": "git-cache", "cacheBranch": "main", "cacheHead": "snapshot456..." },
   "warning": "File not found in git: path/to/file.cs. Check the path."
 }
 ```
 
-This helps distinguish between "no commits in the date range" and "wrong file path". The warning works in both cache and CLI fallback paths. When the file exists but simply has no matching commits, no warning is added.
+This cache-served example identifies the snapshot with `cacheBranch`/`cacheHead`; CLI fallback responses omit those fields and apply their own exactness rules. In either source, the warning distinguishes "no commits in the date range" from "wrong file path". When the file exists but simply has no matching commits, no warning is added.
 
 ---
 

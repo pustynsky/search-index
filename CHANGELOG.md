@@ -3,6 +3,8 @@
 
 ## 0.5.1 (Unreleased)
 
+- **Made cached Git totals revision-honest.** Cache-backed Git responses now expose their detected default-branch snapshot as `cacheBranch`/`cacheHead`, while live fallbacks report `source=git-cli`; `xray_git_history` reports `totalCommitsExact=false` unless history is queried live. This avoids exact-count claims after branch or HEAD changes without adding a Git subprocess to the cache hot path.
+
 - **Made synchronous edit reindexing idempotent with watcher updates.** Content updates now deduplicate path identities and resolve purge targets under the write lock, preventing concurrent new-file indexing from appending duplicate postings. Persisted pre-normalization path maps are upgraded on load without requiring an index rebuild.
 
 - **Clarified Git history totals and excluded repository metadata from definition indexes.** `xray_git_history` now reports `totalCommitsExact` and `hasMoreCommits` so bounded CLI lower bounds are distinguishable from exact counts; full and incremental definition walks skip exact `.git` path components while preserving similarly named paths such as `.github`.

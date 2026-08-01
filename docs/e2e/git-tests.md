@@ -13,7 +13,8 @@ Tests for `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_act
 - `commits` array (non-empty), each with `hash`, `date`, `author`, `email`, `message`
 - `summary.totalCommits` ≥ 1, `summary.returned` ≤ maxResults
 - `summary.hasMoreCommits` is true when `summary.totalCommits > summary.returned`
-- `summary.totalCommitsExact=true` for the reported lineage on cache and untruncated CLI results; bounded CLI totals may be lower bounds
+- Cache responses expose their detected default-branch snapshot as `summary.cacheBranch` + `summary.cacheHead` and set `summary.totalCommitsExact=false` because the count is snapshot-scoped
+- Untruncated CLI results set `summary.totalCommitsExact=true`; bounded CLI totals may be lower bounds
 - Default cache: `source="git-cache"`, `lineage="direct-path"`, `safeForFullHistory=false`
 - `noCache=true`: `source="git-cli"`, `lineage="follow"`, `safeForFullHistory=true`
 - No `patch` field (history mode)
@@ -58,6 +59,7 @@ Create `original.txt`, rename it to `middle.txt`, rename that to `final.txt`, th
 
 - `authors` array ranked by commit count descending
 - Each author has `rank`, `name`, `email`, `commits`, `firstChange`, `lastChange`
+- Cache response: `summary.source="git-cache"` with `cacheBranch` and `cacheHead`; CLI fallback: `summary.source="git-cli"` without cache revision fields
 
 **Unit tests:** `test_top_authors_returns_ranked`, `test_top_authors_limits_results`
 
@@ -67,8 +69,9 @@ Create `original.txt`, rename it to `middle.txt`, rename that to `final.txt`, th
 
 **Expected:**
 
-- `activity` array with `path`, `commits`, `commitCount`
+- All entries have `path` and `commitCount`; cache entries add `lastModified`/`authors`, while CLI entries add `commits`
 - Sorted by commit count descending
+- Cache response: `summary.source="git-cache"` with `cacheBranch` and `cacheHead`; CLI fallback: `summary.source="git-cli"` without cache revision fields
 
 **Unit test:** `test_repo_activity_returns_files`
 
