@@ -90,7 +90,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
     vec![
         crate::mcp::protocol::ToolDefinition {
             name: "xray_git_history".to_string(),
-            description: "Get file history. Unfiltered canonical-workspace queries use the fast direct-path cache and may omit pre-rename history (source=git-cache, lineage=direct-path, safeForFullHistory=false). Message filters and noCache=true use CLI --follow; message filtering includes the full body (source=git-cli, lineage=follow, safeForFullHistory=true). Other repos and xray_git_diff also use CLI. Deleted files are supported. firstCommit=true returns the followed creation commit and ignores other filters.".to_string(),
+            description: "Get file history. Unfiltered canonical-workspace queries use the fast direct-path cache and may omit pre-rename history (source=git-cache, lineage=direct-path, safeForFullHistory=false). Message filters and noCache=true use CLI --follow; message filtering includes the full body (source=git-cli, lineage=follow, safeForFullHistory=true). Other repos and xray_git_diff also use CLI. Deleted files are supported. firstCommit=true returns the followed creation commit and ignores other filters. Summary fields totalCommitsExact and hasMoreCommits distinguish exact totals from bounded CLI lower bounds and returned-page truncation.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -609,6 +609,8 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                         "lineage": "direct-path",
                         "safeForFullHistory": false,
                         "totalCommits": total_count,
+                        "totalCommitsExact": true,
+                        "hasMoreCommits": total_count > commits_json.len(),
                         "returned": commits_json.len(),
                         "file": file,
                         "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
@@ -695,6 +697,8 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
             }).collect();
 
             let tool_name = if include_diff { "xray_git_diff" } else { "xray_git_history" };
+            let has_more_commits = total_count > commits_json.len();
+            let total_commits_exact = post_filter_lineage || !has_more_commits;
 
             let mut output = json!({
                 "commits": commits_json,
@@ -704,6 +708,8 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                     "lineage": "follow",
                     "safeForFullHistory": true,
                     "totalCommits": total_count,
+                    "totalCommitsExact": total_commits_exact,
+                    "hasMoreCommits": has_more_commits,
                     "returned": commits_json.len(),
                     "file": file,
                     "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,

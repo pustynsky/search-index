@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 use tracing::{info, warn};
 
-use crate::{canonicalize_or_warn, clean_path, read_file_lossy};
+use crate::{canonicalize_or_warn, clean_path, is_inside_git_dir, read_file_lossy};
 use super::{index_file_defs_with_semantics, types::*};
 use super::csharp_semantics::CSharpFileContribution;
 #[cfg(feature = "lang-csharp")]
@@ -475,6 +475,9 @@ pub fn reconcile_definition_index(
             continue;
         }
         let path = entry.path();
+        if is_inside_git_dir(path) {
+            continue;
+        }
         let ext_match = path.extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));
@@ -596,6 +599,9 @@ pub fn reconcile_definition_index_nonblocking(
             continue;
         }
         let path = entry.path();
+        if is_inside_git_dir(path) {
+            continue;
+        }
         let ext_match = path.extension()
             .and_then(|e| e.to_str())
             .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));

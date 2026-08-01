@@ -250,6 +250,38 @@ fn test_reconcile_adds_new_file() {
 
 #[cfg(feature = "lang-csharp")]
 #[test]
+fn test_reconcile_excludes_git_internals_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = crate::canonicalize_test_root(tmp.path());
+    std::fs::write(dir.join("existing.cs"), "public class ExistingService { }").unwrap();
+
+    let mut index = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+        respect_git_exclude: false,
+    });
+
+    std::fs::create_dir_all(dir.join(".git").join("hooks")).unwrap();
+    std::fs::create_dir_all(dir.join(".github")).unwrap();
+    std::fs::write(dir.join(".git").join("hooks").join("Hidden.cs"), "public class HiddenClass { }").unwrap();
+    std::fs::write(dir.join(".github").join("Visible.cs"), "public class VisibleClass { }").unwrap();
+
+    let (added, _modified, removed) = incremental::reconcile_definition_index(
+        &mut index,
+        &dir.to_string_lossy(),
+        &["cs".to_string()],
+        false,
+    );
+
+    assert_eq!(added, 1);
+    assert_eq!(removed, 0);
+    assert!(index.name_index.contains_key("visibleclass"));
+    assert!(!index.name_index.contains_key("hiddenclass"));
+}
+
+#[cfg(feature = "lang-csharp")]
+#[test]
 fn test_reconcile_removes_deleted_file() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -696,6 +728,25 @@ fn test_collect_source_files_respects_gitignore() {
 
     assert_eq!(files.len(), 1, "Should only find 1 file (gitignored file excluded)");
     assert!(files[0].ends_with("visible.cs"), "Should find visible.cs");
+}
+
+
+#[test]
+fn test_collect_source_files_excludes_git_internals_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join(".git").join("hooks")).unwrap();
+    std::fs::create_dir_all(dir.join(".github")).unwrap();
+    std::fs::write(dir.join(".git").join("hooks").join("ghost.rs"), "fn ghost() {}\n").unwrap();
+    std::fs::write(dir.join(".github").join("visible.rs"), "fn visible() {}\n").unwrap();
+    std::fs::write(dir.join("root.rs"), "fn root() {}\n").unwrap();
+
+    let files = collect_source_files(dir, &["rs".to_string()], 1, false);
+
+    assert_eq!(files.len(), 2, "{files:?}");
+    assert!(files.iter().any(|file| file.ends_with(".github/visible.rs")), "{files:?}");
+    assert!(files.iter().any(|file| file.ends_with("root.rs")), "{files:?}");
+    assert!(!files.iter().any(|file| file.contains("/.git/")), "{files:?}");
 }
 
 // ─── index_file_defs() Tests ────────────────────────────────────────
@@ -1454,6 +1505,40 @@ fn test_reconcile_nonblocking_adds_new_files() {
     assert!(idx.created_at > 0, "created_at should be updated from initial 0");
     assert!(idx.created_at <= now, "created_at should use walk_start, not future time");
     assert!(now - idx.created_at < 10, "created_at should be within last 10 seconds");
+}
+
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn test_reconcile_nonblocking_excludes_git_internals_only() {
+    use std::sync::{Arc, RwLock};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = crate::canonicalize_test_root(tmp.path());
+    std::fs::create_dir_all(dir.join(".git").join("hooks")).unwrap();
+    std::fs::create_dir_all(dir.join(".github")).unwrap();
+    std::fs::write(dir.join(".git").join("hooks").join("Hidden.cs"), "public class HiddenClass { }").unwrap();
+    std::fs::write(dir.join(".github").join("Visible.cs"), "public class VisibleClass { }").unwrap();
+
+    let index = DefinitionIndex {
+        root: dir.to_string_lossy().to_string(),
+        extensions: vec!["cs".to_string()],
+        created_at: 0,
+        ..Default::default()
+    };
+    let arc_index = Arc::new(RwLock::new(index));
+
+    let (added, _modified, removed) = super::incremental::reconcile_definition_index_nonblocking(
+        &arc_index,
+        &dir.to_string_lossy(),
+        &["cs".to_string()],
+        false,
+    );
+
+    assert_eq!(added, 1);
+    assert_eq!(removed, 0);
+    let index = arc_index.read().unwrap();
+    assert!(index.name_index.contains_key("visibleclass"));
+    assert!(!index.name_index.contains_key("hiddenclass"));
 }
 
 #[test]

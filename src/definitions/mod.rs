@@ -32,7 +32,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ignore::WalkBuilder;
 
-use crate::{clean_path, read_file_lossy};
+use crate::{clean_path, is_inside_git_dir, read_file_lossy};
 #[cfg(feature = "lang-typescript")]
 use parser_typescript::extract_component_metadata;
 
@@ -88,6 +88,9 @@ pub(crate) fn collect_source_files(
                 return ignore::WalkState::Continue;
             }
             let path = entry.path();
+            if is_inside_git_dir(path) {
+                return ignore::WalkState::Continue;
+            }
             let ext_match = path.extension()
                 .and_then(|e| e.to_str())
                 .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));

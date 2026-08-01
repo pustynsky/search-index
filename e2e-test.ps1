@@ -899,24 +899,77 @@ $testBlocks += , {
     } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
 }
 
-# T-GIT-TOTALCOMMITS: totalCommits shows real total, not truncated count
+# T-GIT-TOTALCOMMITS: bounded CLI total reports lookahead and exactness metadata
 $testBlocks += , {
     param($Bin, $Dir, $Ext)
     $name = "T-GIT-TOTALCOMMITS git-history-total-vs-returned"
     try {
         $repoPath = $Dir -replace '\\', '/'
-        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}',('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":"' + $repoPath + '","file":"Cargo.toml","maxResults":1}}}')) -join "`n"
+        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}',('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":"' + $repoPath + '","file":"Cargo.toml","maxResults":1,"noCache":true}}}')) -join "`n"
         $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
         if (-not $jsonLine) { return @{ Name = $name; Passed = $false; Output = "FAILED (no response)" } }
-        $totalMatch = [regex]::Match($jsonLine, 'totalCommits\\?"?\s*:\s*(\d+)')
-        $returnedMatch = [regex]::Match($jsonLine, 'returned\\?"?\s*:\s*(\d+)')
-        if ($totalMatch.Success -and $returnedMatch.Success) {
-            $totalVal = [int]$totalMatch.Groups[1].Value
-            $returnedVal = [int]$returnedMatch.Groups[1].Value
-            if ($totalVal -gt $returnedVal -and $returnedVal -eq 1) { return @{ Name = $name; Passed = $true; Output = "OK (total=$totalVal, returned=$returnedVal)" } }
-            else { return @{ Name = $name; Passed = $false; Output = "FAILED (total=$totalVal should be > returned=$returnedVal)" } }
-        } else { return @{ Name = $name; Passed = $false; Output = "FAILED (could not parse counts)" } }
+        $response = $jsonLine | ConvertFrom-Json
+        $responseFields = @($response.PSObject.Properties.Name)
+        if (-not ($responseFields -contains "result") -or $null -eq $response.result) {
+            $errorMessage = "missing result"
+            if (($responseFields -contains "error") -and $null -ne $response.error) {
+                $errorMessage = "error without message"
+                $errorFields = @($response.error.PSObject.Properties.Name)
+                if ($errorFields -contains "message") { $errorMessage = [string]$response.error.message }
+            }
+            return @{ Name = $name; Passed = $false; Output = "FAILED (JSON-RPC error: $errorMessage)" }
+        }
+        $resultFields = @($response.result.PSObject.Properties.Name)
+        $isToolError = ($resultFields -contains "isError") -and $response.result.isError -eq $true
+        if (-not ($resultFields -contains "content") -or $null -eq $response.result.content -or @($response.result.content).Count -eq 0) {
+            $reason = if ($isToolError) { "tool error without content" } else { "missing result content" }
+            return @{ Name = $name; Passed = $false; Output = "FAILED ($reason)" }
+        }
+        $content = @($response.result.content)[0]
+        if ($null -eq $content) {
+            return @{ Name = $name; Passed = $false; Output = "FAILED (missing result content)" }
+        }
+        $contentFields = @($content.PSObject.Properties.Name)
+        if (-not ($contentFields -contains "text") -or $null -eq $content.text) {
+            return @{ Name = $name; Passed = $false; Output = "FAILED (missing result text)" }
+        }
+        $text = [string]$content.text
+        if ($isToolError) {
+            return @{ Name = $name; Passed = $false; Output = "FAILED (tool error: $text)" }
+        }
+        $payloadText = ($text -split "\r?\n\r?\n", 2)[-1]
+        $trimmedPayload = $payloadText.TrimStart()
+        if (-not $trimmedPayload.StartsWith("{")) {
+            $normalizedBody = $trimmedPayload -replace '\s+', ' '
+            $preview = $normalizedBody.Substring(0, [Math]::Min(160, $normalizedBody.Length))
+            return @{ Name = $name; Passed = $false; Output = "FAILED (unexpected body: $preview)" }
+        }
+        $payload = $payloadText | ConvertFrom-Json
+        $payloadFields = @($payload.PSObject.Properties.Name)
+        if (-not ($payloadFields -contains "summary") -or $null -eq $payload.summary) {
+            return @{ Name = $name; Passed = $false; Output = "FAILED (missing summary)" }
+        }
+        $summaryFields = @($payload.summary.PSObject.Properties.Name)
+        $hasTotalField = $summaryFields -contains "totalCommits"
+        $hasReturnedField = $summaryFields -contains "returned"
+        $hasMoreField = $summaryFields -contains "hasMoreCommits"
+        $hasExactField = $summaryFields -contains "totalCommitsExact"
+        $hasSourceField = $summaryFields -contains "source"
+        $totalRaw = if ($hasTotalField) { $payload.summary.totalCommits } else { $null }
+        $returnedRaw = if ($hasReturnedField) { $payload.summary.returned } else { $null }
+        $hasTotalType = ($totalRaw -is [int]) -or ($totalRaw -is [long])
+        $hasReturnedType = ($returnedRaw -is [int]) -or ($returnedRaw -is [long])
+        $totalVal = if ($hasTotalType) { [long]$totalRaw } else { 0 }
+        $returnedVal = if ($hasReturnedType) { [long]$returnedRaw } else { 0 }
+        $hasMoreRaw = if ($hasMoreField) { $payload.summary.hasMoreCommits } else { $null }
+        $exactRaw = if ($hasExactField) { $payload.summary.totalCommitsExact } else { $null }
+        $sourceVal = if ($hasSourceField) { [string]$payload.summary.source } else { "" }
+        if ($hasTotalField -and $hasTotalType -and $hasReturnedField -and $hasReturnedType -and $totalVal -eq ($returnedVal + 1) -and $returnedVal -eq 1 -and $hasMoreField -and ($hasMoreRaw -is [bool]) -and $hasMoreRaw -eq $true -and $hasExactField -and ($exactRaw -is [bool]) -and $exactRaw -eq $false -and $hasSourceField -and $sourceVal -ceq "git-cli") {
+            return @{ Name = $name; Passed = $true; Output = "OK (total=$totalVal, returned=$returnedVal, exact=$exactRaw, source=$sourceVal)" }
+        } else {
+            return @{ Name = $name; Passed = $false; Output = "FAILED (total=$totalVal, hasTotal=$hasTotalField, totalType=$hasTotalType, returned=$returnedVal, hasReturned=$hasReturnedField, returnedType=$hasReturnedType, hasMore=$hasMoreRaw, hasMoreField=$hasMoreField, exact=$exactRaw, hasExact=$hasExactField, source=$sourceVal, hasSource=$hasSourceField)" }
+        }
     } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
 }
 

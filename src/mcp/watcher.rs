@@ -9,6 +9,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::{canonicalize_or_warn, clean_path, tokenize, ContentIndex, FileIndex, Posting, DEFAULT_MIN_TOKEN_LEN};
 use crate::definitions::{self, DefinitionIndex};
+pub(crate) use crate::is_inside_git_dir;
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -1518,24 +1519,6 @@ fn periodic_autosave(
     all_ok
 }
 
-/// Check if a path is inside a `.git` directory.
-/// Filters out git internal files that would otherwise match extension filters
-/// (e.g., `.git/config` matches "config" extension).
-pub(crate) fn is_inside_git_dir(path: &Path) -> bool {
-    path.components().any(|component| {
-        #[cfg(windows)]
-        {
-            component
-                .as_os_str()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(".git")
-        }
-        #[cfg(not(windows))]
-        {
-            component.as_os_str() == ".git"
-        }
-    })
-}
 
 pub(crate) fn matches_extensions(path: &Path, extensions: &[String]) -> bool {
     path.extension()
