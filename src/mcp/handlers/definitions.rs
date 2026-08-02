@@ -15,7 +15,10 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::mcp::protocol::ToolCallResult;
-use crate::definitions::{DefinitionEntry, DefinitionIndex, DefinitionKind, CodeStats};
+use crate::definitions::{
+    AngularTemplateSource, CodeStats, DefinitionEntry, DefinitionIndex, DefinitionKind,
+    StaticValue,
+};
 use crate::ContentIndex;
 use crate::mcp::lock_order;
 
@@ -1933,14 +1936,59 @@ fn format_definition_entry(
     }
     inject_csharp_symbol_identity(index, def_idx, &mut obj);
     // Angular template metadata
+    if let Some(component) = index.angular_components.get(&def_idx) {
+        match &component.selector {
+            StaticValue::Static(selector) => {
+                obj["selector"] = json!(selector);
+                obj["selectorState"] = json!("static");
+            }
+            StaticValue::Dynamic { reason } => {
+                obj["selectorState"] = json!("dynamic");
+                obj["selectorStateReason"] = json!(reason);
+            }
+            StaticValue::Missing => {
+                obj["selectorState"] = json!("missing");
+            }
+        }
+        match &component.template {
+            AngularTemplateSource::External { relative_path } => {
+                obj["templateSource"] = json!("external");
+                obj["templatePath"] = json!(relative_path);
+                obj["templateState"] = json!("available");
+            }
+            AngularTemplateSource::UnavailableExternal {
+                relative_path,
+                reason,
+            } => {
+                obj["templateSource"] = json!("external");
+                obj["templatePath"] = json!(relative_path);
+                obj["templateState"] = json!("unavailable");
+                obj["templateStateReason"] = json!(reason);
+            }
+            AngularTemplateSource::Inline { .. } => {
+                obj["templateSource"] = json!("inline");
+                obj["templateState"] = json!("available");
+            }
+            AngularTemplateSource::Dynamic { reason } => {
+                obj["templateSource"] = json!("dynamic");
+                obj["templateState"] = json!("dynamic");
+                obj["templateStateReason"] = json!(reason);
+            }
+            AngularTemplateSource::Missing => {
+                obj["templateSource"] = json!("missing");
+                obj["templateState"] = json!("missing");
+            }
+        }
+    } else {
+        for (selector, selector_indices) in &index.selector_index {
+            if selector_indices.contains(&def_idx) {
+                obj["selector"] = json!(selector);
+                break;
+            }
+        }
+    }
     if let Some(children) = index.template_children.get(&def_idx) {
         obj["templateChildren"] = json!(children);
-    }
-    for (selector, sel_indices) in &index.selector_index {
-        if sel_indices.contains(&def_idx) {
-            obj["selector"] = json!(selector);
-            break;
-        }
     }
 
     if args.include_body {

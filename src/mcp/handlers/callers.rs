@@ -13,7 +13,7 @@ use crate::definitions::{
     csharp_source_code_only, csharp_type_owner_name, CallSite, CallSiteKind,
     CSharpCallSiteShape,
     CSharpCallableRecord, CSharpRefKind, CSharpTypeEvidence, DefinitionEntry,
-    DefinitionIndex, DefinitionKind,
+    AngularTemplateSource, DefinitionIndex, DefinitionKind, StaticValue,
 };
 use code_xray::generate_trigrams;
 
@@ -470,19 +470,67 @@ fn is_known_angular_selector(selector: &str, def_idx: &DefinitionIndex) -> bool 
 }
 
 fn is_known_angular_component(class_name: &str, def_idx: &DefinitionIndex) -> bool {
-    let Some(def_indices) = def_idx.name_index.get(&class_name.to_lowercase()) else {
-        return false;
-    };
-
-    def_indices.iter().any(|&def_index| {
-        def_idx
-            .definitions
-            .get(def_index as usize)
-            .is_some_and(|def| {
-                def.kind == DefinitionKind::Class
-                    && def.attributes.iter().any(|attr| attr.starts_with("Component("))
+    def_idx
+        .name_index
+        .get(&class_name.to_lowercase())
+        .is_some_and(|definition_indices| {
+            definition_indices.iter().any(|definition_index| {
+                def_idx.angular_components.contains_key(definition_index)
+                    || def_idx
+                        .definitions
+                        .get(*definition_index as usize)
+                        .is_some_and(|definition| {
+                            definition.kind == DefinitionKind::Class
+                                && definition
+                                    .attributes
+                                    .iter()
+                                    .any(|attribute| attribute.starts_with("Component("))
+                        })
             })
-    })
+        })
+}
+
+fn record_angular_component_resolution_reasons(
+    definition_index: u32,
+    def_idx: &DefinitionIndex,
+    reasons: &mut std::collections::BTreeSet<String>,
+) {
+    let Some(definition) = def_idx.definitions.get(definition_index as usize) else {
+        reasons.insert("stale_template_definition".to_string());
+        return;
+    };
+    let Some(component) = def_idx.angular_components.get(&definition_index) else {
+        if definition.kind == DefinitionKind::Class
+            && definition
+                .attributes
+                .iter()
+                .any(|attribute| attribute.starts_with("Component("))
+        {
+            reasons.insert("component_record_unavailable".to_string());
+        }
+        return;
+    };
+    match &component.selector {
+        StaticValue::Dynamic { .. } => {
+            reasons.insert("dynamic_component_selector".to_string());
+        }
+        StaticValue::Missing => {
+            reasons.insert("missing_component_selector".to_string());
+        }
+        StaticValue::Static(_) => {}
+    }
+    match &component.template {
+        AngularTemplateSource::Dynamic { .. } => {
+            reasons.insert("dynamic_template".to_string());
+        }
+        AngularTemplateSource::Missing => {
+            reasons.insert("missing_template".to_string());
+        }
+        AngularTemplateSource::UnavailableExternal { .. } => {
+            reasons.insert("unavailable_external_template".to_string());
+        }
+        AngularTemplateSource::External { .. } | AngularTemplateSource::Inline { .. } => {}
+    }
 }
 
 fn template_navigation_source_file(node: &Value, def_idx: &DefinitionIndex) -> Option<String> {
@@ -1021,12 +1069,66 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         // selectors that do not contain '-'.
         method_name.contains('-') || is_known_angular_selector(&method_name, &def_idx)
     };
+    let mut template_resolution_reasons = std::collections::BTreeSet::new();
+    if template_navigation_requested && !is_down {
+        if def_idx.angular_components.values().any(|component| {
+            matches!(
+                component.template,
+                AngularTemplateSource::Dynamic { .. } | AngularTemplateSource::Missing
+            )
+        }) {
+            template_resolution_reasons.insert("dynamic_template_index_blind_spot".to_string());
+        }
+        if def_idx.angular_components.values().any(|component| {
+            matches!(
+                component.template,
+                AngularTemplateSource::UnavailableExternal { .. }
+            )
+        }) {
+            template_resolution_reasons.insert("unavailable_external_template".to_string());
+        }
+        let record_unavailable = def_idx
+            .definitions
+            .iter()
+            .enumerate()
+            .any(|(definition_index, definition)| {
+                definition.kind == DefinitionKind::Class
+                    && definition
+                        .attributes
+                        .iter()
+                        .any(|attribute| attribute.starts_with("Component("))
+                    && !def_idx
+                        .angular_components
+                        .contains_key(&(definition_index as u32))
+                    && def_idx.file_index.get(&definition.file_id).is_some_and(
+                        |definitions| definitions.contains(&(definition_index as u32)),
+                    )
+            });
+        if record_unavailable {
+            template_resolution_reasons.insert("component_record_unavailable".to_string());
+        }
+    }
     let template_results = if template_navigation_requested {
         let mut visited = HashSet::new();
         if is_down {
-            build_template_callee_tree(&method_name, max_depth, 0, &def_idx, &mut visited)
+            build_template_callee_tree_with_reasons(
+                &method_name,
+                None,
+                max_depth,
+                0,
+                &def_idx,
+                &mut visited,
+                &mut template_resolution_reasons,
+            )
         } else {
-            find_template_parents(&method_name, max_depth, 0, &def_idx, &mut visited)
+            find_template_parents_with_reasons(
+                &method_name,
+                max_depth,
+                0,
+                &def_idx,
+                &mut visited,
+                &mut template_resolution_reasons,
+            )
         }
     } else {
         Vec::new()
@@ -1042,6 +1144,8 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         );
         let total_template_roots = template_results.len();
         let total_template_nodes = count_tree_nodes(&template_results);
+        let template_resolution_reasons: Vec<_> =
+            template_resolution_reasons.into_iter().collect();
         let (template_results, _) = paginate_top_level_values(
             template_results,
             &page_request,
@@ -1073,6 +1177,10 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         if let Some(ref cls) = class_filter {
             output["query"]["class"] = json!(cls);
         }
+        if !template_resolution_reasons.is_empty() {
+            output["summary"]["templateResolutionReasons"] =
+                json!(template_resolution_reasons);
+        }
         let mut result_status = build_callers_result_status(
             template_node_count,
             total_template_nodes,
@@ -1085,6 +1193,25 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             true,
             false,
         );
+        if !template_resolution_reasons.is_empty() {
+            result_status["status"] = json!("partial");
+            result_status["complete"] = json!(false);
+            result_status["safeForExactSemantics"] = json!(false);
+            result_status["safeForExhaustiveClaims"] = json!(false);
+            result_status["totalKnown"] = json!(false);
+            if let Some(reasons) = result_status["reasons"].as_array_mut() {
+                for reason in &template_resolution_reasons {
+                    if !reasons.iter().any(|existing| existing == reason) {
+                        reasons.push(json!(reason));
+                    }
+                }
+            }
+            result_status["resolutionCompleteness"] = json!({
+                "exact": false,
+                "allCallsResolved": false,
+                "allStaticTargetsUnique": false,
+            });
+        }
         utils::attach_page_status(
             &mut result_status,
             "topLevelRoots",
@@ -4241,6 +4368,7 @@ impl CallerTreeBuilder<'_> {
 
 /// Build a template callee tree (direction = "down"): find child components
 /// referenced in Angular templates. Recursive — follows selector → class → template_children.
+#[cfg(test)]
 fn build_template_callee_tree(
     class_name: &str,
     max_depth: usize,
@@ -4248,63 +4376,150 @@ fn build_template_callee_tree(
     def_idx: &DefinitionIndex,
     visited: &mut HashSet<String>,
 ) -> Vec<Value> {
+    let mut reasons = std::collections::BTreeSet::new();
+    build_template_callee_tree_with_reasons(
+        class_name,
+        None,
+        max_depth,
+        current_depth,
+        def_idx,
+        visited,
+        &mut reasons,
+    )
+}
+
+fn build_template_callee_tree_with_reasons(
+    class_name: &str,
+    exact_definition_index: Option<u32>,
+    max_depth: usize,
+    current_depth: usize,
+    def_idx: &DefinitionIndex,
+    visited: &mut HashSet<String>,
+    reasons: &mut std::collections::BTreeSet<String>,
+) -> Vec<Value> {
     if current_depth >= max_depth {
         return Vec::new();
     }
     let class_lower = class_name.to_lowercase();
+    let matching_defs: Vec<u32> = if let Some(definition_index) = exact_definition_index {
+        vec![definition_index]
+    } else {
+        def_idx
+            .name_index
+            .get(&class_lower)
+            .map(|indices| {
+                indices
+                    .iter()
+                    .filter(|&&definition_index| {
+                        def_idx
+                            .definitions
+                            .get(definition_index as usize)
+                            .is_some_and(|definition| definition.kind == DefinitionKind::Class)
+                    })
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
 
-    // Find def indices for the target class
-    let matching_defs: Vec<u32> = def_idx
-        .name_index
-        .get(&class_lower)
-        .map(|indices| {
-            indices
-                .iter()
-                .filter(|&&di| {
-                    def_idx
-                        .definitions
-                        .get(di as usize)
-                        .is_some_and(|d| d.kind == DefinitionKind::Class)
-                })
-                .copied()
-                .collect()
-        })
-        .unwrap_or_default();
-
-    let mut results: Vec<Value> = Vec::new();
-    for di in matching_defs {
-        if let Some(children) = def_idx.template_children.get(&di) {
-            for child_selector in children {
-                if !visited.insert(child_selector.clone()) {
-                    continue;
-                }
-                let mut node = json!({ "nodeKind": "template_callee", "selector": child_selector, "templateUsage": true });
-
-                // Resolve child selector → class for recursion
-                if let Some(child_def_indices) = def_idx.selector_index.get(child_selector)
-                    && let Some(&child_di) = child_def_indices.first()
-                        && let Some(child_def) = def_idx.definitions.get(child_di as usize) {
-                            node["class"] = json!(child_def.name);
-                            node["line"] = json!(child_def.line_start);
-                            if let Some(f) = def_idx.files.get(child_def.file_id as usize)
-                                && let Some(fname) =
-                                    Path::new(f.as_str()).file_name().and_then(|f| f.to_str())
-                                {
-                                    node["file"] = json!(fname);
-                                }
-                            let sub = build_template_callee_tree(
-                                &child_def.name,
-                                max_depth,
-                                current_depth + 1,
-                                def_idx,
-                                visited,
-                            );
-                            if !sub.is_empty() {
-                                node["children"] = json!(sub);
-                            }
-                        }
-                results.push(node);
+    let mut results = Vec::new();
+    for definition_index in matching_defs {
+        record_angular_component_resolution_reasons(definition_index, def_idx, reasons);
+        let Some(children) = def_idx.template_children.get(&definition_index) else {
+            continue;
+        };
+        for child_selector in children {
+            if !visited.insert(child_selector.clone()) {
+                continue;
             }
+            let mut node = json!({
+                "nodeKind": "template_callee",
+                "selector": child_selector,
+                "templateUsage": true,
+            });
+            if let Some(child_def_indices) = def_idx.selector_index.get(child_selector) {
+                let valid_child_indices: Vec<_> = child_def_indices
+                    .iter()
+                    .copied()
+                    .filter(|child_definition_index| {
+                        let Some(definition) =
+                            def_idx.definitions.get(*child_definition_index as usize)
+                        else {
+                            return false;
+                        };
+                        definition.kind == DefinitionKind::Class
+                            && def_idx.file_index.get(&definition.file_id).is_some_and(
+                                |definitions| definitions.contains(child_definition_index),
+                            )
+                    })
+                    .collect();
+                if let [child_definition_index] = valid_child_indices.as_slice()
+                    && let Some(child_definition) =
+                        def_idx.definitions.get(*child_definition_index as usize)
+                {
+                    record_angular_component_resolution_reasons(
+                        *child_definition_index,
+                        def_idx,
+                        reasons,
+                    );
+                    node["class"] = json!(child_definition.name);
+                    node["line"] = json!(child_definition.line_start);
+                    if let Some(file) = def_idx.files.get(child_definition.file_id as usize)
+                        && let Some(file_name) =
+                            Path::new(file).file_name().and_then(|file| file.to_str())
+                    {
+                        node["file"] = json!(file_name);
+                    }
+                    let sub = build_template_callee_tree_with_reasons(
+                        &child_definition.name,
+                        Some(*child_definition_index),
+                        max_depth,
+                        current_depth + 1,
+                        def_idx,
+                        visited,
+                        reasons,
+                    );
+                    if !sub.is_empty() {
+                        node["children"] = json!(sub);
+                    }
+                } else if valid_child_indices.len() > 1 {
+                    let mut candidates = Vec::with_capacity(valid_child_indices.len().min(10));
+                    for child_definition_index in valid_child_indices.iter().take(10) {
+                        let Some(definition) =
+                            def_idx.definitions.get(*child_definition_index as usize)
+                        else {
+                            continue;
+                        };
+                        let mut candidate = json!({
+                            "class": definition.name,
+                            "line": definition.line_start,
+                        });
+                        if let Some(file) = def_idx.files.get(definition.file_id as usize)
+                            && let Some(file_name) =
+                                Path::new(file).file_name().and_then(|file| file.to_str())
+                        {
+                            candidate["file"] = json!(file_name);
+                        }
+                        candidates.push(candidate);
+                    }
+                    reasons.insert("ambiguous_template_selector".to_string());
+                    node["resolution"] = json!("ambiguous");
+                    node["reason"] = json!("ambiguous_template_selector");
+                    node["totalCandidates"] = json!(valid_child_indices.len());
+                    node["candidatesTruncated"] =
+                        json!(valid_child_indices.len() > candidates.len());
+                    node["candidates"] = json!(candidates);
+                } else if !child_def_indices.is_empty() {
+                    reasons.insert("stale_template_selector_index".to_string());
+                    node["resolution"] = json!("unresolved");
+                    node["reason"] = json!("stale_template_selector_index");
+                }
+            } else {
+                reasons.insert("unresolved_template_selector".to_string());
+                node["resolution"] = json!("unresolved");
+                node["reason"] = json!("unresolved_template_selector");
+            }
+            results.push(node);
         }
     }
     results
@@ -4313,6 +4528,7 @@ fn build_template_callee_tree(
 /// Find parent components that reference a given selector in their templates
 /// (direction = "up" for Angular template navigation). Recursive — follows
 /// selector → parent class → parent's selector → grandparent class → ...
+#[cfg(test)]
 fn find_template_parents(
     selector: &str,
     max_depth: usize,
@@ -4320,53 +4536,87 @@ fn find_template_parents(
     def_idx: &DefinitionIndex,
     visited: &mut HashSet<String>,
 ) -> Vec<Value> {
+    let mut reasons = std::collections::BTreeSet::new();
+    find_template_parents_with_reasons(
+        selector,
+        max_depth,
+        current_depth,
+        def_idx,
+        visited,
+        &mut reasons,
+    )
+}
+
+fn find_template_parents_with_reasons(
+    selector: &str,
+    max_depth: usize,
+    current_depth: usize,
+    def_idx: &DefinitionIndex,
+    visited: &mut HashSet<String>,
+    reasons: &mut std::collections::BTreeSet<String>,
+) -> Vec<Value> {
     if current_depth >= max_depth {
         return Vec::new();
     }
-    if !visited.insert(selector.to_string()) {
+    let selector_key = selector.to_ascii_lowercase();
+    if !visited.insert(selector_key.clone()) {
         return Vec::new();
     }
+    let Some(parent_indices) = def_idx.template_parents.get(&selector_key) else {
+        return Vec::new();
+    };
 
-    let mut parents: Vec<Value> = Vec::new();
-    for (parent_di, children) in &def_idx.template_children {
-        if children.iter().any(|c| c == selector)
-            && let Some(parent_def) = def_idx.definitions.get(*parent_di as usize) {
-                let mut node = json!({
-                    "nodeKind": "template_parent",
-                    "class": parent_def.name,
-                    "line": parent_def.line_start,
-                    "templateUsage": true,
-                });
-                if let Some(f) = def_idx.files.get(parent_def.file_id as usize)
-                    && let Some(fname) =
-                        Path::new(f.as_str()).file_name().and_then(|f| f.to_str())
-                    {
-                        node["file"] = json!(fname);
-                    }
-                // Resolve this parent's own selector for recursion
-                let mut parent_selector: Option<String> = None;
-                for (sel, indices) in &def_idx.selector_index {
-                    if indices.contains(parent_di) {
-                        node["selector"] = json!(sel);
-                        parent_selector = Some(sel.clone());
-                        break;
-                    }
-                }
-                // Recurse upward: find grandparents that use this parent's selector
-                if let Some(ref ps) = parent_selector {
-                    let grandparents = find_template_parents(
-                        ps,
-                        max_depth,
-                        current_depth + 1,
-                        def_idx,
-                        visited,
-                    );
-                    if !grandparents.is_empty() {
-                        node["parents"] = json!(grandparents);
-                    }
-                }
-                parents.push(node);
+    let mut parents = Vec::new();
+    for parent_definition_index in parent_indices {
+        let Some(parent_definition) =
+            def_idx.definitions.get(*parent_definition_index as usize)
+        else {
+            reasons.insert("stale_template_definition".to_string());
+            continue;
+        };
+        record_angular_component_resolution_reasons(
+            *parent_definition_index,
+            def_idx,
+            reasons,
+        );
+        let mut node = json!({
+            "nodeKind": "template_parent",
+            "class": parent_definition.name,
+            "line": parent_definition.line_start,
+            "templateUsage": true,
+        });
+        if let Some(file) = def_idx.files.get(parent_definition.file_id as usize)
+            && let Some(file_name) =
+                Path::new(file).file_name().and_then(|file| file.to_str())
+        {
+            node["file"] = json!(file_name);
+        }
+        let parent_selector = match def_idx.angular_components.get(parent_definition_index) {
+            Some(component) => match &component.selector {
+                StaticValue::Static(selector) => Some(selector.clone()),
+                StaticValue::Dynamic { .. } | StaticValue::Missing => None,
+            },
+            None => def_idx.selector_index.iter().find_map(|(selector, indices)| {
+                indices
+                    .contains(parent_definition_index)
+                    .then(|| selector.clone())
+            }),
+        };
+        if let Some(parent_selector) = parent_selector {
+            node["selector"] = json!(parent_selector);
+            let grandparents = find_template_parents_with_reasons(
+                &parent_selector,
+                max_depth,
+                current_depth + 1,
+                def_idx,
+                visited,
+                reasons,
+            );
+            if !grandparents.is_empty() {
+                node["parents"] = json!(grandparents);
             }
+        }
+        parents.push(node);
     }
     parents
 }

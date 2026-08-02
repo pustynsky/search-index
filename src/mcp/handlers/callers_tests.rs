@@ -1197,6 +1197,109 @@ fn test_build_template_callee_tree_one_level() {
 }
 
 #[test]
+fn test_build_template_callee_tree_recurses_by_exact_definition_identity() {
+    let definitions = vec![
+        class_def(0, "RootComponent", vec![]),
+        class_def(0, "HeaderComponent", vec![]),
+        class_def(1, "HeaderComponent", vec![]),
+        class_def(0, "ExpectedLeaf", vec![]),
+        class_def(1, "WrongLeaf", vec![]),
+    ];
+    let index = {
+        let mut index = make_def_index(definitions, HashMap::new());
+        index
+            .template_children
+            .insert(0, vec!["header-primary".to_string()]);
+        index
+            .template_children
+            .insert(1, vec!["expected-leaf".to_string()]);
+        index
+            .template_children
+            .insert(2, vec!["wrong-leaf".to_string()]);
+        index
+            .selector_index
+            .insert("header-primary".to_string(), vec![1]);
+        index
+            .selector_index
+            .insert("expected-leaf".to_string(), vec![3]);
+        index
+            .selector_index
+            .insert("wrong-leaf".to_string(), vec![4]);
+        index
+    };
+
+    let mut visited = HashSet::new();
+    let tree = build_template_callee_tree(
+        "RootComponent",
+        3,
+        0,
+        &index,
+        &mut visited,
+    );
+    assert_eq!(tree[0]["class"], "HeaderComponent");
+    let children = tree[0]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0]["selector"], "expected-leaf");
+}
+
+
+#[test]
+fn test_build_template_callee_tree_reports_duplicate_selector_ambiguity() {
+    let mut definitions = vec![class_def(0, "ParentComponent", vec![])];
+    for index in 0..12 {
+        definitions.push(class_def(
+            (index % 2) as u32,
+            &format!("DuplicateChild{index}"),
+            vec![],
+        ));
+    }
+    let def_idx = {
+        let mut index = make_def_index(definitions, HashMap::new());
+        index
+            .template_children
+            .insert(0, vec!["duplicate-child".to_string()]);
+        let mut candidates: Vec<u32> = (1..=12).collect();
+        candidates.push(999);
+        index
+            .selector_index
+            .insert("duplicate-child".to_string(), candidates);
+        index
+    };
+
+    let mut visited = HashSet::new();
+    let result = build_template_callee_tree(
+        "ParentComponent",
+        2,
+        0,
+        &def_idx,
+        &mut visited,
+    );
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0]["resolution"], "ambiguous");
+    assert_eq!(result[0]["reason"], "ambiguous_template_selector");
+    assert_eq!(result[0]["totalCandidates"], 12);
+    assert_eq!(result[0]["candidatesTruncated"], true);
+    let candidates = result[0]["candidates"].as_array().unwrap();
+    assert_eq!(candidates.len(), 10);
+    assert!(candidates.iter().all(|candidate| candidate["file"].is_string()));
+    assert!(result[0].get("class").is_none());
+}
+
+#[test]
+fn test_angular_component_fallback_reports_unavailable_record() {
+    let definitions = vec![angular_class_def(0, "LegacyComponent", "legacy-comp")];
+    let index = make_def_index(definitions, HashMap::new());
+    assert!(is_known_angular_component("LegacyComponent", &index));
+
+    let mut reasons = std::collections::BTreeSet::new();
+    record_angular_component_resolution_reasons(0, &index, &mut reasons);
+    assert_eq!(
+        reasons,
+        std::collections::BTreeSet::from(["component_record_unavailable".to_string()])
+    );
+}
+
+#[test]
 fn test_template_navigation_ignores_commented_custom_elements_symmetrically() {
     let html = "<!-- <comment-child></comment-child> --><active-child></active-child>";
     let template_children = crate::definitions::extract_custom_elements(html);
@@ -1210,6 +1313,7 @@ fn test_template_navigation_ignores_commented_custom_elements_symmetrically() {
     let def_idx = {
         let mut idx = make_def_index(definitions, HashMap::new());
         idx.template_children.insert(0, template_children);
+        idx.template_parents.insert("active-child".to_string(), vec![0]);
         idx.selector_index.insert("parent-component".to_string(), vec![0]);
         idx.selector_index.insert("active-child".to_string(), vec![1]);
         idx.selector_index.insert("comment-child".to_string(), vec![2]);
@@ -1341,6 +1445,7 @@ fn test_find_template_parents_found() {
     let def_idx = {
         let mut idx = make_def_index(definitions, HashMap::new());
         idx.template_children.insert(0, vec!["child-comp".to_string()]);
+        idx.template_parents.insert("child-comp".to_string(), vec![0]);
         idx.selector_index.insert("parent-comp".to_string(), vec![0]);
         idx
     };
@@ -1359,6 +1464,7 @@ fn test_callers_template_navigation_next_step_hint_points_to_result_file() {
     ];
     let mut def_idx = make_def_index(definitions, HashMap::new());
     def_idx.template_children.insert(0, vec!["child-comp".to_string()]);
+    def_idx.template_parents.insert("child-comp".to_string(), vec![0]);
     def_idx.selector_index.insert("parent-comp".to_string(), vec![0]);
     let ctx = make_ctx_with_idx(def_idx);
 
@@ -1388,6 +1494,7 @@ fn test_callers_next_step_hint_template_navigation_accepts_known_non_hyphen_sele
     ];
     let mut def_idx = make_def_index(definitions, HashMap::new());
     def_idx.template_children.insert(0, vec!["menu".to_string()]);
+    def_idx.template_parents.insert("menu".to_string(), vec![0]);
     def_idx.selector_index.insert("menu".to_string(), vec![1]);
     let ctx = make_ctx_with_idx(def_idx);
 
@@ -1443,6 +1550,7 @@ fn test_callers_template_navigation_next_step_hint_uses_repo_relative_path_with_
         "C:/Repos/AngularApp/src/legacy/OrderController.ts".to_string(),
     ];
     def_idx.template_children.insert(0, vec!["child-comp".to_string()]);
+    def_idx.template_parents.insert("child-comp".to_string(), vec![0]);
     def_idx.selector_index.insert("parent-comp".to_string(), vec![0]);
     let ctx = make_ctx_with_idx(def_idx);
 
@@ -1504,6 +1612,7 @@ fn test_find_template_parents_multiple() {
         let mut idx = make_def_index(definitions, HashMap::new());
         idx.template_children.insert(0, vec!["shared-child".to_string()]);
         idx.template_children.insert(1, vec!["shared-child".to_string()]);
+        idx.template_parents.insert("shared-child".to_string(), vec![0, 1]);
         idx
     };
 
@@ -1532,6 +1641,8 @@ fn test_find_template_parents_recursive_depth() {
         idx.template_children.insert(0, vec!["child-comp".to_string()]);
         // ChildComp uses grand-child in its template
         idx.template_children.insert(1, vec!["grand-child".to_string()]);
+        idx.template_parents.insert("child-comp".to_string(), vec![0]);
+        idx.template_parents.insert("grand-child".to_string(), vec![1]);
         // Register selectors
         idx.selector_index.insert("grand-parent".to_string(), vec![0]);
         idx.selector_index.insert("child-comp".to_string(), vec![1]);
@@ -1567,6 +1678,8 @@ fn test_find_template_parents_respects_max_depth() {
         let mut idx = make_def_index(definitions, HashMap::new());
         idx.template_children.insert(0, vec!["child-comp".to_string()]);
         idx.template_children.insert(1, vec!["grand-child".to_string()]);
+        idx.template_parents.insert("child-comp".to_string(), vec![0]);
+        idx.template_parents.insert("grand-child".to_string(), vec![1]);
         idx.selector_index.insert("grand-parent".to_string(), vec![0]);
         idx.selector_index.insert("child-comp".to_string(), vec![1]);
         idx.selector_index.insert("grand-child".to_string(), vec![2]);
@@ -1594,6 +1707,8 @@ fn test_find_template_parents_cyclic() {
         let mut idx = make_def_index(definitions, HashMap::new());
         idx.template_children.insert(0, vec!["comp-b".to_string()]);
         idx.template_children.insert(1, vec!["comp-a".to_string()]);
+        idx.template_parents.insert("comp-b".to_string(), vec![0]);
+        idx.template_parents.insert("comp-a".to_string(), vec![1]);
         idx.selector_index.insert("comp-a".to_string(), vec![0]);
         idx.selector_index.insert("comp-b".to_string(), vec![1]);
         idx

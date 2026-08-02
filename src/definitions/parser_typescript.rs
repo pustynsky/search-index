@@ -14,6 +14,23 @@ pub(crate) fn parse_typescript_definitions(
     source: &str,
     file_id: u32,
 ) -> ParseResult {
+    parse_typescript_definitions_impl(parser, source, file_id, false).0
+}
+
+pub(crate) fn parse_typescript_definitions_with_components(
+    parser: &mut tree_sitter::Parser,
+    source: &str,
+    file_id: u32,
+) -> TypeScriptParseResult {
+    parse_typescript_definitions_impl(parser, source, file_id, true)
+}
+
+fn parse_typescript_definitions_impl(
+    parser: &mut tree_sitter::Parser,
+    source: &str,
+    file_id: u32,
+    collect_angular_components: bool,
+) -> TypeScriptParseResult {
     // PARSE-002: skip oversized sources before tree-sitter allocates ~10× RAM.
     if source.len() > MAX_PARSE_SOURCE_BYTES {
         tracing::warn!(
@@ -23,7 +40,7 @@ pub(crate) fn parse_typescript_definitions(
             limit = MAX_PARSE_SOURCE_BYTES,
             "skipping oversized TypeScript source"
         );
-        return (Vec::new(), Vec::new(), Vec::new());
+        return ((Vec::new(), Vec::new(), Vec::new()), Vec::new());
     }
     // PARSE-001: bound parse wall-clock so a single pathological file cannot
     // pin a worker thread indefinitely.
@@ -36,13 +53,22 @@ pub(crate) fn parse_typescript_definitions(
                 file_id = file_id,
                 "tree-sitter TS parse returned None (timeout or grammar error)"
             );
-            return (Vec::new(), Vec::new(), Vec::new());
+            return ((Vec::new(), Vec::new(), Vec::new()), Vec::new());
         }
     };
 
     let mut defs = Vec::new();
     let mut method_nodes: Vec<(usize, tree_sitter::Node)> = Vec::new();
-    walk_typescript_node_collecting(tree.root_node(), source, file_id, None, &mut defs, &mut method_nodes, 0);
+    let mut angular_components = Vec::new();
+    walk_typescript_node_collecting(
+        tree.root_node(),
+        source,
+        file_id,
+        None,
+        (&mut defs, &mut method_nodes),
+        collect_angular_components.then_some(&mut angular_components),
+        0,
+    );
 
     let lexical_model = build_ts_lexical_model(tree.root_node(), source);
     let mut definition_by_callable_node: HashMap<usize, usize> = method_nodes
@@ -143,7 +169,264 @@ pub(crate) fn parse_typescript_definitions(
         code_stats_entries.push((def_local_idx, stats));
     }
 
-    (defs, call_sites, code_stats_entries)
+    ((defs, call_sites, code_stats_entries), angular_components)
+}
+
+fn extract_angular_component_record(
+    class_node: tree_sitter::Node,
+    source: &str,
+) -> Option<AngularComponentRecord> {
+    let mut direct_cursor = class_node.walk();
+    for decorator in class_node
+        .children(&mut direct_cursor)
+        .filter(|child| child.kind() == "decorator")
+    {
+        if let Some(component) = parse_angular_component_decorator(decorator, source) {
+            return Some(component);
+        }
+    }
+    let parent = class_node.parent()?;
+    if parent.kind() != "export_statement" {
+        return None;
+    }
+    let mut parent_cursor = parent.walk();
+    parent
+        .children(&mut parent_cursor)
+        .filter(|child| child.kind() == "decorator")
+        .find_map(|decorator| parse_angular_component_decorator(decorator, source))
+}
+
+fn parse_angular_component_decorator(
+    decorator: tree_sitter::Node,
+    source: &str,
+) -> Option<AngularComponentRecord> {
+    let call = find_child_by_kind(decorator, "call_expression")
+        .or_else(|| find_descendant_by_kind(decorator, "call_expression"))?;
+    let function = find_child_by_field(call, "function")?;
+    if node_text(function, source) != "Component" {
+        return None;
+    }
+    let arguments = find_child_by_field(call, "arguments")
+        .or_else(|| find_child_by_kind(call, "arguments"))?;
+    let mut argument_cursor = arguments.walk();
+    let argument_nodes: Vec<_> = arguments.named_children(&mut argument_cursor).collect();
+    if argument_nodes.is_empty() {
+        return Some(AngularComponentRecord {
+            selector: StaticValue::Missing,
+            template: AngularTemplateSource::Missing,
+        });
+    }
+    if argument_nodes.len() != 1 || argument_nodes[0].kind() != "object" {
+        let reason = "component metadata is not a static object".to_string();
+        return Some(AngularComponentRecord {
+            selector: StaticValue::Dynamic {
+                reason: reason.clone(),
+            },
+            template: AngularTemplateSource::Dynamic { reason },
+        });
+    }
+    let object = argument_nodes[0];
+
+    let mut selector = None;
+    let mut template_url = None;
+    let mut template = None;
+    let mut unknown_metadata = false;
+    let mut property_cursor = object.walk();
+    for property in object.named_children(&mut property_cursor) {
+        if property.kind() == "spread_element" {
+            unknown_metadata = true;
+            continue;
+        }
+        if matches!(property.kind(), "shorthand_property_identifier_pattern" | "shorthand_property_identifier") {
+            let key = node_text(property, source);
+            let dynamic = StaticValue::Dynamic {
+                reason: format!("shorthand {key} property is dynamic"),
+            };
+            match key {
+                "selector" => selector = Some(dynamic),
+                "templateUrl" => template_url = Some(dynamic),
+                "template" => template = Some(dynamic),
+                _ => {}
+            }
+            continue;
+        }
+        if property.kind() != "pair" {
+            continue;
+        }
+        let Some(key_node) = find_child_by_field(property, "key") else {
+            unknown_metadata = true;
+            continue;
+        };
+        let Some(value) = find_child_by_field(property, "value") else {
+            unknown_metadata = true;
+            continue;
+        };
+        let Some(key) = angular_property_name(key_node, source) else {
+            unknown_metadata = true;
+            continue;
+        };
+        let slot = match key.as_str() {
+            "selector" => &mut selector,
+            "templateUrl" => &mut template_url,
+            "template" => &mut template,
+            _ => continue,
+        };
+        if slot.is_some() {
+            *slot = Some(StaticValue::Dynamic {
+                reason: format!("duplicate {key} property"),
+            });
+        } else {
+            *slot = Some(angular_static_string(value, source));
+        }
+    }
+
+    if unknown_metadata {
+        let reason = "component metadata contains dynamic properties".to_string();
+        return Some(AngularComponentRecord {
+            selector: StaticValue::Dynamic {
+                reason: reason.clone(),
+            },
+            template: AngularTemplateSource::Dynamic { reason },
+        });
+    }
+
+    let template = match (template, template_url) {
+        (Some(_), Some(_)) => AngularTemplateSource::Dynamic {
+            reason: "component declares both template and templateUrl".to_string(),
+        },
+        (Some(StaticValue::Static(content)), None) => AngularTemplateSource::Inline { content },
+        (Some(StaticValue::Dynamic { reason }), None) => AngularTemplateSource::Dynamic { reason },
+        (Some(StaticValue::Missing), None) => AngularTemplateSource::Missing,
+        (None, Some(StaticValue::Static(relative_path))) => {
+            AngularTemplateSource::External { relative_path }
+        }
+        (None, Some(StaticValue::Dynamic { reason })) => AngularTemplateSource::Dynamic { reason },
+        (None, Some(StaticValue::Missing)) | (None, None) => AngularTemplateSource::Missing,
+    };
+
+    Some(AngularComponentRecord {
+        selector: selector.unwrap_or(StaticValue::Missing),
+        template,
+    })
+}
+
+fn angular_property_name(node: tree_sitter::Node, source: &str) -> Option<String> {
+    match node.kind() {
+        "property_identifier" | "identifier" => Some(node_text(node, source).to_string()),
+        "string" => decode_ts_string_literal(node_text(node, source)),
+        _ => None,
+    }
+}
+
+fn angular_static_string(node: tree_sitter::Node, source: &str) -> StaticValue<String> {
+    match node.kind() {
+        "string" => decode_ts_string_literal(node_text(node, source))
+            .map(StaticValue::Static)
+            .unwrap_or_else(|| StaticValue::Dynamic {
+                reason: "invalid string literal".to_string(),
+            }),
+        "template_string"
+            if find_descendant_by_kind(node, "template_substitution").is_none() =>
+        {
+            decode_ts_string_literal(node_text(node, source))
+                .map(StaticValue::Static)
+                .unwrap_or_else(|| StaticValue::Dynamic {
+                    reason: "invalid template literal".to_string(),
+                })
+        }
+        "template_string" => StaticValue::Dynamic {
+            reason: "template interpolation is dynamic".to_string(),
+        },
+        _ => StaticValue::Dynamic {
+            reason: format!("{} is not a static string", node.kind()),
+        },
+    }
+}
+
+pub(crate) fn decode_ts_string_literal(text: &str) -> Option<String> {
+    fn parse_fixed_hex(chars: &mut std::str::Chars<'_>, digits: usize) -> Option<u32> {
+        let mut value = 0u32;
+        for _ in 0..digits {
+            value = value.checked_mul(16)? + chars.next()?.to_digit(16)?;
+        }
+        Some(value)
+    }
+
+    fn push_scalar(decoded: &mut String, value: u32) -> Option<()> {
+        decoded.push(char::from_u32(value)?);
+        Some(())
+    }
+
+    if text.len() < 2 {
+        return None;
+    }
+    let quote = text.as_bytes().first().copied()?;
+    if !matches!(quote, b'\'' | b'"' | b'`') || text.as_bytes().last().copied() != Some(quote) {
+        return None;
+    }
+    let mut decoded = String::new();
+    let mut chars = text[1..text.len() - 1].chars();
+    while let Some(character) = chars.next() {
+        if character != '\\' {
+            decoded.push(character);
+            continue;
+        }
+        let escaped = chars.next()?;
+        match escaped {
+            'n' => decoded.push('\n'),
+            'r' => decoded.push('\r'),
+            't' => decoded.push('\t'),
+            'b' => decoded.push('\u{0008}'),
+            'f' => decoded.push('\u{000c}'),
+            'v' => decoded.push('\u{000b}'),
+            '0' if !chars
+                .as_str()
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_digit()) =>
+            {
+                decoded.push('\0');
+            }
+            '\\' => decoded.push('\\'),
+            '\'' => decoded.push('\''),
+            '"' => decoded.push('"'),
+            '`' => decoded.push('`'),
+            'x' => push_scalar(&mut decoded, parse_fixed_hex(&mut chars, 2)?)?,
+            'u' => {
+                let value = if chars.as_str().starts_with('{') {
+                    chars.next();
+                    let mut value = 0u32;
+                    let mut digits = 0usize;
+                    loop {
+                        let character = chars.next()?;
+                        if character == '}' {
+                            break;
+                        }
+                        if digits == 6 {
+                            return None;
+                        }
+                        value = value.checked_mul(16)? + character.to_digit(16)?;
+                        digits += 1;
+                    }
+                    if digits == 0 {
+                        return None;
+                    }
+                    value
+                } else {
+                    parse_fixed_hex(&mut chars, 4)?
+                };
+                push_scalar(&mut decoded, value)?;
+            }
+            '\n' => {}
+            '\r' => {
+                if chars.as_str().starts_with('\n') {
+                    chars.next();
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(decoded)
 }
 
 // ─── AST walking ────────────────────────────────────────────────────
@@ -153,10 +436,14 @@ fn walk_typescript_node_collecting<'a>(
     source: &str,
     file_id: u32,
     parent_name: Option<&str>,
-    defs: &mut Vec<DefinitionEntry>,
-    method_nodes: &mut Vec<(usize, tree_sitter::Node<'a>)>,
+    outputs: (
+        &mut Vec<DefinitionEntry>,
+        &mut Vec<(usize, tree_sitter::Node<'a>)>,
+    ),
+    mut angular_components: Option<&mut Vec<ParsedAngularComponentRecord>>,
     depth: usize,
 ) {
+    let (defs, method_nodes) = outputs;
     // MINOR-27: hard cap recursion. Normal TS code is well under 50 levels.
     if depth > MAX_TYPESCRIPT_AST_RECURSION_DEPTH {
         warn_ast_depth_exceeded_at(
@@ -172,12 +459,29 @@ fn walk_typescript_node_collecting<'a>(
         "class_declaration" | "abstract_class_declaration" => {
             if let Some(def) = extract_ts_class_def(node, source, file_id, parent_name) {
                 let name = def.name.clone();
+                let local_def_index = defs.len();
                 defs.push(def);
+                if let Some(angular_components) = angular_components.as_deref_mut()
+                    && let Some(component) = extract_angular_component_record(node, source)
+                {
+                    angular_components.push(ParsedAngularComponentRecord {
+                        local_def_index,
+                        component,
+                    });
+                }
                 // Walk into class body
                 if let Some(body) = find_child_by_kind(node, "class_body") {
                     for i in 0..body.child_count() {
                         if let Some(child) = body.child(i) {
-                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs, method_nodes, depth + 1);
+                            walk_typescript_node_collecting(
+                                child,
+                                source,
+                                file_id,
+                                Some(&name),
+                                (&mut *defs, &mut *method_nodes),
+                                angular_components.as_deref_mut(),
+                                depth + 1,
+                            );
                         }
                     }
                 }
@@ -194,7 +498,15 @@ fn walk_typescript_node_collecting<'a>(
                 {
                     for i in 0..body.child_count() {
                         if let Some(child) = body.child(i) {
-                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs, method_nodes, depth + 1);
+                            walk_typescript_node_collecting(
+                                child,
+                                source,
+                                file_id,
+                                Some(&name),
+                                (&mut *defs, &mut *method_nodes),
+                                angular_components.as_deref_mut(),
+                                depth + 1,
+                            );
                         }
                     }
                 }
@@ -209,7 +521,15 @@ fn walk_typescript_node_collecting<'a>(
                 if let Some(body) = find_child_by_kind(node, "enum_body") {
                     for i in 0..body.child_count() {
                         if let Some(child) = body.child(i) {
-                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs, method_nodes, depth + 1);
+                            walk_typescript_node_collecting(
+                                child,
+                                source,
+                                file_id,
+                                Some(&name),
+                                (&mut *defs, &mut *method_nodes),
+                                angular_components.as_deref_mut(),
+                                depth + 1,
+                            );
                         }
                     }
                 }
@@ -311,7 +631,15 @@ fn walk_typescript_node_collecting<'a>(
         "export_statement" => {
             for i in 0..node.child_count() {
                 if let Some(child) = node.child(i) {
-                    walk_typescript_node_collecting(child, source, file_id, parent_name, defs, method_nodes, depth + 1);
+                    walk_typescript_node_collecting(
+                        child,
+                        source,
+                        file_id,
+                        parent_name,
+                        (&mut *defs, &mut *method_nodes),
+                        angular_components.as_deref_mut(),
+                        depth + 1,
+                    );
                 }
             }
             return;
@@ -322,7 +650,15 @@ fn walk_typescript_node_collecting<'a>(
     // Default: recurse into children
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            walk_typescript_node_collecting(child, source, file_id, parent_name, defs, method_nodes, depth + 1);
+            walk_typescript_node_collecting(
+                child,
+                source,
+                file_id,
+                parent_name,
+                (&mut *defs, &mut *method_nodes),
+                angular_components.as_deref_mut(),
+                depth + 1,
+            );
         }
     }
 }
@@ -401,34 +737,6 @@ fn extract_ts_decorators(node: tree_sitter::Node, source: &str) -> Vec<String> {
     decorators
 }
 
-/// Extract Angular @Component metadata from decorator text.
-/// Input — decorator text without `@`:
-///   "Component({selector: 'dashboard-embed', templateUrl: './file.html'})"
-/// Returns (selector, templateUrl) if found.
-pub(crate) fn extract_component_metadata(decorator_text: &str) -> Option<(String, Option<String>)> {
-    if !decorator_text.starts_with("Component(") {
-        return None;
-    }
-    let selector = extract_decorator_string_property(decorator_text, "selector")?;
-    let template_url = extract_decorator_string_property(decorator_text, "templateUrl");
-    Some((selector, template_url))
-}
-
-/// Extract a string property value from decorator text.
-/// Looks for: propertyName: 'value' or propertyName: "value"
-fn extract_decorator_string_property(text: &str, property: &str) -> Option<String> {
-    let search = format!("{}:", property);
-    let pos = text.find(&search)?;
-    let after_colon = &text[pos + search.len()..];
-    let trimmed = after_colon.trim_start();
-    let quote_char = trimmed.chars().next()?;
-    if quote_char != '\'' && quote_char != '"' { return None; }
-    let inner = &trimmed[1..];
-    let end = inner.find(quote_char)?;
-    let value = &inner[..end];
-    if value.is_empty() { return None; }
-    Some(value.to_string())
-}
 
 /// Extract base types / heritage (extends/implements) from a class or interface.
 fn extract_ts_heritage(node: tree_sitter::Node, source: &str) -> Vec<String> {

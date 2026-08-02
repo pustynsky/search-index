@@ -804,6 +804,253 @@ export function differentCoalescing(
 }
 
 #[test]
+fn test_ts_angular_template_states_and_duplicate_selectors_are_truthful() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    std::fs::write(
+        root.join("components.ts"),
+        r#"const dynamicSelector = getSelector();
+@Component({ selector: 'app-first' })
+export class FirstChild {}
+@Component({ selector: 'app-duplicate' })
+export class FirstDuplicate {}
+@Component({ selector: 'app-duplicate' })
+export class SecondDuplicate {}
+@Component({ selector: 'app-parent', template: '<app-duplicate></app-duplicate><runtime-child></runtime-child>' })
+export class ParentComponent {}
+@Component({ selector: dynamicSelector, template: makeTemplate() })
+export class DynamicComponent {}
+@Component({ selector: 'app-missing' })
+export class MissingComponent {}
+@Component({ selector: dynamicSelector, template: '<app-first></app-first>' })
+export class DynamicParentComponent {}
+@Component({ selector: 'app-dynamic-child', template: makeTemplate() })
+export class DynamicChildComponent {}
+@Component({ selector: 'app-dynamic-root', template: '<app-dynamic-child></app-dynamic-child>' })
+export class DynamicRootComponent {}
+@Component({ selector: 'app-unavailable', templateUrl: './missing.html' })
+export class UnavailableComponent {}"#,
+    )
+    .unwrap();
+
+    let def_index = crate::definitions::build_definition_index(&DefIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "ts".to_string(),
+        threads: 1,
+        respect_git_exclude: false,
+    });
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "ts".to_string(),
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let context = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(
+            root.to_string_lossy().to_string(),
+        ))),
+        server_ext: "ts".to_string(),
+        ..Default::default()
+    };
+
+    let definitions_result = dispatch_tool(
+        &context,
+        "xray_definitions",
+        &json!({ "name": ["DynamicComponent", "MissingComponent", "UnavailableComponent"] }),
+    );
+    assert!(
+        !definitions_result.is_error,
+        "{}",
+        definitions_result.content[0].text
+    );
+    let definitions_output: Value =
+        serde_json::from_str(&definitions_result.content[0].text).unwrap();
+    let definition = |name: &str| {
+        definitions_output["definitions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|definition| definition["name"] == name)
+            .unwrap()
+    };
+    assert_eq!(definition("DynamicComponent")["selectorState"], "dynamic");
+    assert_eq!(definition("DynamicComponent")["templateSource"], "dynamic");
+    assert_eq!(definition("DynamicComponent")["templateState"], "dynamic");
+    assert!(definition("DynamicComponent")["templateStateReason"].is_string());
+    assert_eq!(definition("MissingComponent")["selectorState"], "static");
+    assert_eq!(definition("MissingComponent")["templateSource"], "missing");
+    assert_eq!(definition("MissingComponent")["templateState"], "missing");
+    assert_eq!(definition("UnavailableComponent")["templateSource"], "external");
+    assert_eq!(definition("UnavailableComponent")["templateState"], "unavailable");
+    assert_eq!(definition("UnavailableComponent")["templatePath"], "./missing.html");
+    assert!(definition("UnavailableComponent")["templateStateReason"].is_string());
+
+    let parent = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["ParentComponent"],
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!parent.is_error, "{}", parent.content[0].text);
+    let parent_output: Value = serde_json::from_str(&parent.content[0].text).unwrap();
+    assert_eq!(parent_output["callTree"][0]["resolution"], "ambiguous");
+    assert_eq!(
+        parent_output["callTree"][0]["reason"],
+        "ambiguous_template_selector"
+    );
+    assert_eq!(parent_output["callTree"][0]["candidates"].as_array().unwrap().len(), 2);
+    assert_eq!(parent_output["callTree"][1]["selector"], "runtime-child");
+    assert_eq!(parent_output["callTree"][1]["resolution"], "unresolved");
+    assert_eq!(
+        parent_output["callTree"][1]["reason"],
+        "unresolved_template_selector"
+    );
+    assert_eq!(parent_output["resultStatus"]["status"], "partial");
+    assert_eq!(parent_output["resultStatus"]["safeForExhaustiveClaims"], false);
+    assert!(parent_output["resultStatus"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "ambiguous_template_selector"));
+    assert!(parent_output["resultStatus"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "unresolved_template_selector"));
+
+    for (component, expected_reasons) in [
+        (
+            "DynamicComponent",
+            vec!["dynamic_component_selector", "dynamic_template"],
+        ),
+        ("MissingComponent", vec!["missing_template"]),
+        (
+            "UnavailableComponent",
+            vec!["unavailable_external_template"],
+        ),
+    ] {
+        let result = dispatch_tool(
+            &context,
+            "xray_callers",
+            &json!({
+                "method": [component],
+                "direction": "down",
+                "depth": 1
+            }),
+        );
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["resultStatus"]["status"], "partial", "{output}");
+        assert_eq!(output["resultStatus"]["complete"], false, "{output}");
+        assert_eq!(
+            output["resultStatus"]["safeForExhaustiveClaims"],
+            false,
+            "{output}"
+        );
+        let reasons = output["resultStatus"]["reasons"].as_array().unwrap();
+        for expected in expected_reasons {
+            assert!(reasons.iter().any(|reason| reason == expected), "{output}");
+        }
+    }
+    let static_parent_with_global_blind_spot = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["app-duplicate"],
+            "direction": "up",
+            "depth": 2
+        }),
+    );
+    assert!(
+        !static_parent_with_global_blind_spot.is_error,
+        "{}",
+        static_parent_with_global_blind_spot.content[0].text
+    );
+    let global_blind_spot_output: Value = serde_json::from_str(
+        &static_parent_with_global_blind_spot.content[0].text,
+    )
+    .unwrap();
+    assert_eq!(
+        global_blind_spot_output["callTree"][0]["class"],
+        "ParentComponent"
+    );
+    assert_eq!(global_blind_spot_output["resultStatus"]["status"], "partial");
+    assert!(global_blind_spot_output["resultStatus"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "dynamic_template_index_blind_spot"));
+    assert!(global_blind_spot_output["resultStatus"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "unavailable_external_template"));
+
+    let dynamic_parent = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["app-first"],
+            "direction": "up",
+            "depth": 2
+        }),
+    );
+    assert!(
+        !dynamic_parent.is_error,
+        "{}",
+        dynamic_parent.content[0].text
+    );
+    let dynamic_parent_output: Value =
+        serde_json::from_str(&dynamic_parent.content[0].text).unwrap();
+    assert_eq!(
+        dynamic_parent_output["callTree"][0]["class"],
+        "DynamicParentComponent"
+    );
+    assert_eq!(dynamic_parent_output["resultStatus"]["status"], "partial");
+    assert!(dynamic_parent_output["resultStatus"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "dynamic_component_selector"));
+
+    let dynamic_descendant = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["DynamicRootComponent"],
+            "direction": "down",
+            "depth": 2
+        }),
+    );
+    assert!(
+        !dynamic_descendant.is_error,
+        "{}",
+        dynamic_descendant.content[0].text
+    );
+    let dynamic_descendant_output: Value =
+        serde_json::from_str(&dynamic_descendant.content[0].text).unwrap();
+    assert_eq!(
+        dynamic_descendant_output["callTree"][0]["class"],
+        "DynamicChildComponent"
+    );
+    assert_eq!(
+        dynamic_descendant_output["resultStatus"]["status"],
+        "partial"
+    );
+    assert!(dynamic_descendant_output["resultStatus"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "dynamic_template"));
+}
+
+#[test]
 fn test_ts_local_arrow_call_does_not_resolve_to_other_module_function() {
     static COUNTER: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);

@@ -191,7 +191,7 @@ fn test_find_def_index_meta_rejects_extension_mismatch() {
 
 #[test]
 fn test_definition_index_version_is_pinned() {
-    assert_eq!(crate::definitions::DEFINITION_INDEX_VERSION, 9);
+    assert_eq!(crate::definitions::DEFINITION_INDEX_VERSION, 10);
 }
 
 #[test]
@@ -310,6 +310,55 @@ fn test_typescript_lexical_call_kinds_survive_storage_roundtrip() {
     assert_eq!(calls[6].call_kind, CallSiteKind::TypeScriptImported);
     assert_eq!(calls[7].call_kind, CallSiteKind::TypeScriptUnknownGlobal);
 }
+
+#[test]
+fn test_angular_component_records_survive_storage_roundtrip() {
+    use crate::definitions::{
+        AngularComponentRecord, AngularTemplateSource, StaticValue,
+        DEFINITION_INDEX_VERSION,
+    };
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().to_string_lossy().to_string();
+    let mut index = DefinitionIndex::default();
+    index.format_version = DEFINITION_INDEX_VERSION;
+    index.root = root.clone();
+    index.extensions = vec!["ts".to_string()];
+    index.angular_components.insert(
+        7,
+        AngularComponentRecord {
+            selector: StaticValue::Static("app-shell".to_string()),
+            template: AngularTemplateSource::UnavailableExternal {
+                relative_path: "./shell.html".to_string(),
+                reason: "external template could not be read".to_string(),
+            },
+        },
+    );
+    index.selector_index.insert("app-shell".to_string(), vec![7]);
+    index.template_children.insert(7, vec!["app-child".to_string()]);
+    index
+        .template_owners
+        .insert("q:/repo/shell.html".to_string(), vec![7]);
+    index
+        .template_parents
+        .insert("app-child".to_string(), vec![7]);
+
+    let path = definition_index_path_for(&root, "ts", temp.path());
+    crate::index::save_compressed(&path, &index, "test").unwrap();
+    let loaded = load_definition_index(&root, "ts", temp.path()).unwrap();
+
+    assert_eq!(loaded.angular_components, index.angular_components);
+    assert_eq!(loaded.selector_index, index.selector_index);
+    assert_eq!(loaded.template_children, index.template_children);
+    assert_eq!(loaded.template_owners, index.template_owners);
+    assert_eq!(loaded.template_parents, index.template_parents);
+
+    let rebuilt = DefinitionIndex::from_head_and_entries(index.build_head(), Vec::new());
+    assert_eq!(rebuilt.angular_components, index.angular_components);
+    assert_eq!(rebuilt.template_owners, index.template_owners);
+    assert_eq!(rebuilt.template_parents, index.template_parents);
+}
+
 
 #[test]
 fn test_def_index_format_version_mismatch_returns_err() {

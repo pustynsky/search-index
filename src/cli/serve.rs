@@ -1467,6 +1467,9 @@ fn load_or_build_definition_index(
             empty_file_ids: Vec::new(),
             extension_methods: HashMap::new(),
             selector_index: HashMap::new(),
+            template_owners: HashMap::new(),
+            template_parents: HashMap::new(),
+            angular_components: HashMap::new(),
             template_children: HashMap::new(),
             respect_git_exclude,
         };
