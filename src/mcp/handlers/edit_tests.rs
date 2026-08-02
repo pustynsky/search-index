@@ -45,7 +45,7 @@ fn create_named_temp_file(dir: &std::path::Path, name: &str, content: &str) -> P
 fn test_successful_edit_reindex_increments_index_epoch() {
     let temp = tempfile::tempdir().unwrap();
     create_named_temp_file(temp.path(), "tracked.cs", "class Before {}\n");
-    let ctx = make_ctx(temp.path());
+    let ctx = make_ctx_with_ext(temp.path(), "cs");
     let before = ctx.index_epoch.load(std::sync::atomic::Ordering::Acquire);
 
     let result = handle_xray_edit(&ctx, &json!({
@@ -53,9 +53,12 @@ fn test_successful_edit_reindex_increments_index_epoch() {
         "edits": [{ "search": "Before", "replace": "After" }],
     }));
     assert!(!result.is_error, "{}", result.content[0].text);
+    let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(response["reindexStatus"], "completed", "{response}");
+    assert_eq!(response["contentIndexUpdated"], true, "{response}");
     assert!(
         ctx.index_epoch.load(std::sync::atomic::Ordering::Acquire) > before,
-        "successful synchronous reindex must invalidate continuation tokens",
+        "successful synchronous reindex must invalidate continuation tokens: {response}",
     );
 }
 
