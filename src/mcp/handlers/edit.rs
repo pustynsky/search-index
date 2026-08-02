@@ -2624,9 +2624,11 @@ fn handle_single_file_edit(
                 if stats.content_updated > 0 {
                     super::grep::schedule_trigram_rebuild_after_edit(ctx);
                 }
-                // Signal watcher thread that indexes were mutated outside its event loop.
+                // A committed in-scope write invalidates continuation tokens even when
+                // a transient read or poisoned lock prevents this reindex attempt from
+                // updating the in-memory index. The watcher can reconcile it later.
+                ctx.index_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                 if stats.content_updated > 0 || stats.def_updated > 0 {
-                    ctx.index_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
                     ctx.autosave_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 response["reindexElapsedMs"] = json!(format!("{:.2}", stats.elapsed_ms));
@@ -2937,12 +2939,13 @@ fn handle_multi_file_edit(
     if !dry_run && any_file_created_content_eligible {
         ctx.file_index_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    // Signal watcher thread that indexes were mutated outside its event loop.
-    if let Some(ref stats) = batch_stats
-        && (stats.content_updated > 0 || stats.def_updated > 0)
-    {
+    // Every completed in-scope write batch invalidates continuation tokens;
+    // autosave is needed only when this reindex attempt changed an index.
+    if let Some(ref stats) = batch_stats {
         ctx.index_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-        ctx.autosave_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        if stats.content_updated > 0 || stats.def_updated > 0 {
+            ctx.autosave_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
     }
     if let Some(ref stats) = batch_stats
         && stats.content_updated > 0
