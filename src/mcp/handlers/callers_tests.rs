@@ -5083,6 +5083,131 @@ fn test_interface_expansion_pages_unique_root_sequence() {
 
 
 #[test]
+fn test_interface_decorator_pages_keep_stable_root_sequence_at_depth_three() {
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0,
+            name: "IFoo".to_string(),
+            kind: DefinitionKind::Interface,
+            line_start: 1,
+            line_end: 10,
+            parent: None,
+            signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        },
+        method_def(0, "Go", "IFoo", 5, 6),
+        class_def(0, "Decorator", vec!["IFoo"]),
+        method_def(0, "Go", "Decorator", 20, 30),
+        class_def(1, "ImplB", vec!["IFoo"]),
+        method_def(1, "Go", "ImplB", 10, 15),
+        class_def(2, "CallerD", vec![]),
+        method_def(2, "Run", "CallerD", 5, 10),
+        class_def(3, "CallerB", vec![]),
+        method_def(3, "Run", "CallerB", 5, 10),
+    ];
+    let mut method_calls = HashMap::new();
+    method_calls.insert(3, vec![CallSite {
+        method_name: "Go".to_string(),
+        receiver_type: Some("IFoo".to_string()),
+        line: 25,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
+    }]);
+    method_calls.insert(7, vec![CallSite {
+        method_name: "Go".to_string(),
+        receiver_type: Some("Decorator".to_string()),
+        line: 7,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
+    }]);
+    method_calls.insert(9, vec![CallSite {
+        method_name: "Go".to_string(),
+        receiver_type: Some("ImplB".to_string()),
+        line: 7,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
+    }]);
+
+    let mut definition_index = make_def_index(definitions, method_calls);
+    definition_index.files = vec![
+        "src/Decorator.cs".to_string(),
+        "src/ImplB.cs".to_string(),
+        "src/CallerD.cs".to_string(),
+        "src/CallerB.cs".to_string(),
+    ];
+    definition_index.extensions = vec!["cs".to_string()];
+    definition_index.path_to_id = definition_index
+        .files
+        .iter()
+        .enumerate()
+        .map(|(file_id, file)| {
+            (
+                crate::path_identity_key(std::path::Path::new(file)),
+                file_id as u32,
+            )
+        })
+        .collect();
+    definition_index
+        .base_type_index
+        .insert("ifoo".to_string(), vec![2, 4]);
+    let content_index = crate::ContentIndex {
+        root: ".".to_string(),
+        files: definition_index.files.clone(),
+        index: HashMap::from([(
+            "go".to_string(),
+            vec![
+                crate::Posting { file_id: 0, lines: vec![25] },
+                crate::Posting { file_id: 2, lines: vec![7] },
+                crate::Posting { file_id: 3, lines: vec![7] },
+            ],
+        )]),
+        total_tokens: 3,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![1, 0, 1, 1],
+        ..Default::default()
+    };
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(definition_index))),
+        server_ext: "cs".to_string(),
+        ..Default::default()
+    };
+    let query = json!({
+        "method": ["Go"],
+        "class": "IFoo",
+        "depth": 3,
+        "resolveInterfaces": true,
+        "maxCallersPerLevel": 10,
+        "maxResults": 1,
+    });
+
+    let mut token = None;
+    let mut roots = Vec::new();
+    for expected_offset in 0..3 {
+        let mut page_query = query.clone();
+        if let Some(current_token) = token.take() {
+            page_query["continuationToken"] = json!(current_token);
+        }
+        let result = handle_xray_callers(&ctx, &page_query);
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let page: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(page["resultStatus"]["page"]["offset"], expected_offset, "{page:#}");
+        assert_eq!(page["resultStatus"]["page"]["total"], 3, "{page:#}");
+        assert_eq!(page["callTree"].as_array().unwrap().len(), 1, "{page:#}");
+        roots.push(page["callTree"][0]["class"].as_str().unwrap().to_string());
+        token = page["resultStatus"]["page"]["continuationToken"]
+            .as_str()
+            .map(str::to_string);
+    }
+
+    assert_eq!(roots, vec!["Decorator", "CallerD", "CallerB"]);
+    assert!(token.is_none());
+}
+
+
+#[test]
 fn test_advisory_interface_vias_emitted_when_class_implements_interface() {
     // DatabaseClient implements IDatabaseClient. The interface-vias advisory is
     // useful only when implementation expansion was explicitly disabled.

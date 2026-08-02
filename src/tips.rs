@@ -828,16 +828,6 @@ pub const KNOWN_TOOL_NAMES: &[&str] = &[
     "xray_branch_status",
 ];
 
-/// Per-tool reference card returned by `xray_help { tool: "<name>" }`.
-///
-/// Goal: a focused, ~1KB payload an LLM agent can request when it needs to
-/// recover from a first-attempt schema error — without consuming the budget
-/// of the full `render_json` reference catalog. Keeps the `xray_edit` entry
-/// in particular short by reusing `CANONICAL_MODE_A_EXAMPLE` /
-/// `CANONICAL_MODE_B_EXAMPLE` (so a schema change updates one place).
-///
-/// Returns `Err` with the list of known tool names when `tool_name` is not
-/// recognised, so the caller can self-correct in one round-trip.
 fn pagination_workflow() -> Value {
     json!({
         "appliesTo": ["xray_definitions", "xray_callers"],
@@ -854,7 +844,16 @@ fn pagination_workflow() -> Value {
     })
 }
 
-
+/// Per-tool reference card returned by `xray_help { tool: "<name>" }`.
+///
+/// Goal: a focused, ~1KB payload an LLM agent can request when it needs to
+/// recover from a first-attempt schema error — without consuming the budget
+/// of the full `render_json` reference catalog. Keeps the `xray_edit` entry
+/// in particular short by reusing `CANONICAL_MODE_A_EXAMPLE` /
+/// `CANONICAL_MODE_B_EXAMPLE` (so a schema change updates one place).
+///
+/// Returns `Err` with the list of known tool names when `tool_name` is not
+/// recognised, so the caller can self-correct in one round-trip.
 pub fn tool_help(tool_name: &str, def_extensions: &[String]) -> Result<Value, String> {
     if !KNOWN_TOOL_NAMES.contains(&tool_name) {
         return Err(format!(
@@ -874,13 +873,13 @@ pub fn tool_help(tool_name: &str, def_extensions: &[String]) -> Result<Value, St
         "parameters": parameters,
     });
 
-    // xray_edit is the only tool with two valid mode shapes — surface both
-    // canonical examples up front so the caller does not need to reconstruct
-    // them from the parameter description.
     if matches!(tool_name, "xray_definitions" | "xray_callers") {
         payload["paginationWorkflow"] = pagination_workflow();
     }
 
+    // xray_edit is the only tool with two valid mode shapes — surface both
+    // canonical examples up front so the caller does not need to reconstruct
+    // them from the parameter description.
     if tool_name == "xray_edit" {
         payload["canonicalExamples"] = json!({
             "modeA_lineRange": CANONICAL_MODE_A_EXAMPLE,

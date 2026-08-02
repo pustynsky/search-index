@@ -3217,11 +3217,17 @@ impl CallerTreeBuilder<'_> {
             .map(|definition| definition.line_start)
             .or_else(|| find_target_line(self.ctx.def_idx, &method_lower, parent_class));
 
-        // Use class.method.line as visited key to distinguish overloads
+        // Keep root discovery independent from recursive traversal state.
         let visited_key = if let Some(cls) = parent_class {
             format!("{}.{}.{}", cls.to_lowercase(), method_lower, target_line.unwrap_or(0))
         } else {
             format!("{}.{}", method_lower, target_line.unwrap_or(0))
+        };
+        let visited_key = if current_depth == 0 {
+            self.visited.insert(visited_key.clone());
+            format!("root:{visited_key}")
+        } else {
+            visited_key
         };
         if !self.visited.insert(visited_key) {
             return Vec::new();
