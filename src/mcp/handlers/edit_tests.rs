@@ -4769,6 +4769,273 @@ fn test_sync_reindex_response_includes_fields_on_real_write() {
         "sync reindex must populate inverted index with new tokens");
 }
 
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn test_sync_reindex_updates_excluded_owned_angular_template_outside_server_extensions() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    std::fs::create_dir_all(root.join(".git/info")).unwrap();
+    std::fs::write(root.join(".git/info/exclude"), "external.html\n").unwrap();
+    std::fs::write(
+        root.join("components.ts"),
+        r#"@Component({ selector: 'app-old' })
+export class OldComponent {}
+@Component({ selector: 'app-new' })
+export class NewComponent {}
+@Component({ selector: 'app-parent', templateUrl: './external.html' })
+export class ParentComponent {}"#,
+    )
+    .unwrap();
+    std::fs::write(root.join("external.html"), "<app-old></app-old>").unwrap();
+
+    let definition_index = crate::definitions::build_definition_index(
+        &crate::definitions::DefIndexArgs {
+            dir: root.to_string_lossy().to_string(),
+            ext: "ts".to_string(),
+            threads: 1,
+            respect_git_exclude: false,
+        },
+    );
+    let parent = definition_index
+        .definitions
+        .iter()
+        .position(|definition| definition.name == "ParentComponent")
+        .unwrap() as u32;
+    let generation = definition_index.definition_generation;
+
+    let mut ctx = make_ctx_with_ext(&root, "ts");
+    ctx.respect_git_exclude = true;
+    ctx.def_index = Some(Arc::new(RwLock::new(definition_index)));
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "external.html",
+        "edits": [{"search": "app-old", "replace": "app-new"}],
+    }));
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(response["reindexStatus"], "completed", "{response}");
+    assert_eq!(response["contentIndexUpdated"], false, "{response}");
+    assert_eq!(response["defIndexUpdated"], true, "{response}");
+    assert_eq!(response["definitionGeneration"], generation + 1, "{response}");
+
+    let definition_index = ctx.def_index.as_ref().unwrap().read().unwrap();
+    assert_eq!(definition_index.definition_generation, generation + 1);
+    assert_eq!(definition_index.template_children[&parent], vec!["app-new"]);
+    assert!(!definition_index.template_parents.contains_key("app-old"));
+    assert_eq!(definition_index.template_parents["app-new"], vec![parent]);
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn test_sync_reindex_reports_pending_after_two_definition_conflicts() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let path = root.join("component.ts");
+    std::fs::write(
+        &path,
+        "@Component({ selector: 'app-old' }) export class Component {}",
+    )
+    .unwrap();
+    let definition_index = crate::definitions::build_definition_index(
+        &crate::definitions::DefIndexArgs {
+            dir: root.to_string_lossy().to_string(),
+            ext: "ts".to_string(),
+            threads: 1,
+            respect_git_exclude: false,
+        },
+    );
+    let generation = definition_index.definition_generation;
+    let definition_index = Arc::new(RwLock::new(definition_index));
+    let input_key = crate::definitions::definition_input_key(&path);
+    let hook_index = Arc::clone(&definition_index);
+    let on_release: Arc<dyn Fn(usize) + Send + Sync> = Arc::new(move |round| {
+        let mut index = hook_index.write().unwrap();
+        let fingerprint = index.input_fingerprints.get_mut(&input_key).unwrap();
+        fingerprint.modified_nanos = fingerprint
+            .modified_nanos
+            .saturating_add(round as u128 + 1);
+    });
+    let hook = Arc::new(
+        crate::mcp::watcher::DefinitionUpdateBeforeWriteHook::with_action(
+            &path,
+            vec![1, 1],
+            on_release,
+        ),
+    );
+    crate::mcp::watcher::install_definition_update_before_write_hook(hook);
+
+    let mut ctx = make_ctx_with_ext(&root, "ts");
+    ctx.def_index = Some(Arc::clone(&definition_index));
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "component.ts",
+        "edits": [{"search": "app-old", "replace": "app-new"}],
+    }));
+    crate::mcp::watcher::remove_definition_update_before_write_hook(&path);
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let response: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(response["reindexStatus"], "pending", "{response}");
+    assert_eq!(response["contentIndexUpdated"], true, "{response}");
+    assert_eq!(response["defIndexUpdated"], false, "{response}");
+    assert_eq!(response["definitionGeneration"], generation, "{response}");
+    assert!(response["reindexWarning"]
+        .as_str()
+        .is_some_and(|warning| warning.contains("changed during both sync attempts")));
+
+    let definition_index = definition_index.read().unwrap();
+    assert_eq!(definition_index.definition_generation, generation);
+    assert!(definition_index.selector_index.contains_key("app-old"));
+    assert!(!definition_index.selector_index.contains_key("app-new"));
+    assert!(std::fs::read_to_string(path).unwrap().contains("app-new"));
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn test_multi_sync_reindex_applies_stable_peer_after_two_definition_conflicts() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let busy_path = root.join("busy.ts");
+    let stable_path = root.join("stable.ts");
+    std::fs::write(
+        &busy_path,
+        "@Component({ selector: 'app-busy-old' }) export class Busy {}",
+    )
+    .unwrap();
+    std::fs::write(
+        &stable_path,
+        "@Component({ selector: 'app-stable-old' }) export class Stable {}",
+    )
+    .unwrap();
+    let definition_index = Arc::new(RwLock::new(
+        crate::definitions::build_definition_index(
+            &crate::definitions::DefIndexArgs {
+                dir: root.to_string_lossy().to_string(),
+                ext: "ts".to_string(),
+                threads: 1,
+                respect_git_exclude: false,
+            },
+        ),
+    ));
+    let generation = definition_index.read().unwrap().definition_generation;
+    let input_key = crate::definitions::definition_input_key(&busy_path);
+    let hook_index = Arc::clone(&definition_index);
+    let on_release: Arc<dyn Fn(usize) + Send + Sync> = Arc::new(move |round| {
+        let mut index = hook_index.write().unwrap();
+        let fingerprint = index.input_fingerprints.get_mut(&input_key).unwrap();
+        fingerprint.modified_nanos = fingerprint
+            .modified_nanos
+            .saturating_add(round as u128 + 1);
+    });
+    let hook = Arc::new(
+        crate::mcp::watcher::DefinitionUpdateBeforeWriteHook::with_action(
+            &busy_path,
+            vec![1, 1],
+            on_release,
+        ),
+    );
+    crate::mcp::watcher::install_definition_update_before_write_hook(hook);
+    let mut ctx = make_ctx_with_ext(&root, "ts");
+    ctx.def_index = Some(Arc::clone(&definition_index));
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["busy.ts", "stable.ts"],
+        "edits": [{"search": "-old", "replace": "-new"}],
+    }));
+    crate::mcp::watcher::remove_definition_update_before_write_hook(&busy_path);
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let response: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    let results = response["results"].as_array().unwrap();
+    assert_eq!(results[0]["path"], "busy.ts");
+    assert_eq!(results[0]["reindexStatus"], "pending", "{response}");
+    assert_eq!(results[0]["defIndexUpdated"], false, "{response}");
+    assert_eq!(results[1]["path"], "stable.ts");
+    assert_eq!(results[1]["reindexStatus"], "completed", "{response}");
+    assert_eq!(results[1]["defIndexUpdated"], true, "{response}");
+    assert_eq!(
+        response["summary"]["definitionGeneration"],
+        generation + 1
+    );
+    assert!(response["summary"]["reindexWarning"]
+        .as_str()
+        .is_some_and(|warning| warning.contains("changed during both sync attempts")));
+
+    let definition_index = definition_index.read().unwrap();
+    assert_eq!(definition_index.definition_generation, generation + 1);
+    assert!(definition_index.selector_index.contains_key("app-busy-old"));
+    assert!(!definition_index.selector_index.contains_key("app-busy-new"));
+    assert!(!definition_index.selector_index.contains_key("app-stable-old"));
+    assert!(definition_index.selector_index.contains_key("app-stable-new"));
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn test_multi_sync_reindex_reports_stable_and_pending_definition_paths_separately() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let busy_path = root.join("busy.ts");
+    let stable_path = root.join("stable.ts");
+    std::fs::write(
+        &busy_path,
+        "@Component({ selector: 'app-busy-old' }) export class Busy {}",
+    )
+    .unwrap();
+    std::fs::write(
+        &stable_path,
+        "@Component({ selector: 'app-stable-old' }) export class Stable {}",
+    )
+    .unwrap();
+    let definition_index = Arc::new(RwLock::new(
+        crate::definitions::build_definition_index(
+            &crate::definitions::DefIndexArgs {
+                dir: root.to_string_lossy().to_string(),
+                ext: "ts".to_string(),
+                threads: 1,
+                respect_git_exclude: false,
+            },
+        ),
+    ));
+    let generation = definition_index.read().unwrap().definition_generation;
+    crate::definitions::install_definition_source_read_error(
+        &busy_path,
+        std::io::ErrorKind::WouldBlock,
+    );
+    let mut ctx = make_ctx_with_ext(&root, "ts");
+    ctx.def_index = Some(Arc::clone(&definition_index));
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["busy.ts", "stable.ts"],
+        "edits": [{"search": "-old", "replace": "-new"}],
+    }));
+    crate::definitions::remove_definition_source_read_error(&busy_path);
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let response: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    let results = response["results"].as_array().unwrap();
+    assert_eq!(results[0]["path"], "busy.ts");
+    assert_eq!(results[0]["reindexStatus"], "pending", "{response}");
+    assert_eq!(results[0]["defIndexUpdated"], false, "{response}");
+    assert_eq!(results[1]["path"], "stable.ts");
+    assert_eq!(results[1]["reindexStatus"], "completed", "{response}");
+    assert_eq!(results[1]["defIndexUpdated"], true, "{response}");
+    assert_eq!(
+        response["summary"]["definitionGeneration"],
+        generation + 1
+    );
+    assert!(response["summary"]["reindexWarning"]
+        .as_str()
+        .is_some_and(|warning| warning.contains("changed during both sync attempts")));
+
+    let definition_index = definition_index.read().unwrap();
+    assert_eq!(definition_index.definition_generation, generation + 1);
+    assert!(definition_index.selector_index.contains_key("app-busy-old"));
+    assert!(!definition_index.selector_index.contains_key("app-busy-new"));
+    assert!(!definition_index.selector_index.contains_key("app-stable-old"));
+    assert!(definition_index.selector_index.contains_key("app-stable-new"));
+}
 #[test]
 fn test_sync_reindex_dry_run_omits_reindex_fields() {
     let tmp = tempfile::tempdir().unwrap();
@@ -5044,6 +5311,119 @@ fn test_sync_reindex_extension_not_indexed_is_skipped() {
     // But the file MUST still be written (edit should succeed).
     let actual = std::fs::read_to_string(&path).unwrap();
     assert_eq!(actual, "updated text\n", "the edit itself must still apply");
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn test_sync_reindex_unowned_html_reports_extension_not_indexed() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("unowned.html");
+    std::fs::write(&path, "<app-old></app-old>\n").unwrap();
+
+    let mut ctx = make_ctx_with_ext(temp.path(), "ts");
+    ctx.def_index = Some(Arc::new(RwLock::new(
+        crate::definitions::DefinitionIndex::default(),
+    )));
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "unowned.html",
+        "edits": [{"search": "app-old", "replace": "app-new"}],
+    }));
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let response: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(response["reindexStatus"], "skipped", "{response}");
+    assert_eq!(response["reindexSkipReason"], "extensionNotIndexed", "{response}");
+    assert_eq!(response["contentIndexUpdated"], false, "{response}");
+    assert_eq!(response["defIndexUpdated"], false, "{response}");
+    assert!(ctx
+        .def_index
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .template_owners
+        .is_empty());
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        "<app-new></app-new>\n"
+    );
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn test_sync_reindex_excluded_unowned_html_reports_extension_not_indexed() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    std::fs::create_dir_all(root.join(".git/info")).unwrap();
+    std::fs::write(root.join(".git/info/exclude"), "unowned.html\n").unwrap();
+    let path = root.join("unowned.html");
+    std::fs::write(&path, "<app-old></app-old>\n").unwrap();
+
+    let mut ctx = make_ctx_with_ext(&root, "ts");
+    ctx.respect_git_exclude = true;
+    ctx.def_index = Some(Arc::new(RwLock::new(
+        crate::definitions::DefinitionIndex::default(),
+    )));
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "unowned.html",
+        "edits": [{"search": "app-old", "replace": "app-new"}],
+    }));
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let response: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(response["reindexStatus"], "skipped", "{response}");
+    assert_eq!(response["reindexSkipReason"], "extensionNotIndexed", "{response}");
+    assert_eq!(response["contentIndexUpdated"], false, "{response}");
+    assert_eq!(response["defIndexUpdated"], false, "{response}");
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn test_sync_reindex_owned_html_with_poisoned_def_index_reports_warning() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    std::fs::write(
+        root.join("component.ts"),
+        "@Component({ selector: 'app-parent', templateUrl: './external.html' }) export class Component {}",
+    )
+    .unwrap();
+    std::fs::write(root.join("external.html"), "<app-old></app-old>").unwrap();
+    let definition_index = Arc::new(RwLock::new(
+        crate::definitions::build_definition_index(
+            &crate::definitions::DefIndexArgs {
+                dir: root.to_string_lossy().to_string(),
+                ext: "ts".to_string(),
+                threads: 1,
+                respect_git_exclude: false,
+            },
+        ),
+    ));
+    let poison_index = Arc::clone(&definition_index);
+    let _ = std::thread::spawn(move || {
+        let _guard = poison_index.write().unwrap();
+        panic!("poison definition index for response contract test");
+    })
+    .join();
+
+    let mut ctx = make_ctx_with_ext(&root, "ts");
+    ctx.def_index = Some(definition_index);
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "external.html",
+        "edits": [{"search": "app-old", "replace": "app-new"}],
+    }));
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let response: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(response["reindexStatus"], "completed", "{response}");
+    assert_eq!(response["contentIndexUpdated"], false, "{response}");
+    assert_eq!(response["defIndexUpdated"], false, "{response}");
+    assert!(response.get("reindexSkipReason").is_none(), "{response}");
+    assert!(response["reindexWarning"]
+        .as_str()
+        .is_some_and(|warning| warning.contains("poisoned")));
 }
 
 #[test]

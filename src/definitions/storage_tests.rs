@@ -191,7 +191,7 @@ fn test_find_def_index_meta_rejects_extension_mismatch() {
 
 #[test]
 fn test_definition_index_version_is_pinned() {
-    assert_eq!(crate::definitions::DEFINITION_INDEX_VERSION, 10);
+    assert_eq!(crate::definitions::DEFINITION_INDEX_VERSION, 11);
 }
 
 #[test]
@@ -314,8 +314,8 @@ fn test_typescript_lexical_call_kinds_survive_storage_roundtrip() {
 #[test]
 fn test_angular_component_records_survive_storage_roundtrip() {
     use crate::definitions::{
-        AngularComponentRecord, AngularTemplateSource, StaticValue,
-        DEFINITION_INDEX_VERSION,
+        AngularComponentRecord, AngularTemplateSource, DefinitionInputFingerprint,
+        StaticValue, DEFINITION_INDEX_VERSION,
     };
 
     let temp = tempfile::tempdir().unwrap();
@@ -342,6 +342,22 @@ fn test_angular_component_records_survive_storage_roundtrip() {
     index
         .template_parents
         .insert("app-child".to_string(), vec![7]);
+    index.definition_generation = 7;
+    index.input_fingerprints.insert(
+        "q:/repo/shell.html".to_string(),
+        DefinitionInputFingerprint {
+            size: 42,
+            modified_nanos: 123,
+            content_hash: [9; 32],
+        },
+    );
+    index.pending_definition_inputs.insert(
+        std::path::PathBuf::from("q:/repo/busy.ts"),
+        crate::definitions::PendingDefinitionInput {
+            attempts: 2,
+            observed_revision: None,
+        },
+    );
 
     let path = definition_index_path_for(&root, "ts", temp.path());
     crate::index::save_compressed(&path, &index, "test").unwrap();
@@ -352,11 +368,17 @@ fn test_angular_component_records_survive_storage_roundtrip() {
     assert_eq!(loaded.template_children, index.template_children);
     assert_eq!(loaded.template_owners, index.template_owners);
     assert_eq!(loaded.template_parents, index.template_parents);
+    assert_eq!(loaded.definition_generation, index.definition_generation);
+    assert_eq!(loaded.input_fingerprints, index.input_fingerprints);
+    assert!(loaded.pending_definition_inputs.is_empty());
 
     let rebuilt = DefinitionIndex::from_head_and_entries(index.build_head(), Vec::new());
     assert_eq!(rebuilt.angular_components, index.angular_components);
     assert_eq!(rebuilt.template_owners, index.template_owners);
     assert_eq!(rebuilt.template_parents, index.template_parents);
+    assert_eq!(rebuilt.definition_generation, index.definition_generation);
+    assert_eq!(rebuilt.input_fingerprints, index.input_fingerprints);
+    assert!(rebuilt.pending_definition_inputs.is_empty());
 }
 
 

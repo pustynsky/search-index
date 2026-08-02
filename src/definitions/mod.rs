@@ -34,10 +34,129 @@ pub use incremental::*;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use sha2::{Digest, Sha256};
 
 use ignore::WalkBuilder;
 
-use crate::{clean_path, is_inside_git_dir, read_file_lossy};
+use crate::{clean_path, is_inside_git_dir};
+
+fn definition_metadata_revision(metadata: &std::fs::Metadata) -> (u64, u128) {
+    let modified_nanos = metadata
+        .modified()
+        .ok()
+        .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+        .map_or(0, |duration| duration.as_nanos());
+    (metadata.len(), modified_nanos)
+}
+
+pub(crate) fn definition_input_revision_from_metadata(
+    metadata: &std::fs::Metadata,
+) -> DefinitionInputRevision {
+    let (size, modified_nanos) = definition_metadata_revision(metadata);
+    DefinitionInputRevision {
+        size,
+        modified_nanos,
+    }
+}
+
+pub(crate) fn definition_input_revision(
+    path: &Path,
+) -> Option<DefinitionInputRevision> {
+    std::fs::metadata(path)
+        .ok()
+        .as_ref()
+        .map(definition_input_revision_from_metadata)
+}
+
+fn definition_input_fingerprint(
+    metadata: &std::fs::Metadata,
+    content: &[u8],
+) -> DefinitionInputFingerprint {
+    DefinitionInputFingerprint {
+        size: metadata.len(),
+        modified_nanos: definition_metadata_revision(metadata).1,
+        content_hash: Sha256::digest(content).into(),
+    }
+}
+
+pub(crate) fn definition_input_key(path: &Path) -> String {
+    crate::clean_path(&crate::path_identity_key(path).to_string_lossy())
+}
+
+pub(crate) fn definition_fingerprint_conflicts(
+    index: &DefinitionIndex,
+    expected: &HashMap<String, Option<DefinitionInputFingerprint>>,
+) -> HashSet<String> {
+    expected
+        .iter()
+        .filter(|(key, fingerprint)| index.input_fingerprints.get(*key) != fingerprint.as_ref())
+        .map(|(key, _)| key.clone())
+        .collect()
+}
+
+#[cfg(test)]
+pub(crate) fn definition_fingerprints_match(
+    index: &DefinitionIndex,
+    expected: &HashMap<String, Option<DefinitionInputFingerprint>>,
+) -> bool {
+    definition_fingerprint_conflicts(index, expected).is_empty()
+}
+
+#[cfg(test)]
+static DEFINITION_SOURCE_READ_ERRORS: std::sync::LazyLock<
+    std::sync::Mutex<HashMap<PathBuf, std::io::ErrorKind>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+#[cfg(test)]
+pub(crate) fn install_definition_source_read_error(
+    path: &Path,
+    kind: std::io::ErrorKind,
+) {
+    DEFINITION_SOURCE_READ_ERRORS
+        .lock()
+        .unwrap()
+        .insert(crate::path_identity_key(path), kind);
+}
+
+#[cfg(test)]
+pub(crate) fn remove_definition_source_read_error(path: &Path) {
+    DEFINITION_SOURCE_READ_ERRORS
+        .lock()
+        .unwrap()
+        .remove(&crate::path_identity_key(path));
+}
+
+
+pub(crate) fn read_definition_source_snapshot(
+    path: &Path,
+) -> std::io::Result<(String, bool, DefinitionInputFingerprint)> {
+    #[cfg(test)]
+    if let Some(kind) = DEFINITION_SOURCE_READ_ERRORS
+        .lock()
+        .unwrap()
+        .get(&crate::path_identity_key(path))
+        .copied()
+    {
+        return Err(std::io::Error::from(kind));
+    }
+
+    for _ in 0..2 {
+        let before = std::fs::metadata(path)?;
+        let before_revision = definition_metadata_revision(&before);
+        let (content, was_lossy) = crate::read_file_lossy(path)?;
+        let after = std::fs::metadata(path)?;
+        if before_revision == definition_metadata_revision(&after) {
+            let fingerprint = definition_input_fingerprint(&after, content.as_bytes());
+            return Ok((content, was_lossy, fingerprint));
+        }
+    }
+
+    Err(std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        format!("definition input changed while reading: {}", path.display()),
+    ))
+}
+
 
 /// File extensions that have definition parser support (tree-sitter or regex).
 /// Used to dynamically generate MCP instructions about which files can be read
@@ -227,7 +346,10 @@ pub(crate) fn index_file_defs_with_semantics(
 
 #[cfg(feature = "lang-typescript")]
 enum AngularTemplateRead {
-    Content(String),
+    Content {
+        content: String,
+        fingerprint: DefinitionInputFingerprint,
+    },
     TooLarge { observed_size: u64 },
 }
 
@@ -235,22 +357,42 @@ enum AngularTemplateRead {
 fn read_angular_template(path: &Path) -> std::io::Result<AngularTemplateRead> {
     use std::io::Read as _;
 
-    let metadata = std::fs::metadata(path)?;
-    if metadata.len() > MAX_PARSE_SOURCE_BYTES as u64 {
-        return Ok(AngularTemplateRead::TooLarge { observed_size: metadata.len() });
+    for _ in 0..2 {
+        let before = std::fs::metadata(path)?;
+        let before_revision = definition_metadata_revision(&before);
+        if before.len() > MAX_PARSE_SOURCE_BYTES as u64 {
+            return Ok(AngularTemplateRead::TooLarge {
+                observed_size: before.len(),
+            });
+        }
+
+        let file = std::fs::File::open(path)?;
+        let mut reader = file.take((MAX_PARSE_SOURCE_BYTES + 1) as u64);
+        let mut bytes = Vec::with_capacity(before.len() as usize);
+        reader.read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_PARSE_SOURCE_BYTES {
+            return Ok(AngularTemplateRead::TooLarge {
+                observed_size: bytes.len() as u64,
+            });
+        }
+
+        let after = std::fs::metadata(path)?;
+        if before_revision != definition_metadata_revision(&after) {
+            continue;
+        }
+        let fingerprint = definition_input_fingerprint(&after, &bytes);
+        let content = String::from_utf8(bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        return Ok(AngularTemplateRead::Content {
+            content,
+            fingerprint,
+        });
     }
 
-    let file = std::fs::File::open(path)?;
-    let mut reader = file.take((MAX_PARSE_SOURCE_BYTES + 1) as u64);
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    reader.read_to_end(&mut bytes)?;
-    if bytes.len() > MAX_PARSE_SOURCE_BYTES {
-        return Ok(AngularTemplateRead::TooLarge { observed_size: bytes.len() as u64 });
-    }
-
-    let content = String::from_utf8(bytes)
-        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-    Ok(AngularTemplateRead::Content(content))
+    Err(std::io::Error::new(
+        std::io::ErrorKind::WouldBlock,
+        format!("Angular template changed while reading: {}", path.display()),
+    ))
 }
 
 #[cfg(feature = "lang-typescript")]
@@ -273,15 +415,13 @@ fn lexical_normalize_path(path: &std::path::Path) -> Option<std::path::PathBuf> 
 }
 
 #[cfg(feature = "lang-typescript")]
-fn resolve_angular_template_path(
+fn resolve_angular_template_source_path(
     workspace_root: &str,
-    files: &[String],
-    file_id: u32,
+    source_path: &Path,
     relative_path: &str,
-) -> Option<(std::path::PathBuf, String)> {
-    let source_path = std::path::Path::new(files.get(file_id as usize)?);
+) -> Option<(PathBuf, String)> {
     let template_path = lexical_normalize_path(&source_path.parent()?.join(relative_path))?;
-    let workspace_path = lexical_normalize_path(std::path::Path::new(workspace_root))?;
+    let workspace_path = lexical_normalize_path(Path::new(workspace_root))?;
     let template_key = crate::path_identity_key(&template_path);
     let workspace_key = crate::path_identity_key(&workspace_path);
     if !template_key.starts_with(&workspace_key) {
@@ -289,6 +429,394 @@ fn resolve_angular_template_path(
     }
     let owner_key = crate::clean_path(&template_key.to_string_lossy());
     Some((template_path, owner_key))
+}
+
+#[cfg(feature = "lang-typescript")]
+fn resolve_angular_template_path(
+    workspace_root: &str,
+    files: &[String],
+    file_id: u32,
+    relative_path: &str,
+) -> Option<(PathBuf, String)> {
+    let source_path = Path::new(files.get(file_id as usize)?);
+    resolve_angular_template_source_path(workspace_root, source_path, relative_path)
+}
+
+#[cfg(feature = "lang-typescript")]
+pub(crate) fn prepare_angular_template_updates(
+    workspace_root: &str,
+    parsed_results: &mut [ParsedFileResult],
+    changed_paths: &[PathBuf],
+    existing_owner_keys: &HashSet<String>,
+) -> Vec<PreparedAngularTemplateUpdate> {
+    let mut candidates: HashMap<String, (PathBuf, bool, HashSet<PathBuf>)> = HashMap::new();
+    for path in changed_paths {
+        let owner_key = crate::clean_path(
+            &crate::path_identity_key(path).to_string_lossy(),
+        );
+        if existing_owner_keys.contains(&owner_key) {
+            candidates.insert(owner_key, (path.clone(), true, HashSet::new()));
+        }
+    }
+
+    for result in parsed_results {
+        for record in &mut result.angular_components {
+            let relative_path = match &record.component.template {
+                AngularTemplateSource::External { relative_path }
+                | AngularTemplateSource::UnavailableExternal { relative_path, .. } => {
+                    relative_path.clone()
+                }
+                _ => continue,
+            };
+            let Some((template_path, owner_key)) = resolve_angular_template_source_path(
+                workspace_root,
+                &result.path,
+                &relative_path,
+            ) else {
+                record.component.template = AngularTemplateSource::UnavailableExternal {
+                    relative_path,
+                    reason: "external template path is outside the workspace".to_string(),
+                };
+                continue;
+            };
+            candidates
+                .entry(owner_key)
+                .or_insert_with(|| (template_path, false, HashSet::new()))
+                .2
+                .insert(result.path.clone());
+        }
+    }
+
+    let mut candidates: Vec<_> = candidates.into_iter().collect();
+    candidates.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    candidates.into_iter().map(|(owner_key, (template_path, triggered_by_change, source_paths))| {
+        let mut dependent_source_paths: Vec<_> = source_paths.into_iter().collect();
+        dependent_source_paths.sort_unstable();
+        match read_angular_template(&template_path) {
+            Ok(AngularTemplateRead::Content {
+                content,
+                fingerprint,
+            }) => PreparedAngularTemplateUpdate {
+                path: template_path.clone(),
+                owner_key,
+                dependent_source_paths,
+                template_children: extract_custom_elements(&content),
+                unavailable_reason: None,
+                triggered_by_change,
+                fingerprint: Some(fingerprint),
+            },
+            Ok(AngularTemplateRead::TooLarge { observed_size }) => {
+                tracing::warn!(
+                    target: "xray::parse",
+                    file = %template_path.display(),
+                    size = observed_size,
+                    limit = MAX_PARSE_SOURCE_BYTES,
+                    "skipping oversized Angular template"
+                );
+                PreparedAngularTemplateUpdate {
+                    path: template_path.clone(),
+                    owner_key,
+                    dependent_source_paths,
+                    template_children: Vec::new(),
+                    unavailable_reason: Some(
+                        "external template exceeds the source size limit".to_string(),
+                    ),
+                    triggered_by_change,
+                    fingerprint: None,
+                }
+            }
+            Err(_) => PreparedAngularTemplateUpdate {
+                path: template_path,
+                owner_key,
+                dependent_source_paths,
+                template_children: Vec::new(),
+                unavailable_reason: Some("external template could not be read".to_string()),
+                triggered_by_change,
+                fingerprint: None,
+            },
+        }
+    }).collect()
+}
+
+pub(crate) fn retain_stable_prepared_definition_inputs(
+    parsed_results: &mut Vec<ParsedFileResult>,
+    template_updates: &mut Vec<PreparedAngularTemplateUpdate>,
+    mut rejected_keys: HashSet<String>,
+) -> HashSet<String> {
+    for update in template_updates.iter() {
+        if rejected_keys.contains(&update.owner_key) {
+            rejected_keys.extend(
+                update
+                    .dependent_source_paths
+                    .iter()
+                    .map(|path| definition_input_key(path)),
+            );
+        }
+    }
+
+    parsed_results.retain(|result| {
+        !rejected_keys.contains(&definition_input_key(&result.path))
+    });
+    template_updates.retain(|update| {
+        !rejected_keys.contains(&update.owner_key)
+            && (update.triggered_by_change
+                || update.dependent_source_paths.iter().any(|path| {
+                    !rejected_keys.contains(&definition_input_key(path))
+                }))
+    });
+    rejected_keys
+}
+
+pub(crate) fn defer_rejected_definition_paths(
+    paths: &mut Vec<PathBuf>,
+    rejected_keys: &HashSet<String>,
+    deferred_paths: &mut HashSet<PathBuf>,
+) {
+    paths.retain(|path| {
+        if rejected_keys.contains(&definition_input_key(path)) {
+            deferred_paths.insert(path.clone());
+            false
+        } else {
+            true
+        }
+    });
+}
+
+pub(crate) fn mark_pending_definition_conflicts(
+    index: &mut DefinitionIndex,
+    paths: &HashSet<PathBuf>,
+) {
+    for path in paths {
+        index.pending_definition_inputs.insert(
+            crate::path_identity_key(path),
+            PendingDefinitionInput {
+                attempts: 0,
+                observed_revision: definition_input_revision(path),
+            },
+        );
+    }
+}
+
+
+pub(crate) fn validate_prepared_definition_inputs(
+    parsed_results: &[ParsedFileResult],
+    template_updates: &[PreparedAngularTemplateUpdate],
+) -> Vec<PathBuf> {
+    fn unstable_source_path(result: &ParsedFileResult) -> Option<PathBuf> {
+        match read_definition_source_snapshot(&result.path) {
+            Ok((_, _, fingerprint)) if fingerprint == result.fingerprint => None,
+            _ => Some(result.path.clone()),
+        }
+    }
+
+    let unstable_sources = if parsed_results.len() <= 1 {
+        parsed_results
+            .iter()
+            .filter_map(unstable_source_path)
+            .collect::<HashSet<_>>()
+    } else {
+        let num_threads = std::thread::available_parallelism()
+            .map(|count| count.get())
+            .unwrap_or(4);
+        let chunk_size = parsed_results.len().div_ceil(num_threads).max(1);
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = parsed_results
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .filter_map(unstable_source_path)
+                            .collect::<HashSet<_>>()
+                    })
+                })
+                .collect();
+            let mut unstable = HashSet::new();
+            let mut worker_panicked = false;
+            for handle in handles {
+                match handle.join() {
+                    Ok(paths) => unstable.extend(paths),
+                    Err(_) => worker_panicked = true,
+                }
+            }
+            if worker_panicked {
+                tracing::warn!(
+                    "Definition snapshot validation worker panicked; deferring parsed sources"
+                );
+                parsed_results
+                    .iter()
+                    .map(|result| result.path.clone())
+                    .collect()
+            } else {
+                unstable
+            }
+        })
+    };
+
+    #[cfg(not(feature = "lang-typescript"))]
+    let unstable = unstable_sources;
+    #[cfg(feature = "lang-typescript")]
+    let mut unstable = unstable_sources;
+
+    #[cfg(not(feature = "lang-typescript"))]
+    let _ = template_updates;
+
+    #[cfg(feature = "lang-typescript")]
+    for update in template_updates {
+        let current = match read_angular_template(&update.path) {
+            Ok(AngularTemplateRead::Content { fingerprint, .. }) => {
+                (Some(fingerprint), None)
+            }
+            Ok(AngularTemplateRead::TooLarge { .. }) => (
+                None,
+                Some("external template exceeds the source size limit".to_string()),
+            ),
+            Err(_) => (
+                None,
+                Some("external template could not be read".to_string()),
+            ),
+        };
+        if current.0 != update.fingerprint || current.1 != update.unavailable_reason {
+            unstable.insert(update.path.clone());
+        }
+    }
+
+    let mut unstable: Vec<_> = unstable.into_iter().collect();
+    unstable.sort_unstable();
+    unstable
+}
+
+
+#[cfg(feature = "lang-typescript")]
+pub(crate) fn angular_template_snapshot_matches(
+    path: &Path,
+    expected_fingerprint: Option<&DefinitionInputFingerprint>,
+    expected_unavailable_reason: Option<&str>,
+) -> bool {
+    let metadata = std::fs::metadata(path);
+    if let (Some(expected), Ok(metadata)) = (expected_fingerprint, &metadata)
+        && definition_metadata_revision(metadata)
+            == (expected.size, expected.modified_nanos)
+    {
+        return true;
+    }
+    if expected_fingerprint.is_none() {
+        match (expected_unavailable_reason, &metadata) {
+            (
+                Some("external template exceeds the source size limit"),
+                Ok(metadata),
+            ) if metadata.len() > MAX_PARSE_SOURCE_BYTES as u64 => return true,
+            (Some("external template could not be read"), Err(_)) => return true,
+            _ => {}
+        }
+    }
+
+    let current = match read_angular_template(path) {
+        Ok(AngularTemplateRead::Content { fingerprint, .. }) => {
+            (Some(fingerprint), None)
+        }
+        Ok(AngularTemplateRead::TooLarge { .. }) => (
+            None,
+            Some("external template exceeds the source size limit"),
+        ),
+        Err(_) => (None, Some("external template could not be read")),
+    };
+    current.0.as_ref() == expected_fingerprint
+        && current.1 == expected_unavailable_reason
+}
+
+#[cfg(not(feature = "lang-typescript"))]
+pub(crate) fn angular_template_snapshot_matches(
+    _path: &Path,
+    _expected_fingerprint: Option<&DefinitionInputFingerprint>,
+    _expected_unavailable_reason: Option<&str>,
+) -> bool {
+    true
+}
+
+
+#[cfg(not(feature = "lang-typescript"))]
+pub(crate) fn prepare_angular_template_updates(
+    _workspace_root: &str,
+    _parsed_results: &mut [ParsedFileResult],
+    _changed_paths: &[PathBuf],
+    _existing_owner_keys: &HashSet<String>,
+) -> Vec<PreparedAngularTemplateUpdate> {
+    Vec::new()
+}
+
+fn remove_angular_template_edges(index: &mut DefinitionIndex, definition_index: u32) {
+    let Some(children) = index.template_children.remove(&definition_index) else {
+        return;
+    };
+    for child in children {
+        if let Some(parents) = index.template_parents.get_mut(&child) {
+            parents.retain(|parent| *parent != definition_index);
+            if parents.is_empty() {
+                index.template_parents.remove(&child);
+            }
+        }
+    }
+}
+
+pub(crate) fn apply_prepared_angular_template_updates(
+    index: &mut DefinitionIndex,
+    updates: Vec<PreparedAngularTemplateUpdate>,
+) {
+    for update in updates {
+        let owners = index
+            .template_owners
+            .get(&update.owner_key)
+            .cloned()
+            .unwrap_or_default();
+        if owners.is_empty() {
+            index.input_fingerprints.remove(&update.owner_key);
+            continue;
+        }
+        match &update.fingerprint {
+            Some(fingerprint) => {
+                index
+                    .input_fingerprints
+                    .insert(update.owner_key.clone(), fingerprint.clone());
+            }
+            None => {
+                index.input_fingerprints.remove(&update.owner_key);
+            }
+        }
+        for definition_index in owners {
+            let relative_path = match index.angular_components.get(&definition_index) {
+                Some(AngularComponentRecord {
+                    template: AngularTemplateSource::External { relative_path }
+                        | AngularTemplateSource::UnavailableExternal { relative_path, .. },
+                    ..
+                }) => relative_path.clone(),
+                _ => continue,
+            };
+
+            remove_angular_template_edges(index, definition_index);
+            if let Some(component) = index.angular_components.get_mut(&definition_index) {
+                component.template = match &update.unavailable_reason {
+                    Some(reason) => AngularTemplateSource::UnavailableExternal {
+                        relative_path,
+                        reason: reason.clone(),
+                    },
+                    None => AngularTemplateSource::External { relative_path },
+                };
+            }
+
+            for child in &update.template_children {
+                let parents = index.template_parents.entry(child.clone()).or_default();
+                if !parents.contains(&definition_index) {
+                    parents.push(definition_index);
+                }
+            }
+            if !update.template_children.is_empty() {
+                index
+                    .template_children
+                    .insert(definition_index, update.template_children.clone());
+            }
+        }
+    }
 }
 
 
@@ -307,6 +835,79 @@ fn mark_angular_template_unavailable(
     }
 }
 
+
+pub(crate) fn index_parsed_angular_components(
+    index: &mut DefinitionIndex,
+    base_def_idx: u32,
+    definition_count: usize,
+    records: Vec<ParsedAngularComponentRecord>,
+) {
+    for record in records {
+        if record.local_def_index >= definition_count {
+            tracing::warn!(
+                target: "xray::definitions",
+                local_definition_index = record.local_def_index,
+                definition_count,
+                "dropping Angular component record with invalid local definition index"
+            );
+            continue;
+        }
+
+        let definition_index = base_def_idx + record.local_def_index as u32;
+        let component = record.component;
+        index.angular_components.insert(definition_index, component.clone());
+
+        let Some(definition) = index.definitions.get(definition_index as usize) else {
+            continue;
+        };
+        if definition.kind != DefinitionKind::Class {
+            continue;
+        }
+        #[cfg(feature = "lang-typescript")]
+        let file_id = definition.file_id;
+
+        if let StaticValue::Static(selector) = &component.selector {
+            let selector = selector.to_lowercase();
+            let definitions = index.name_index.entry(selector.clone()).or_default();
+            if !definitions.contains(&definition_index) {
+                definitions.push(definition_index);
+            }
+            let selectors = index.selector_index.entry(selector).or_default();
+            if !selectors.contains(&definition_index) {
+                selectors.push(definition_index);
+            }
+        }
+
+        #[cfg(feature = "lang-typescript")]
+        if let AngularTemplateSource::External { relative_path }
+            | AngularTemplateSource::UnavailableExternal { relative_path, .. } = &component.template
+            && let Some((_, owner_key)) = resolve_angular_template_path(
+                &index.root,
+                &index.files,
+                file_id,
+                relative_path,
+            )
+        {
+            index.input_fingerprints.remove(&owner_key);
+            let owners = index.template_owners.entry(owner_key).or_default();
+            if !owners.contains(&definition_index) {
+                owners.push(definition_index);
+            }
+        }
+
+        for child in &record.template_children {
+            let parents = index.template_parents.entry(child.clone()).or_default();
+            if !parents.contains(&definition_index) {
+                parents.push(definition_index);
+            }
+        }
+        if !record.template_children.is_empty() {
+            index
+                .template_children
+                .insert(definition_index, record.template_children);
+        }
+    }
+}
 
 /// Scan Angular @Component definitions for selectors and template children.
 /// Populates selector_index and template_children from HTML templates.
@@ -375,11 +976,18 @@ pub(crate) fn enrich_angular_templates(index: &mut DefinitionIndex) {
                 };
                 index
                     .template_owners
-                    .entry(owner_key)
+                    .entry(owner_key.clone())
                     .or_default()
                     .push(definition_index);
+                index.input_fingerprints.remove(&owner_key);
                 match read_angular_template(&template_path) {
-                    Ok(AngularTemplateRead::Content(content)) => Some(content),
+                    Ok(AngularTemplateRead::Content {
+                        content,
+                        fingerprint,
+                    }) => {
+                        index.input_fingerprints.insert(owner_key, fingerprint);
+                        Some(content)
+                    }
                     Ok(AngularTemplateRead::TooLarge { observed_size }) => {
                         templates_oversized += 1;
                         tracing::warn!(
@@ -483,6 +1091,7 @@ fn merge_chunk_result(
         file_stats,
         file_csharp_semantics,
         file_angular_components,
+        file_fingerprint,
     ) in chunk_defs
     {
         let base_def_idx = index.definitions.len() as u32;
@@ -495,21 +1104,15 @@ fn merge_chunk_result(
             file_stats,
             file_csharp_semantics,
         );
-        for record in file_angular_components {
-            if record.local_def_index >= definition_count {
-                tracing::warn!(
-                    target: "xray::definitions",
-                    file_id,
-                    local_definition_index = record.local_def_index,
-                    definition_count,
-                    "dropping Angular component record with invalid local definition index"
-                );
-                continue;
-            }
-            index.angular_components.insert(
-                base_def_idx + record.local_def_index as u32,
-                record.component,
-            );
+        index_parsed_angular_components(
+            index,
+            base_def_idx,
+            definition_count,
+            file_angular_components,
+        );
+        if let Some(path) = index.files.get(file_id as usize) {
+            let input_key = definition_input_key(Path::new(path));
+            index.input_fingerprints.insert(input_key, file_fingerprint);
         }
     }
 
@@ -634,7 +1237,8 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 
                     for (file_id, file_path) in sub_chunk {
                         let read_start = Instant::now();
-                        let (content, was_lossy) = match read_file_lossy(Path::new(file_path)) {
+                        let (content, was_lossy, file_fingerprint) =
+                            match read_definition_source_snapshot(Path::new(file_path)) {
                             Ok(r) => {
                                 read_nanos.fetch_add(read_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                                 r
@@ -729,6 +1333,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                                 file_stats,
                                 file_csharp_semantics,
                                 file_angular_components,
+                                file_fingerprint,
                             ));
                         } else {
                             empty_files.push((*file_id, content_len));
@@ -834,6 +1439,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_secs();
+    index.definition_generation = 1;
 
     index
 }

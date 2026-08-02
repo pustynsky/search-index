@@ -78,6 +78,18 @@ fn test_rollback_workspace_state_restores_all_fields() {
         "rollback MUST force status=Resolved (regression: server stuck in Reindexing after error → all tools blocked)");
 }
 
+#[test]
+fn test_replace_live_definition_index_advances_above_both_generations() {
+    let mut current = crate::definitions::DefinitionIndex::default();
+    current.definition_generation = 7;
+    let mut replacement = crate::definitions::DefinitionIndex::default();
+    replacement.definition_generation = 11;
+
+    super::replace_live_definition_index(&mut current, replacement);
+
+    assert_eq!(current.definition_generation, 12);
+}
+
 /// D2 — `cross_load_definition_index` must early-return `None` when the
 /// HandlerContext was constructed without a definition index (`def_index = None`).
 /// Regression here would either panic on `.unwrap()` of the missing Arc or spawn
@@ -921,6 +933,12 @@ fn test_cross_load_definition_index_save_failure_keeps_fresh_in_memory_index() {
 
     let mut ctx = make_ctx_with_defs();
     ctx.def_extensions = vec!["rs".to_string()];
+    ctx.def_index
+        .as_ref()
+        .unwrap()
+        .write()
+        .unwrap()
+        .definition_generation = 73;
     // Force save_definition_index to fail by pointing index_base at a regular
     // file: the `create_dir_all(index_base)` inside the save layer will error
     // because the path component already exists as a non-directory.
@@ -947,6 +965,7 @@ fn test_cross_load_definition_index_save_failure_keeps_fresh_in_memory_index() {
     // entries baked into make_ctx_with_defs() (ResilientClient etc.).
     let def_arc = ctx.def_index.as_ref().expect("ctx must have def_index_arc").clone();
     let def_idx = def_arc.read().unwrap();
+    assert_eq!(def_idx.definition_generation, 74);
     assert!(
         def_idx.definitions.iter().any(|d| d.name.contains("cross_load_save_fail_uniq_zzqq_marker")),
         "cross-loaded def index must contain freshly-built symbol despite save failure; got {} definitions",
@@ -1101,6 +1120,12 @@ fn test_handle_xray_reindex_definitions_inner_omitted_ext_defaults_to_def_extens
     let mut ctx = make_ctx_with_defs();
     ctx.server_ext = "rs,cs".to_string();
     ctx.def_extensions = vec!["rs".to_string()];
+    ctx.def_index
+        .as_ref()
+        .unwrap()
+        .write()
+        .unwrap()
+        .definition_generation = 41;
     ctx.index_base = tmp.path().join("indexes");
     {
         let mut ws = ctx.workspace.write().unwrap();
@@ -1112,6 +1137,7 @@ fn test_handle_xray_reindex_definitions_inner_omitted_ext_defaults_to_def_extens
     assert!(!result.is_error, "{}", result.content[0].text);
 
     let definition_index = ctx.def_index.as_ref().unwrap().read().unwrap();
+    assert_eq!(definition_index.definition_generation, 42);
     assert_eq!(definition_index.extensions, vec!["rs".to_string()]);
     assert!(definition_index.definitions.iter().any(|definition| {
         definition.name == "definition_extension_marker"

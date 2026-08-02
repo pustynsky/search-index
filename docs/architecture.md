@@ -145,6 +145,8 @@ graph LR
 
         subgraph CatC["Category C: non-def_idx fields"]
             EM["extension_methods: HashMap&lt;String, Vec&lt;String&gt;&gt;"]
+            DG["definition_generation: u64"]
+            IF["input_fingerprints: HashMap&lt;String, DefinitionInputFingerprint&gt;"]
         end
     end
 
@@ -194,6 +196,9 @@ Each `CallSite` contains: `method_name`, `receiver_type` (resolved via field/con
 | `parse_errors` | Files that failed to read during indexing |
 | `lossy_file_count` | Files read with lossy UTF-8 conversion |
 | `empty_file_ids` | Files parsed but producing 0 definitions |
+| `definition_generation` | Monotonic generation bumped after a complete definition delta is applied |
+| `input_fingerprints` | Normalized definition-source/external-template path → `(size, mtime_ns, SHA-256)` snapshot used by the current graph |
+| `pending_definition_inputs` | Runtime-only path → retry state for transient reads or optimistic snapshot conflicts, plus observed `(size, mtime_ns)` revision; not persisted |
 
 The `method_calls` map stores pre-computed call sites for each method/constructor, extracted during `def-index` build by walking AST `invocation_expression` and `member_access_expression` nodes. Callee lookups (direction "down") need no runtime file I/O.
 
@@ -600,7 +605,8 @@ Angular `@Component` class definitions produce structured AST records during Typ
 
 - **Metadata source:** exact `selector`, `templateUrl`, and `template` object properties are read from the decorator AST. Static single/double-quoted strings and no-substitution template literals are accepted; dynamic metadata is retained as an explicit state rather than guessed.
 - **Template parity:** static inline and in-workspace external templates pass through the same active-context tokenizer and produce the same lexicographically ordered `template_children` graph.
-- **Persisted indexes:** `angular_components` is the source of truth. `selector_index`, normalized `template_owners`, `template_children`, and reverse `template_parents` are derived during full index build and remapped during compaction.
+- **Persisted indexes:** `angular_components` is the source of truth. `selector_index`, normalized `template_owners`, `template_children`, and reverse `template_parents` are derived during full build, updated atomically during incremental reconciliation, and remapped during compaction.
+- **Atomic lifecycle:** every definition-indexed source and each owned external HTML template is a fingerprinted definition input. Parsing, template reads, and tokenization occur outside the write lock; a prepared delta is validated once more, retried once on a raced snapshot, then applied under one lock and one `definition_generation` bump. Transient input failures retain the previous graph and requeue the affected paths; stable, unrelated paths from the same batch can still apply. A runtime pending registry forces retries independently of mtime while allowing the global watermark to advance; the third failed batch tombstones the stale path and leaves a runtime quarantine marker so periodic scans stop retrying it until a new filesystem/edit event reactivates the path; restart also clears the runtime-only marker. HTML dependencies participate even when `html` is absent from `--ext`; unrelated HTML remains outside the definition index and does not enter the definition write phase.
 
 - **`xray_definitions` fields:** static selectors retain `selector`; all component records add `selectorState` and optional `selectorStateReason`, plus `templateSource`, `templateState`, optional `templatePath`, optional `templateStateReason`, and the backward-compatible `templateChildren`.
 - **Component tree navigation via `xray_callers`:** `direction='down'` with a component class shows child selectors; `direction='up'` uses `template_parents` to find owners without scanning every component. Duplicate selectors return ambiguity metadata instead of selecting the first class. Dynamic or missing selector/template states, unavailable external templates, and unresolved child selectors make `resultStatus` partial and non-exhaustive.

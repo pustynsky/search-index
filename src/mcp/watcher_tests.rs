@@ -1993,6 +1993,323 @@ fn test_definition_parse_failure_tombstones_path_metadata() {
     assert!(!index.file_index.contains_key(&file_id));
 }
 
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn transient_definition_read_race_preserves_graph_and_requeues_dirty_path() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let path = root.join("component.ts");
+    std::fs::write(
+        &path,
+        "@Component({ selector: 'app-child' }) export class Component {}",
+    )
+    .unwrap();
+    let definition_index = Arc::new(RwLock::new(
+        crate::definitions::build_definition_index(
+            &crate::definitions::DefIndexArgs {
+                dir: root.to_string_lossy().to_string(),
+                ext: "ts".to_string(),
+                threads: 1,
+                respect_git_exclude: false,
+            },
+        ),
+    ));
+    let generation = definition_index.read().unwrap().definition_generation;
+    crate::definitions::install_definition_source_read_error(
+        &path,
+        std::io::ErrorKind::WouldBlock,
+    );
+
+    let result = update_definition_index(
+        &Some(Arc::clone(&definition_index)),
+        &[],
+        std::slice::from_ref(&path),
+    );
+    crate::definitions::remove_definition_source_read_error(&path);
+
+    assert!(result.ok);
+    assert_eq!(result.applied_dirty, 0);
+    assert_eq!(result.retry_dirty_paths, vec![path.clone()]);
+    assert!(result.retry_removed_paths.is_empty());
+    let definition_index = definition_index.read().unwrap();
+    assert_eq!(definition_index.definition_generation, generation);
+    assert!(definition_index
+        .path_to_id
+        .contains_key(&crate::path_identity_key(&path)));
+    assert!(definition_index.selector_index.contains_key("app-child"));
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn transient_definition_input_does_not_starve_stable_batch_peer() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let busy_path = root.join("busy.ts");
+    let stable_path = root.join("stable.ts");
+    std::fs::write(
+        &busy_path,
+        "@Component({ selector: 'app-busy-old' }) export class Busy {}",
+    )
+    .unwrap();
+    std::fs::write(
+        &stable_path,
+        "@Component({ selector: 'app-stable-old' }) export class Stable {}",
+    )
+    .unwrap();
+    let definition_index = Arc::new(RwLock::new(
+        crate::definitions::build_definition_index(
+            &crate::definitions::DefIndexArgs {
+                dir: root.to_string_lossy().to_string(),
+                ext: "ts".to_string(),
+                threads: 1,
+                respect_git_exclude: false,
+            },
+        ),
+    ));
+    let generation = definition_index.read().unwrap().definition_generation;
+    std::fs::write(
+        &busy_path,
+        "@Component({ selector: 'app-busy-new' }) export class Busy {}",
+    )
+    .unwrap();
+    std::fs::write(
+        &stable_path,
+        "@Component({ selector: 'app-stable-new' }) export class Stable {}",
+    )
+    .unwrap();
+    crate::definitions::install_definition_source_read_error(
+        &busy_path,
+        std::io::ErrorKind::WouldBlock,
+    );
+
+    let result = update_definition_index(
+        &Some(Arc::clone(&definition_index)),
+        &[],
+        &[busy_path.clone(), stable_path],
+    );
+    crate::definitions::remove_definition_source_read_error(&busy_path);
+
+    assert!(result.ok);
+    assert!(result.applied_changes);
+    assert_eq!(result.applied_dirty, 1);
+    assert_eq!(result.retry_dirty_paths, vec![busy_path]);
+    assert!(result.retry_removed_paths.is_empty());
+    let definition_index = definition_index.read().unwrap();
+    assert_eq!(definition_index.definition_generation, generation + 1);
+    assert!(definition_index.selector_index.contains_key("app-busy-old"));
+    assert!(!definition_index.selector_index.contains_key("app-busy-new"));
+    assert!(!definition_index.selector_index.contains_key("app-stable-old"));
+    assert!(definition_index.selector_index.contains_key("app-stable-new"));
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn definition_reactivation_escalates_to_write_lock_only_for_exhausted_input() {
+    let path = std::path::PathBuf::from("q:/repo/component.ts");
+    let definition_index = Some(Arc::new(RwLock::new(
+        crate::definitions::DefinitionIndex::default(),
+    )));
+    let (_, has_exhausted_dirty) = super::inspect_definition_batch(
+        &definition_index,
+        &[],
+        std::slice::from_ref(&path),
+    );
+    assert!(!has_exhausted_dirty);
+
+    let read_guard = definition_index.as_ref().unwrap().read().unwrap();
+    let worker_index = definition_index.clone();
+    let worker_path = path.clone();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let worker = std::thread::spawn(move || {
+        let result = super::reactivate_exhausted_definition_inputs(
+            &worker_index,
+            std::slice::from_ref(&worker_path),
+            false,
+        );
+        sender.send(result).unwrap();
+    });
+    let result = receiver.recv_timeout(std::time::Duration::from_secs(1));
+    drop(read_guard);
+    worker.join().unwrap();
+    assert!(result.unwrap(), "common path must not request a write lock");
+
+    definition_index
+        .as_ref()
+        .unwrap()
+        .write()
+        .unwrap()
+        .pending_definition_inputs
+        .insert(
+            crate::path_identity_key(&path),
+            crate::definitions::PendingDefinitionInput {
+                attempts: crate::definitions::MAX_TRANSIENT_DEFINITION_ATTEMPTS,
+                observed_revision: None,
+            },
+        );
+    let (_, has_exhausted_dirty) = super::inspect_definition_batch(
+        &definition_index,
+        &[],
+        std::slice::from_ref(&path),
+    );
+    assert!(has_exhausted_dirty);
+    assert!(super::reactivate_exhausted_definition_inputs(
+        &definition_index,
+        std::slice::from_ref(&path),
+        has_exhausted_dirty,
+    ));
+    assert!(definition_index
+        .as_ref()
+        .unwrap()
+        .read()
+        .unwrap()
+        .pending_definition_inputs
+        .is_empty());
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn persistent_permission_denied_converges_after_bounded_definition_retries() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let path = root.join("component.ts");
+    std::fs::write(
+        &path,
+        "@Component({ selector: 'app-child' }) export class Component {}",
+    )
+    .unwrap();
+    let definition_index = Arc::new(RwLock::new(
+        crate::definitions::build_definition_index(
+            &crate::definitions::DefIndexArgs {
+                dir: root.to_string_lossy().to_string(),
+                ext: "ts".to_string(),
+                threads: 1,
+                respect_git_exclude: false,
+            },
+        ),
+    ));
+    let generation = definition_index.read().unwrap().definition_generation;
+    crate::definitions::install_definition_source_read_error(
+        &path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+
+    for attempt in 1..=crate::definitions::MAX_TRANSIENT_DEFINITION_ATTEMPTS {
+        let result = update_definition_index(
+            &Some(Arc::clone(&definition_index)),
+            &[],
+            std::slice::from_ref(&path),
+        );
+        assert!(result.ok);
+        if attempt < crate::definitions::MAX_TRANSIENT_DEFINITION_ATTEMPTS {
+            assert!(!result.applied_changes);
+            assert_eq!(result.retry_dirty_paths, vec![path.clone()]);
+        } else {
+            assert!(result.applied_changes);
+            assert_eq!(result.applied_paths, vec![path.clone()]);
+            assert!(result.retry_dirty_paths.is_empty());
+        }
+    }
+    crate::definitions::remove_definition_source_read_error(&path);
+
+    {
+        let definition_index = definition_index.read().unwrap();
+        assert_eq!(definition_index.definition_generation, generation + 1);
+        assert_eq!(
+            definition_index
+                .pending_definition_inputs
+                .get(&crate::path_identity_key(&path))
+                .map(|pending| pending.attempts),
+            Some(crate::definitions::MAX_TRANSIENT_DEFINITION_ATTEMPTS)
+        );
+        assert!(!definition_index
+            .path_to_id
+            .contains_key(&crate::path_identity_key(&path)));
+        assert!(!definition_index.selector_index.contains_key("app-child"));
+    }
+
+    std::fs::write(
+        &path,
+        "@Component({ selector: 'app-recovered' }) export class Component {}",
+    )
+    .unwrap();
+    let result = update_definition_index(
+        &Some(Arc::clone(&definition_index)),
+        &[],
+        std::slice::from_ref(&path),
+    );
+    assert!(result.applied_changes);
+    let definition_index = definition_index.read().unwrap();
+    assert_eq!(definition_index.definition_generation, generation + 2);
+    assert!(definition_index.pending_definition_inputs.is_empty());
+    assert!(definition_index.selector_index.contains_key("app-recovered"));
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn watcher_dirty_set_stops_requeueing_persistent_permission_denied() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let path = root.join("component.ts");
+    std::fs::write(
+        &path,
+        "@Component({ selector: 'app-child' }) export class Component {}",
+    )
+    .unwrap();
+    let definition_index = Some(Arc::new(RwLock::new(
+        crate::definitions::build_definition_index(
+            &crate::definitions::DefIndexArgs {
+                dir: root.to_string_lossy().to_string(),
+                ext: "ts".to_string(),
+                threads: 1,
+                respect_git_exclude: false,
+            },
+        ),
+    )));
+    let content_index = Arc::new(RwLock::new(ContentIndex::default()));
+    crate::definitions::install_definition_source_read_error(
+        &path,
+        std::io::ErrorKind::PermissionDenied,
+    );
+    let mut dirty = HashSet::from([path.clone()]);
+    let mut removed = HashSet::new();
+
+    for attempt in 1..=crate::definitions::MAX_TRANSIENT_DEFINITION_ATTEMPTS {
+        let outcome = super::process_watcher_batch(
+            &content_index,
+            &definition_index,
+            &mut dirty,
+            &mut removed,
+            &root.to_string_lossy(),
+            &["ts".to_string()],
+            &["ts".to_string()],
+            false,
+            &test_trigram_build_gate(),
+        );
+        assert!(outcome.healthy);
+        if attempt < crate::definitions::MAX_TRANSIENT_DEFINITION_ATTEMPTS {
+            assert_eq!(dirty.len(), 1);
+            assert_eq!(
+                crate::path_identity_key(dirty.iter().next().unwrap()),
+                crate::path_identity_key(&path)
+            );
+        } else {
+            assert!(dirty.is_empty(), "bounded retry must converge");
+            assert!(outcome.index_changed);
+        }
+    }
+    crate::definitions::remove_definition_source_read_error(&path);
+
+    let definition_index = definition_index.as_ref().unwrap().read().unwrap();
+    assert_eq!(
+        definition_index
+            .pending_definition_inputs
+            .get(&crate::path_identity_key(&path))
+            .map(|pending| pending.attempts),
+        Some(crate::definitions::MAX_TRANSIENT_DEFINITION_ATTEMPTS)
+    );
+    assert!(!definition_index.selector_index.contains_key("app-child"));
+}
+
 
 #[test]
 fn test_should_invalidate_file_index_rename_triggers_rebuild() {
@@ -3277,6 +3594,674 @@ fn periodic_rescan_uses_definition_extensions_subset() {
 }
 
 
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn sync_definition_reindex_retries_one_overlapping_baseline() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let path = root.join("component.ts");
+    std::fs::write(
+        &path,
+        "@Component({ selector: 'app-old' }) export class Component {}",
+    )
+    .unwrap();
+    let definition_index = crate::definitions::build_definition_index(
+        &crate::definitions::DefIndexArgs {
+            dir: root.to_string_lossy().to_string(),
+            ext: "ts".to_string(),
+            threads: 1,
+            respect_git_exclude: false,
+        },
+    );
+    let generation = definition_index.definition_generation;
+    let definition_index = Arc::new(RwLock::new(definition_index));
+    let content_index = Arc::new(RwLock::new(ContentIndex::default()));
+    std::fs::write(
+        &path,
+        "@Component({ selector: 'app-new' }) export class Component {}",
+    )
+    .unwrap();
+
+    let hook = Arc::new(super::DefinitionUpdateBeforeWriteHook::new(&path, vec![2]));
+    super::install_definition_update_before_write_hook(hook);
+    let results = std::thread::scope(|scope| {
+        let first = {
+            let content_index = Arc::clone(&content_index);
+            let definition_index = Arc::clone(&definition_index);
+            let path = path.clone();
+            scope.spawn(move || {
+                super::reindex_paths_sync_scoped(
+                    &content_index,
+                    &Some(definition_index),
+                    &[],
+                    std::slice::from_ref(&path),
+                    &[],
+                    &["ts".to_string()],
+                )
+            })
+        };
+        let second = {
+            let content_index = Arc::clone(&content_index);
+            let definition_index = Arc::clone(&definition_index);
+            let path = path.clone();
+            scope.spawn(move || {
+                super::reindex_paths_sync_scoped(
+                    &content_index,
+                    &Some(definition_index),
+                    &[],
+                    std::slice::from_ref(&path),
+                    &[],
+                    &["ts".to_string()],
+                )
+            })
+        };
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    super::remove_definition_update_before_write_hook(&path);
+
+    assert!(results.iter().all(|stats| !stats.def_update_pending));
+    assert!(results.iter().all(|stats| stats.def_updated == 1));
+    let definition_index = definition_index.read().unwrap();
+    assert_eq!(definition_index.definition_generation, generation + 2);
+    assert!(!definition_index.selector_index.contains_key("app-old"));
+    assert!(definition_index.selector_index.contains_key("app-new"));
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn sync_definition_reindex_reports_pending_after_second_overlap() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let path = root.join("component.ts");
+    std::fs::write(
+        &path,
+        "@Component({ selector: 'app-old' }) export class Component {}",
+    )
+    .unwrap();
+    let definition_index = crate::definitions::build_definition_index(
+        &crate::definitions::DefIndexArgs {
+            dir: root.to_string_lossy().to_string(),
+            ext: "ts".to_string(),
+            threads: 1,
+            respect_git_exclude: false,
+        },
+    );
+    let generation = definition_index.definition_generation;
+    let definition_index = Arc::new(RwLock::new(definition_index));
+    let content_index = Arc::new(RwLock::new(ContentIndex::default()));
+    std::fs::write(
+        &path,
+        "@Component({ selector: 'app-new' }) export class Component {}",
+    )
+    .unwrap();
+
+    let input_key = crate::definitions::definition_input_key(&path);
+    let hook_index = Arc::clone(&definition_index);
+    let on_release: Arc<dyn Fn(usize) + Send + Sync> = Arc::new(move |round| {
+        let mut index = hook_index.write().unwrap();
+        let fingerprint = index.input_fingerprints.get_mut(&input_key).unwrap();
+        fingerprint.modified_nanos = fingerprint
+            .modified_nanos
+            .saturating_add(round as u128 + 1);
+    });
+    let hook = Arc::new(super::DefinitionUpdateBeforeWriteHook::with_action(
+        &path,
+        vec![1, 1],
+        on_release,
+    ));
+    super::install_definition_update_before_write_hook(hook);
+    let stats = super::reindex_paths_sync_scoped(
+        &content_index,
+        &Some(Arc::clone(&definition_index)),
+        &[],
+        std::slice::from_ref(&path),
+        &[],
+        &["ts".to_string()],
+    );
+    super::remove_definition_update_before_write_hook(&path);
+
+    assert!(stats.def_update_pending);
+    assert_eq!(stats.def_updated, 0);
+    assert_eq!(stats.definition_generation, Some(generation));
+    let definition_index = definition_index.read().unwrap();
+    assert_eq!(definition_index.definition_generation, generation);
+    assert!(definition_index.selector_index.contains_key("app-old"));
+    assert!(!definition_index.selector_index.contains_key("app-new"));
+}
+
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn watcher_cas_retry_preserves_removed_path_role() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let path = root.join("component.ts");
+    std::fs::write(
+        &path,
+        "@Component({ selector: 'app-child' }) export class Component {}",
+    )
+    .unwrap();
+    let definition_index = Arc::new(RwLock::new(
+        crate::definitions::build_definition_index(
+            &crate::definitions::DefIndexArgs {
+                dir: root.to_string_lossy().to_string(),
+                ext: "ts".to_string(),
+                threads: 1,
+                respect_git_exclude: false,
+            },
+        ),
+    ));
+    let content_index = Arc::new(RwLock::new(ContentIndex::default()));
+    std::fs::remove_file(&path).unwrap();
+
+    let hook = Arc::new(super::DefinitionUpdateBeforeWriteHook::new(&path, vec![2]));
+    super::install_definition_update_before_write_hook(hook);
+    let results = std::thread::scope(|scope| {
+        let first = {
+            let content_index = Arc::clone(&content_index);
+            let definition_index = Arc::clone(&definition_index);
+            let root = root.clone();
+            let path = path.clone();
+            scope.spawn(move || {
+                let mut dirty = HashSet::new();
+                let mut removed = HashSet::from([path]);
+                let outcome = super::process_watcher_batch(
+                    &content_index,
+                    &Some(definition_index),
+                    &mut dirty,
+                    &mut removed,
+                    &root.to_string_lossy(),
+                    &["ts".to_string()],
+                    &["ts".to_string()],
+                    false,
+                    &test_trigram_build_gate(),
+                );
+                (outcome, dirty, removed)
+            })
+        };
+        let second = {
+            let content_index = Arc::clone(&content_index);
+            let definition_index = Arc::clone(&definition_index);
+            let root = root.clone();
+            let path = path.clone();
+            scope.spawn(move || {
+                let mut dirty = HashSet::new();
+                let mut removed = HashSet::from([path]);
+                let outcome = super::process_watcher_batch(
+                    &content_index,
+                    &Some(definition_index),
+                    &mut dirty,
+                    &mut removed,
+                    &root.to_string_lossy(),
+                    &["ts".to_string()],
+                    &["ts".to_string()],
+                    false,
+                    &test_trigram_build_gate(),
+                );
+                (outcome, dirty, removed)
+            })
+        };
+        [first.join().unwrap(), second.join().unwrap()]
+    });
+    super::remove_definition_update_before_write_hook(&path);
+
+    let retried = results
+        .iter()
+        .find(|(_, _, removed)| !removed.is_empty())
+        .expect("one raced removal must be requeued");
+    assert!(retried.0.healthy);
+    assert!(retried.1.is_empty(), "removal must not be requeued as dirty");
+    assert_eq!(retried.2, HashSet::from([path.clone()]));
+    let definition_index = definition_index.read().unwrap();
+    assert!(!definition_index.path_to_id.contains_key(&crate::path_identity_key(&path)));
+    assert!(!definition_index.selector_index.contains_key("app-child"));
+}
+
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn unowned_html_watcher_event_skips_definition_write_phase() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let path = root.join("unowned.html");
+    std::fs::write(&path, "<app-child></app-child>").unwrap();
+    let definition_index = Some(Arc::new(RwLock::new(
+        crate::definitions::DefinitionIndex::default(),
+    )));
+    let content_index = Arc::new(RwLock::new(ContentIndex::default()));
+    let write_phase_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let action_count = Arc::clone(&write_phase_count);
+    let on_release: Arc<dyn Fn(usize) + Send + Sync> = Arc::new(move |_| {
+        action_count.fetch_add(1, Ordering::Relaxed);
+    });
+    let hook = Arc::new(super::DefinitionUpdateBeforeWriteHook::with_action(
+        &path,
+        vec![1],
+        on_release,
+    ));
+    super::install_definition_update_before_write_hook(hook);
+    let mut dirty = HashSet::from([path.clone()]);
+    let mut removed = HashSet::new();
+
+    let outcome = super::process_watcher_batch(
+        &content_index,
+        &definition_index,
+        &mut dirty,
+        &mut removed,
+        &root.to_string_lossy(),
+        &["ts".to_string()],
+        &["ts".to_string()],
+        false,
+        &test_trigram_build_gate(),
+    );
+    super::remove_definition_update_before_write_hook(&path);
+
+    assert!(outcome.healthy);
+    assert!(!outcome.index_changed);
+    assert_eq!(write_phase_count.load(Ordering::Relaxed), 0);
+
+    std::fs::remove_file(&path).unwrap();
+    let action_count = Arc::clone(&write_phase_count);
+    let on_release: Arc<dyn Fn(usize) + Send + Sync> = Arc::new(move |_| {
+        action_count.fetch_add(1, Ordering::Relaxed);
+    });
+    let hook = Arc::new(super::DefinitionUpdateBeforeWriteHook::with_action(
+        &path,
+        vec![1],
+        on_release,
+    ));
+    super::install_definition_update_before_write_hook(hook);
+    let mut dirty = HashSet::new();
+    let mut removed = HashSet::from([path.clone()]);
+    let outcome = super::process_watcher_batch(
+        &content_index,
+        &definition_index,
+        &mut dirty,
+        &mut removed,
+        &root.to_string_lossy(),
+        &["ts".to_string()],
+        &["ts".to_string()],
+        false,
+        &test_trigram_build_gate(),
+    );
+    super::remove_definition_update_before_write_hook(&path);
+
+    assert!(outcome.healthy);
+    assert!(!outcome.index_changed);
+    assert_eq!(write_phase_count.load(Ordering::Relaxed), 0);
+}
+
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn sync_reindex_refreshes_owned_external_angular_template() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let component_path = root.join("components.ts");
+    let template_path = root.join("external.html");
+    std::fs::write(
+        &component_path,
+        r#"@Component({ selector: 'app-old' })
+export class OldComponent {}
+@Component({ selector: 'app-new' })
+export class NewComponent {}
+@Component({ selector: 'app-parent', templateUrl: './external.html' })
+export class ParentComponent {}"#,
+    )
+    .unwrap();
+    std::fs::write(&template_path, "<app-old></app-old>").unwrap();
+
+    let definition_index = crate::definitions::build_definition_index(
+        &crate::definitions::DefIndexArgs {
+            dir: root.to_string_lossy().to_string(),
+            ext: "ts".to_string(),
+            threads: 1,
+            respect_git_exclude: false,
+        },
+    );
+    let parent = definition_index
+        .definitions
+        .iter()
+        .position(|definition| definition.name == "ParentComponent")
+        .unwrap() as u32;
+    assert_eq!(definition_index.template_children[&parent], vec!["app-old"]);
+
+    let definition_index = Arc::new(RwLock::new(definition_index));
+    let content_index = Arc::new(RwLock::new(ContentIndex::default()));
+    std::fs::write(&template_path, "<app-new></app-new>").unwrap();
+
+    let stats = super::reindex_paths_sync_scoped(
+        &content_index,
+        &Some(Arc::clone(&definition_index)),
+        &[],
+        std::slice::from_ref(&template_path),
+        &[],
+        &["ts".to_string()],
+    );
+
+    assert_eq!(stats.def_updated, 1);
+    let definition_index = definition_index.read().unwrap();
+    assert_eq!(definition_index.template_children[&parent], vec!["app-new"]);
+    assert!(!definition_index.template_parents.contains_key("app-old"));
+    assert_eq!(definition_index.template_parents["app-new"], vec![parent]);
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn sync_reindex_keeps_angular_owner_across_template_delete_and_recreate() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let component_path = root.join("components.ts");
+    let template_path = root.join("external.html");
+    std::fs::write(
+        &component_path,
+        r#"@Component({ selector: 'app-parent', templateUrl: './external.html' })
+export class ParentComponent {}"#,
+    )
+    .unwrap();
+    std::fs::write(&template_path, "<app-old></app-old>").unwrap();
+
+    let definition_index = crate::definitions::build_definition_index(
+        &crate::definitions::DefIndexArgs {
+            dir: root.to_string_lossy().to_string(),
+            ext: "ts".to_string(),
+            threads: 1,
+            respect_git_exclude: false,
+        },
+    );
+    let parent = definition_index
+        .definitions
+        .iter()
+        .position(|definition| definition.name == "ParentComponent")
+        .unwrap() as u32;
+    let generation = definition_index.definition_generation;
+    let owner_key = crate::definitions::definition_input_key(&template_path);
+    let definition_index = Arc::new(RwLock::new(definition_index));
+    let content_index = Arc::new(RwLock::new(ContentIndex::default()));
+
+    std::fs::remove_file(&template_path).unwrap();
+    let removed = super::reindex_paths_sync_scoped(
+        &content_index,
+        &Some(Arc::clone(&definition_index)),
+        &[],
+        &[],
+        std::slice::from_ref(&template_path),
+        &["ts".to_string()],
+    );
+    assert_eq!(removed.def_updated, 1);
+    {
+        let definition_index = definition_index.read().unwrap();
+        assert_eq!(definition_index.definition_generation, generation + 1);
+        assert_eq!(definition_index.template_owners[&owner_key], vec![parent]);
+        assert!(!definition_index.template_children.contains_key(&parent));
+        assert!(!definition_index.template_parents.contains_key("app-old"));
+        assert!(!definition_index.input_fingerprints.contains_key(&owner_key));
+        assert!(matches!(
+            definition_index.angular_components[&parent].template,
+            crate::definitions::AngularTemplateSource::UnavailableExternal { .. }
+        ));
+    }
+
+    std::fs::write(&template_path, "<app-new></app-new>").unwrap();
+    let recreated = super::reindex_paths_sync_scoped(
+        &content_index,
+        &Some(Arc::clone(&definition_index)),
+        &[],
+        std::slice::from_ref(&template_path),
+        &[],
+        &["ts".to_string()],
+    );
+    assert_eq!(recreated.def_updated, 1);
+    let definition_index = definition_index.read().unwrap();
+    assert_eq!(definition_index.definition_generation, generation + 2);
+    assert_eq!(definition_index.template_owners[&owner_key], vec![parent]);
+    assert_eq!(definition_index.template_children[&parent], vec!["app-new"]);
+    assert_eq!(definition_index.template_parents["app-new"], vec![parent]);
+    assert!(definition_index.input_fingerprints.contains_key(&owner_key));
+    assert!(matches!(
+        definition_index.angular_components[&parent].template,
+        crate::definitions::AngularTemplateSource::External { .. }
+    ));
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn sync_reindex_applies_template_and_metadata_rename_in_one_generation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let component_path = root.join("components.ts");
+    let old_template_path = root.join("old.html");
+    let new_template_path = root.join("new.html");
+    std::fs::write(
+        &component_path,
+        r#"@Component({ selector: 'app-parent', templateUrl: './old.html' })
+export class ParentComponent {}"#,
+    )
+    .unwrap();
+    std::fs::write(&old_template_path, "<app-old></app-old>").unwrap();
+
+    let definition_index = crate::definitions::build_definition_index(
+        &crate::definitions::DefIndexArgs {
+            dir: root.to_string_lossy().to_string(),
+            ext: "ts".to_string(),
+            threads: 1,
+            respect_git_exclude: false,
+        },
+    );
+    let generation = definition_index.definition_generation;
+    let definition_index = Arc::new(RwLock::new(definition_index));
+    let content_index = Arc::new(RwLock::new(ContentIndex::default()));
+
+    std::fs::rename(&old_template_path, &new_template_path).unwrap();
+    std::fs::write(&new_template_path, "<app-new></app-new>").unwrap();
+    std::fs::write(
+        &component_path,
+        r#"@Component({ selector: 'app-parent', templateUrl: './new.html' })
+export class ParentComponent {}"#,
+    )
+    .unwrap();
+    let updated = super::reindex_paths_sync_scoped(
+        &content_index,
+        &Some(Arc::clone(&definition_index)),
+        &[],
+        &[component_path.clone(), new_template_path.clone()],
+        std::slice::from_ref(&old_template_path),
+        &["ts".to_string()],
+    );
+    assert!(updated.def_updated > 0);
+
+    let definition_index = definition_index.read().unwrap();
+    let parent = definition_index
+        .definitions
+        .iter()
+        .enumerate()
+        .find(|(index, definition)| {
+            definition.name == "ParentComponent"
+                && definition_index
+                    .file_index
+                    .get(&definition.file_id)
+                    .is_some_and(|definitions| definitions.contains(&(*index as u32)))
+        })
+        .map(|(index, _)| index as u32)
+        .unwrap();
+    let old_owner_key = crate::definitions::definition_input_key(&old_template_path);
+    let new_owner_key = crate::definitions::definition_input_key(&new_template_path);
+    assert_eq!(definition_index.definition_generation, generation + 1);
+    assert!(!definition_index.template_owners.contains_key(&old_owner_key));
+    assert_eq!(definition_index.template_owners[&new_owner_key], vec![parent]);
+    assert_eq!(definition_index.template_children[&parent], vec!["app-new"]);
+    assert_eq!(definition_index.template_parents["app-new"], vec![parent]);
+    assert!(!definition_index.input_fingerprints.contains_key(&old_owner_key));
+    assert!(definition_index.input_fingerprints.contains_key(&new_owner_key));
+}
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn sync_reindex_selector_rename_and_delete_preserve_unresolved_parent_tag() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let child_path = root.join("child.ts");
+    std::fs::write(
+        &child_path,
+        "@Component({ selector: 'app-child' }) export class ChildComponent {}",
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("parent.ts"),
+        "@Component({ selector: 'app-parent', template: '<app-child></app-child>' }) export class ParentComponent {}",
+    )
+    .unwrap();
+
+    let definition_index = crate::definitions::build_definition_index(
+        &crate::definitions::DefIndexArgs {
+            dir: root.to_string_lossy().to_string(),
+            ext: "ts".to_string(),
+            threads: 1,
+            respect_git_exclude: false,
+        },
+    );
+    let generation = definition_index.definition_generation;
+    let definition_index = Arc::new(RwLock::new(definition_index));
+    let content_index = Arc::new(RwLock::new(ContentIndex::default()));
+
+    std::fs::write(
+        &child_path,
+        "@Component({ selector: 'app-renamed' }) export class ChildComponent {}",
+    )
+    .unwrap();
+    let renamed = super::reindex_paths_sync_scoped(
+        &content_index,
+        &Some(Arc::clone(&definition_index)),
+        &[],
+        std::slice::from_ref(&child_path),
+        &[],
+        &["ts".to_string()],
+    );
+    assert_eq!(renamed.def_updated, 1);
+    {
+        let definition_index = definition_index.read().unwrap();
+        let parent = definition_index
+            .definitions
+            .iter()
+            .enumerate()
+            .find(|(index, definition)| {
+                definition.name == "ParentComponent"
+                    && definition_index
+                        .file_index
+                        .get(&definition.file_id)
+                        .is_some_and(|definitions| definitions.contains(&(*index as u32)))
+            })
+            .map(|(index, _)| index as u32)
+            .unwrap();
+        assert_eq!(definition_index.definition_generation, generation + 1);
+        assert!(!definition_index.selector_index.contains_key("app-child"));
+        assert!(definition_index.selector_index.contains_key("app-renamed"));
+        assert_eq!(definition_index.template_children[&parent], vec!["app-child"]);
+        assert_eq!(definition_index.template_parents["app-child"], vec![parent]);
+    }
+
+    std::fs::remove_file(&child_path).unwrap();
+    let removed = super::reindex_paths_sync_scoped(
+        &content_index,
+        &Some(Arc::clone(&definition_index)),
+        &[],
+        &[],
+        std::slice::from_ref(&child_path),
+        &["ts".to_string()],
+    );
+    assert_eq!(removed.def_updated, 1);
+    let definition_index = definition_index.read().unwrap();
+    assert_eq!(definition_index.definition_generation, generation + 2);
+    assert!(!definition_index.selector_index.contains_key("app-renamed"));
+    assert!(definition_index.template_parents.contains_key("app-child"));
+}
+#[cfg(feature = "lang-typescript")]
+#[test]
+fn periodic_rescan_recovers_missed_angular_template_event_atomically() {
+    let (_temp, root, content_index) = make_batch_test_setup();
+    content_index.write().unwrap().created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 5;
+    let component_path = root.join("components.ts");
+    let template_path = root.join("external.html");
+    std::fs::write(
+        &component_path,
+        r#"@Component({ selector: 'app-old' })
+export class OldComponent {}
+@Component({ selector: 'app-new' })
+export class NewComponent {}
+@Component({ selector: 'app-parent', templateUrl: './external.html' })
+export class ParentComponent {}"#,
+    )
+    .unwrap();
+    std::fs::write(&template_path, "<app-old></app-old>").unwrap();
+
+    let definition_index = crate::definitions::build_definition_index(
+        &crate::definitions::DefIndexArgs {
+            dir: root.to_string_lossy().to_string(),
+            ext: "ts".to_string(),
+            threads: 1,
+            respect_git_exclude: false,
+        },
+    );
+    let parent = definition_index
+        .definitions
+        .iter()
+        .position(|definition| definition.name == "ParentComponent")
+        .unwrap() as u32;
+    let generation = definition_index.definition_generation;
+    let definition_index = Arc::new(RwLock::new(definition_index));
+
+    std::fs::write(&template_path, "<app-new></app-new>").unwrap();
+    let owner_key = crate::definitions::definition_input_key(&template_path);
+    let revision = crate::definitions::definition_input_revision(&template_path).unwrap();
+    {
+        let mut index = definition_index.write().unwrap();
+        let fingerprint = index.input_fingerprints.get_mut(&owner_key).unwrap();
+        fingerprint.size = revision.size;
+        fingerprint.modified_nanos = revision.modified_nanos;
+        crate::definitions::mark_pending_definition_conflicts(
+            &mut index,
+            &std::collections::HashSet::from([template_path.clone()]),
+        );
+    }
+    let stats = Arc::new(super::WatcherStats::new());
+    let file_index_dirty = Arc::new(AtomicBool::new(false));
+    let file_index = Arc::new(RwLock::new(None));
+    let autosave_dirty = Arc::new(AtomicBool::new(false));
+    let outcome = super::periodic_rescan_once(
+        &content_index,
+        &Some(Arc::clone(&definition_index)),
+        &file_index,
+        &file_index_dirty,
+        &root.to_string_lossy(),
+        &["cs".to_string()],
+        &["ts".to_string()],
+        &stats,
+        false,
+        &autosave_dirty,
+        &test_trigram_build_gate(),
+    );
+
+    assert_eq!(outcome.content_added, 0);
+    assert_eq!(outcome.content_modified, 0);
+    assert_eq!(outcome.content_removed, 0);
+    assert!(outcome.drift_detected);
+    assert!(outcome.index_changed);
+    assert!(autosave_dirty.load(Ordering::Relaxed));
+    assert!(!file_index_dirty.load(Ordering::Relaxed));
+
+    let definition_index = definition_index.read().unwrap();
+    assert_eq!(definition_index.definition_generation, generation + 1);
+    assert_eq!(definition_index.template_children[&parent], vec!["app-new"]);
+    assert!(!definition_index.template_parents.contains_key("app-old"));
+    assert_eq!(definition_index.template_parents["app-new"], vec![parent]);
+    assert!(!definition_index
+        .pending_definition_inputs
+        .contains_key(&crate::path_identity_key(&template_path)));
+}
+
 #[test]
 fn periodic_rescan_detected_dirty_tokenize_failure_does_not_set_autosave_dirty() {
     let (_tmp, root, index) = make_batch_test_setup();
@@ -3449,6 +4434,9 @@ fn periodic_rescan_definition_parse_failure_sets_autosave_dirty() {
     assert!(!def_idx.name_index.contains_key("alpha"));
     assert!(def_idx.path_to_id.contains_key(&crate::path_identity_key(&file_a)),
         "dirty parse failure is not a deletion; path mapping stays for retry");
+    assert!(!def_idx.input_fingerprints.contains_key(
+        &crate::definitions::definition_input_key(&file_a)
+    ), "failed periodic parse must drop its stale source fingerprint");
     assert!(def_idx.created_at > 0,
         "definition reconcile advances its own watermark and needs autosave");
 }

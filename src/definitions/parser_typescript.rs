@@ -9,27 +9,18 @@ const MAX_TYPESCRIPT_AST_RECURSION_DEPTH: usize = 256;
 
 // ─── Main entry point ───────────────────────────────────────────────
 
-pub(crate) fn parse_typescript_definitions(
-    parser: &mut tree_sitter::Parser,
-    source: &str,
-    file_id: u32,
-) -> ParseResult {
-    parse_typescript_definitions_impl(parser, source, file_id, false).0
-}
-
 pub(crate) fn parse_typescript_definitions_with_components(
     parser: &mut tree_sitter::Parser,
     source: &str,
     file_id: u32,
 ) -> TypeScriptParseResult {
-    parse_typescript_definitions_impl(parser, source, file_id, true)
+    parse_typescript_definitions_impl(parser, source, file_id)
 }
 
 fn parse_typescript_definitions_impl(
     parser: &mut tree_sitter::Parser,
     source: &str,
     file_id: u32,
-    collect_angular_components: bool,
 ) -> TypeScriptParseResult {
     // PARSE-002: skip oversized sources before tree-sitter allocates ~10× RAM.
     if source.len() > MAX_PARSE_SOURCE_BYTES {
@@ -66,7 +57,7 @@ fn parse_typescript_definitions_impl(
         file_id,
         None,
         (&mut defs, &mut method_nodes),
-        collect_angular_components.then_some(&mut angular_components),
+        Some(&mut angular_components),
         0,
     );
 
@@ -464,9 +455,16 @@ fn walk_typescript_node_collecting<'a>(
                 if let Some(angular_components) = angular_components.as_deref_mut()
                     && let Some(component) = extract_angular_component_record(node, source)
                 {
+                    let template_children = match &component.template {
+                        AngularTemplateSource::Inline { content } => {
+                            super::extract_custom_elements(content)
+                        }
+                        _ => Vec::new(),
+                    };
                     angular_components.push(ParsedAngularComponentRecord {
                         local_def_index,
                         component,
+                        template_children,
                     });
                 }
                 // Walk into class body

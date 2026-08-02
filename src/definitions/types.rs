@@ -256,7 +256,26 @@ pub struct CallSite {
 
 /// Format version for DefinitionIndex. Bump when changing the struct layout.
 /// Loading an index with a different version triggers a rebuild.
-pub const DEFINITION_INDEX_VERSION: u32 = 10;
+pub const DEFINITION_INDEX_VERSION: u32 = 11;
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq)]
+pub struct DefinitionInputFingerprint {
+    pub size: u64,
+    pub modified_nanos: u128,
+    pub content_hash: [u8; 32],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DefinitionInputRevision {
+    pub size: u64,
+    pub modified_nanos: u128,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PendingDefinitionInput {
+    pub attempts: u8,
+    pub observed_revision: Option<DefinitionInputRevision>,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum StaticValue<T> {
@@ -284,6 +303,7 @@ pub struct AngularComponentRecord {
 pub(crate) struct ParsedAngularComponentRecord {
     pub local_def_index: usize,
     pub component: AngularComponentRecord,
+    pub template_children: Vec<String>,
 }
 
 #[cfg(feature = "lang-typescript")]
@@ -379,6 +399,15 @@ pub struct DefinitionIndex {
     /// `docs/bug-reports/2026-04-23_417f315_cli-auto-rebuild-loses-flag.md`.
     #[serde(default)]
     pub respect_git_exclude: bool,
+    /// Monotonic generation of fully-applied definition batches.
+    #[serde(default)]
+    pub definition_generation: u64,
+    /// Normalized input path → snapshot used by the current definition graph.
+    #[serde(default)]
+    pub input_fingerprints: HashMap<String, DefinitionInputFingerprint>,
+    /// Runtime-only transient input attempts, keyed by normalized path.
+    #[serde(skip)]
+    pub pending_definition_inputs: HashMap<PathBuf, PendingDefinitionInput>,
 }
 
 
@@ -438,6 +467,10 @@ pub struct DefinitionIndexHead {
     pub worker_panics: usize,
     #[serde(default)]
     pub respect_git_exclude: bool,
+    #[serde(default)]
+    pub definition_generation: u64,
+    #[serde(default)]
+    pub input_fingerprints: HashMap<String, DefinitionInputFingerprint>,
 }
 
 impl DefinitionIndex {
@@ -474,6 +507,8 @@ impl DefinitionIndex {
             extension_methods: self.extension_methods.clone(),
             worker_panics: self.worker_panics,
             respect_git_exclude: self.respect_git_exclude,
+            definition_generation: self.definition_generation,
+            input_fingerprints: self.input_fingerprints.clone(),
         }
     }
 
@@ -514,6 +549,9 @@ impl DefinitionIndex {
             extension_methods: head.extension_methods,
             worker_panics: head.worker_panics,
             respect_git_exclude: head.respect_git_exclude,
+            definition_generation: head.definition_generation,
+            input_fingerprints: head.input_fingerprints,
+            pending_definition_inputs: HashMap::new(),
         }
     }
 }
@@ -586,6 +624,7 @@ pub(crate) type DefChunk = (
     Vec<(usize, CodeStats)>,
     CSharpFileContribution,
     Vec<ParsedAngularComponentRecord>,
+    DefinitionInputFingerprint,
 );
 
 
@@ -600,6 +639,20 @@ pub struct ParsedFileResult {
     pub code_stats: Vec<(usize, CodeStats)>,
     pub extension_methods: HashMap<String, Vec<String>>,
     pub csharp_semantics: CSharpFileContribution,
+    pub(crate) angular_components: Vec<ParsedAngularComponentRecord>,
+    pub(crate) fingerprint: DefinitionInputFingerprint,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedAngularTemplateUpdate {
+    #[cfg_attr(not(feature = "lang-typescript"), allow(dead_code))]
+    pub path: PathBuf,
+    pub owner_key: String,
+    pub dependent_source_paths: Vec<PathBuf>,
+    pub template_children: Vec<String>,
+    pub unavailable_reason: Option<String>,
+    pub triggered_by_change: bool,
+    pub fingerprint: Option<DefinitionInputFingerprint>,
 }
 
 // ─── CLI Args ────────────────────────────────────────────────────────

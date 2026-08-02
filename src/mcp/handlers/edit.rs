@@ -1499,16 +1499,86 @@ enum SyncReindexScope {
     Skip(&'static str),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DefinitionPathEligibility {
+    Eligible,
+    Ineligible,
+    IndexUnavailable,
+}
+
+fn reindex_paths_contain(paths: &[PathBuf], path: &Path) -> bool {
+    let key = crate::path_identity_key(path);
+    paths
+        .iter()
+        .any(|candidate| crate::path_identity_key(candidate) == key)
+}
+
+
+fn definition_path_eligibility(
+    ctx: &HandlerContext,
+    path: &Path,
+) -> DefinitionPathEligibility {
+    let Some(def_index) = &ctx.def_index else {
+        return DefinitionPathEligibility::Ineligible;
+    };
+    if crate::mcp::watcher::matches_extensions(path, &ctx.def_extensions) {
+        return DefinitionPathEligibility::Eligible;
+    }
+    if !crate::mcp::watcher::is_angular_template_path(path) {
+        return DefinitionPathEligibility::Ineligible;
+    }
+    match def_index.read() {
+        Ok(index) if index
+            .template_owners
+            .contains_key(&crate::definitions::definition_input_key(path)) =>
+        {
+            DefinitionPathEligibility::Eligible
+        }
+        Ok(_) => DefinitionPathEligibility::Ineligible,
+        Err(_) => DefinitionPathEligibility::IndexUnavailable,
+    }
+}
+
+
 fn constrain_definition_scope(
     scope: SyncReindexScope,
-    definition_eligible: bool,
+    eligibility: DefinitionPathEligibility,
+    path: &Path,
+    server_extensions: &[String],
 ) -> SyncReindexScope {
-    match (scope, definition_eligible) {
-        (SyncReindexScope::Both, false) => SyncReindexScope::ContentOnly,
-        (SyncReindexScope::DefinitionsOnly, false) => {
+    match (scope, eligibility) {
+        (
+            SyncReindexScope::Skip("ignoredByIndexRules"),
+            DefinitionPathEligibility::Eligible | DefinitionPathEligibility::IndexUnavailable,
+        ) if crate::mcp::watcher::is_angular_template_path(path)
+            && !crate::mcp::watcher::matches_extensions(path, server_extensions) =>
+        {
+            SyncReindexScope::DefinitionsOnly
+        }
+        (_, DefinitionPathEligibility::Eligible | DefinitionPathEligibility::IndexUnavailable) => {
+            scope
+        }
+        (SyncReindexScope::Both, DefinitionPathEligibility::Ineligible) => {
+            SyncReindexScope::ContentOnly
+        }
+        (SyncReindexScope::DefinitionsOnly, DefinitionPathEligibility::Ineligible)
+            if crate::mcp::watcher::is_angular_template_path(path)
+                && !crate::mcp::watcher::matches_extensions(path, server_extensions) =>
+        {
+            SyncReindexScope::Skip("extensionNotIndexed")
+        }
+        (SyncReindexScope::DefinitionsOnly, DefinitionPathEligibility::Ineligible) => {
             SyncReindexScope::Skip("ignoredByIndexRules")
         }
-        _ => scope,
+        (
+            SyncReindexScope::Skip("ignoredByIndexRules"),
+            DefinitionPathEligibility::Ineligible,
+        ) if crate::mcp::watcher::is_angular_template_path(path)
+            && !crate::mcp::watcher::matches_extensions(path, server_extensions) =>
+        {
+            SyncReindexScope::Skip("extensionNotIndexed")
+        }
+        (SyncReindexScope::ContentOnly | SyncReindexScope::Skip(_), _) => scope,
     }
 }
 
@@ -1526,15 +1596,21 @@ fn classify_for_sync_reindex(
     if path_targets_git_internals(resolved) {
         return SyncReindexScope::Skip("insideGitDir");
     }
-    if !crate::mcp::watcher::matches_extensions(resolved, server_extensions) {
+    let content_extension_matches =
+        crate::mcp::watcher::matches_extensions(resolved, server_extensions);
+    if !content_extension_matches
+        && !crate::mcp::watcher::is_angular_template_path(resolved)
+    {
         return SyncReindexScope::Skip("extensionNotIndexed");
     }
-    if crate::mcp::watcher::is_included_by_index_rules(
-        canonical_server_dir,
-        resolved,
-        respect_git_exclude,
-        false,
-    ) {
+    if content_extension_matches
+        && crate::mcp::watcher::is_included_by_index_rules(
+            canonical_server_dir,
+            resolved,
+            respect_git_exclude,
+            false,
+        )
+    {
         return SyncReindexScope::Both;
     }
     if crate::mcp::watcher::is_included_by_index_rules(
@@ -2577,12 +2653,14 @@ fn handle_single_file_edit(
             &target.logical_path,
             ctx.respect_git_exclude,
         );
-        let definition_eligible = ctx.def_index.is_some()
-            && crate::mcp::watcher::matches_extensions(
-                &target.logical_path,
-                &ctx.def_extensions,
-            );
-        reindex_scope = constrain_definition_scope(reindex_scope, definition_eligible);
+        let definition_eligibility =
+            definition_path_eligibility(ctx, &target.logical_path);
+        reindex_scope = constrain_definition_scope(
+            reindex_scope,
+            definition_eligibility,
+            &target.logical_path,
+            &server_extensions,
+        );
         match reindex_scope {
             SyncReindexScope::Skip(reason) => {
                 response["contentIndexUpdated"] = json!(false);
@@ -2619,8 +2697,14 @@ fn handle_single_file_edit(
                     &[],
                     &server_extensions,
                 );
+                if stats.def_update_pending {
+                    response["reindexStatus"] = json!("pending");
+                }
                 response["contentIndexUpdated"] = json!(stats.content_updated > 0);
                 response["defIndexUpdated"] = json!(stats.def_updated > 0);
+                if let Some(generation) = stats.definition_generation {
+                    response["definitionGeneration"] = json!(generation);
+                }
                 if stats.content_updated > 0 {
                     super::grep::schedule_trigram_rebuild_after_edit(ctx);
                 }
@@ -2642,6 +2726,10 @@ fn handle_single_file_edit(
                 if stats.content_lock_poisoned || stats.def_lock_poisoned {
                     response["reindexWarning"] = json!(
                         "Index lock was poisoned — sync reindex partially failed; FS watcher will reconcile within 500ms."
+                    );
+                } else if stats.def_update_pending {
+                    response["reindexWarning"] = json!(
+                        "Definition inputs changed during both sync attempts; retry the edit or run xray_reindex_definitions."
                     );
                 }
                 // New file → invalidate file-list cache (xray_fast).
@@ -2892,12 +2980,14 @@ fn handle_multi_file_edit(
                 &target.logical_path,
                 ctx.respect_git_exclude,
             );
-            let definition_eligible = ctx.def_index.is_some()
-                && crate::mcp::watcher::matches_extensions(
-                    &target.logical_path,
-                    &ctx.def_extensions,
-                );
-            scope = constrain_definition_scope(scope, definition_eligible);
+            let definition_eligibility =
+                definition_path_eligibility(ctx, &target.logical_path);
+            scope = constrain_definition_scope(
+                scope,
+                definition_eligibility,
+                &target.logical_path,
+                &server_extensions,
+            );
             match scope {
                 SyncReindexScope::Both => {
                     content_eligible_paths.push(target.logical_path.clone());
@@ -3046,7 +3136,20 @@ fn handle_multi_file_edit(
                 scope @ (SyncReindexScope::Both
                 | SyncReindexScope::ContentOnly
                 | SyncReindexScope::DefinitionsOnly) => {
-                    file_result["reindexStatus"] = json!("completed");
+                    let definition_pending = matches!(
+                        scope,
+                        SyncReindexScope::Both | SyncReindexScope::DefinitionsOnly
+                    ) && batch_stats.as_ref().is_some_and(|stats| {
+                        reindex_paths_contain(
+                            &stats.def_pending_paths,
+                            &target.logical_path,
+                        )
+                    });
+                    file_result["reindexStatus"] = if definition_pending {
+                        json!("pending")
+                    } else {
+                        json!("completed")
+                    };
                     // Mirror the single-file path: derive `contentIndexUpdated`
                     // from the actual batch outcome, NOT from "we tried". When
                     // the content-index lock was poisoned, `reindex_paths_sync`
@@ -3063,7 +3166,12 @@ fn handle_multi_file_edit(
                     );
                     file_result["defIndexUpdated"] = json!(
                         matches!(scope, SyncReindexScope::Both | SyncReindexScope::DefinitionsOnly)
-                            && batch_stats.as_ref().is_some_and(|s| s.def_updated > 0)
+                            && batch_stats.as_ref().is_some_and(|stats| {
+                                reindex_paths_contain(
+                                    &stats.def_updated_paths,
+                                    &target.logical_path,
+                                )
+                            })
                     );
                     file_result["fileListInvalidated"] = json!(
                         matches!(scope, SyncReindexScope::Both | SyncReindexScope::ContentOnly)
@@ -3090,9 +3198,16 @@ fn handle_multi_file_edit(
             "defLockWaitMs": format!("{:.2}", stats.def_lock_wait_ms),
             "defUpdateMs": format!("{:.2}", stats.def_update_ms),
         });
+        if let Some(generation) = stats.definition_generation {
+            summary["definitionGeneration"] = json!(generation);
+        }
         if stats.content_lock_poisoned || stats.def_lock_poisoned {
             summary["reindexWarning"] = json!(
                 "Index lock was poisoned — sync reindex partially failed; FS watcher will reconcile within 500ms."
+            );
+        } else if stats.def_update_pending {
+            summary["reindexWarning"] = json!(
+                "Definition inputs changed during both sync attempts; retry the edit or run xray_reindex_definitions."
             );
         }
     }
