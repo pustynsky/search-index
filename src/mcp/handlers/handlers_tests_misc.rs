@@ -380,7 +380,7 @@ fn test_guidance_prefix_dispatch_after_truncation_recomputes_wire_metrics() {
     let ctx = HandlerContext {
         index: Arc::clone(&index),
         metrics: true,
-        max_response_bytes: 2_000,
+        max_response_bytes: 3_000,
         ..Default::default()
     };
 
