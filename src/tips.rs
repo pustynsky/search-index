@@ -830,7 +830,7 @@ pub const KNOWN_TOOL_NAMES: &[&str] = &[
 
 fn pagination_workflow(include_call_tree_nodes: bool) -> Value {
     let mut workflow = json!({
-        "appliesTo": ["xray_definitions", "xray_callers"],
+        "appliesTo": ["xray_definitions", "xray_callers", "xray_grep"],
         "steps": [
             "Send the first request with the desired query arguments and maxResults.",
             "If resultStatus.page.continuationToken is present, repeat the same tool call with every non-pagination argument unchanged and add that continuationToken.",
@@ -882,7 +882,7 @@ pub fn tool_help(tool_name: &str, def_extensions: &[String]) -> Result<Value, St
         "parameters": parameters,
     });
 
-    if matches!(tool_name, "xray_definitions" | "xray_callers") {
+    if matches!(tool_name, "xray_grep" | "xray_definitions" | "xray_callers") {
         payload["paginationWorkflow"] = pagination_workflow(tool_name == "xray_callers");
     }
 

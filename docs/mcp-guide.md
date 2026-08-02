@@ -187,7 +187,8 @@ is appended to `summary.warnings[]`.
 
 Opt-out: pass `autoBalance=false` to keep the previous TF-IDF order verbatim.
 Override the cap: pass `maxOccurrencesPerTerm=N` (0..=10000). No effect on
-AND mode, regex, phrase, lineRegex, or single-term queries.
+AND mode, regex, phrase, lineRegex, or single-term queries. Auto-balance runs
+before cursor pagination, so every page traverses one stable balanced sequence.
 
 
 ## `xray_grep` — Content Search
@@ -195,6 +196,10 @@ AND mode, regex, phrase, lineRegex, or single-term queries.
 Search content index with TF-IDF ranking. A single exact-token request (`substring: false`) also uses a normalized file-stem signal; multi-term and other search modes keep their existing scoring. Supports multi-term (AND/OR), regex, phrase, and substring search. **Language-agnostic** — works with any text file indexed via `--ext` (C#, Rust, Python, JS/TS, XML, JSON, config, etc.).
 
 Substring search is **on by default** in MCP mode — compound identifiers like `IUserService`, `m_userService`, `UserServiceFactory` are automatically found when searching for `UserService`. Auto-disabled when `regex` or `phrase` is used. Use `"substring": false` for exact-token-only matching.
+
+All grep modes page files only after their final deterministic ranking and before line-preview formatting. `maxResults` is the page size (`0` means all remaining files). Repeat the same query with `continuationToken`, omit `offset`, and stop when the token is absent. Tokens are bound to the normalized query and content-index epoch. Byte fitting may return fewer files than requested; the next token advances by the number actually returned. `countOnly=true` remains a global aggregate response and rejects `offset` or `continuationToken`. `xray_grep` rejects `offset > ranked file count`; `offset == count` returns an empty terminal page.
+
+Ranking is TF-IDF descending then path ascending for token, token-regex, and substring modes; phrase and lineRegex use occurrences descending then path ascending; invert uses path ascending. Substring-OR auto-balance filters the full ranked sequence before pagination. If one file cannot fit with line details, the response drops `lineContent` and `lines`; if its metadata still cannot fit, `single_item_exceeds_response_budget` returns `isError=true` without advancing the offset.
 
 > **MCP ↔ CLI parameter name mapping:** MCP `mode: "and"` = CLI `--all`, MCP `substring: false` = CLI `--exact`, MCP `countOnly: true` = CLI `-c/--count`, MCP `showLines: true` = CLI `--show-lines`, MCP `contextLines` = CLI `-C/--context`. See [CLI Reference — `xray grep`](cli-reference.md#xray-grep--search-inverted-content-index) for CLI usage.
 
@@ -213,7 +218,9 @@ Substring search is **on by default** in MCP mode — compound identifiers like 
 | `substring`    | boolean | true    | Match within tokens (finds `IUserService` when searching `UserService`). Auto-disabled for regex/phrase. (CLI: `--exact` to disable) |
 | `showLines`    | boolean | false   | Include matching source lines in results (CLI: `--show-lines`)                                       |
 | `contextLines` | integer | 0       | Context lines before/after each match, requires `showLines` (CLI: `-C`)                              |
-| `maxResults`   | integer | 50      | Max results (0 = unlimited)                                                                          |
+| `maxResults`   | integer | 50      | Page size (0 = all remaining)                                                                        |
+| `offset`       | integer | 0       | Offset in the stable ranked file list; mutually exclusive with `continuationToken`                   |
+| `continuationToken` | string | —    | Snapshot-bound token from `resultStatus.page` for the next page                                      |
 | `excludeDir`   | array   | —       | Directory names to exclude                                                                           |
 | `exclude`      | array   | —       | File path substrings to exclude                                                                      |
 | `countOnly`    | boolean | false   | Return counts only — no file list (CLI: `-c/--count`)                                                |
@@ -611,7 +618,7 @@ Query multiple methods in a single call to reduce MCP round trips. Each method g
 - `maxTotalBodyLines` — shared across all methods
 - Response size auto-scales: `max(base, 32KB × N methods)`, capped at 128KB
 
-Definitions, top-level call-tree roots, and multi-method results are recoverable pages. `resultStatus.page` reports `unit`, `offset`, `returned`, `total`, `totalKnown`, `workspaceGeneration`, `indexEpoch`, `queryFingerprint`, `nextOffset`, and `continuationToken`. The token is bound to the normalized query and content/definition index epoch; watcher edits and reindex operations invalidate stale tokens. Byte fitting keeps complete structural entries after optional body stripping and advances by the number actually returned. If one complete item cannot fit, the tool returns `single_item_exceeds_response_budget` with `isError=true` and does not advance the offset.
+Definitions, ranked grep files, top-level call-tree roots, and multi-method results are recoverable pages. `resultStatus.page` reports `unit`, `offset`, `returned`, `total`, `totalKnown`, `workspaceGeneration`, `indexEpoch`, `queryFingerprint`, `nextOffset`, and `continuationToken`. The token is bound to the normalized query and content/definition index epoch; watcher edits and reindex operations invalidate stale tokens. Byte fitting keeps complete structural entries after optional body stripping and advances by the number actually returned. If one complete item cannot fit, the tool returns `single_item_exceeds_response_budget` with `isError=true` and does not advance the offset.
 
 Use `xray_help(tool="xray_definitions")` or `xray_help(tool="xray_callers")` for the pagination loop. Keep non-pagination arguments unchanged, pass the returned `continuationToken` without `offset`, and stop when the token is absent.
 

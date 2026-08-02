@@ -159,6 +159,7 @@ pub(crate) struct GrepSearchParams<'a> {
     pub show_lines: bool,
     pub context_lines: usize,
     pub max_results: usize,
+    pub page_request: super::utils::PageRequest,
     pub mode_and: bool,
     pub count_only: bool,
     pub search_start: Instant,
@@ -216,6 +217,7 @@ pub(crate) struct GrepSearchParams<'a> {
     /// truncated matches as non-matches). `apply_invert` applies this cap
     /// to the FINAL complement. `0` (the default) means no invert cap.
     pub invert_cap: usize,
+    pub invert: bool,
 }
 
 pub(crate) struct FileScoreEntry {
@@ -268,6 +270,105 @@ pub(crate) struct AutoBalanceInfo {
 /// Cap derivation: `user_cap` if provided, else `2 * second_max_occurrences`
 /// clamped to `[20, 100]` — small enough to keep the response focused, large
 /// enough that the dominant term's strongest hits still surface.
+#[derive(Debug, Clone)]
+struct GrepPage {
+    offset: usize,
+    returned: usize,
+    total: usize,
+}
+
+fn paginate_grep_results<T>(
+    results: &mut Vec<T>,
+    request: &super::utils::PageRequest,
+    max_results: usize,
+) -> Result<GrepPage, ToolCallResult> {
+    let total = results.len();
+    if request.offset > total {
+        return Err(ToolCallResult::error(format!(
+            "offset {} exceeds the ranked file count {}",
+            request.offset, total,
+        )));
+    }
+
+    let end = if max_results == 0 {
+        total
+    } else {
+        request.offset.saturating_add(max_results).min(total)
+    };
+    if request.offset > 0 {
+        results.drain(..request.offset);
+    }
+    results.truncate(end.saturating_sub(request.offset));
+
+    Ok(GrepPage {
+        offset: request.offset,
+        returned: results.len(),
+        total,
+    })
+}
+
+fn grep_page_value(
+    page: &GrepPage,
+    request: &super::utils::PageRequest,
+) -> Value {
+    let next_offset = page.offset.saturating_add(page.returned);
+    let mut page_json = json!({
+        "unit": "files",
+        "offset": page.offset,
+        "returned": page.returned,
+        "total": page.total,
+        "totalKnown": true,
+        "workspaceGeneration": request.workspace_generation,
+        "indexEpoch": request.index_epoch,
+        "queryFingerprint": request.query_fingerprint,
+    });
+    if page.returned > 0 && next_offset < page.total {
+        page_json["nextOffset"] = json!(next_offset);
+        page_json["continuationToken"] = json!(super::utils::continuation_token(
+            request.index_epoch,
+            next_offset,
+            &request.query_fingerprint,
+        ));
+    }
+    page_json
+}
+
+fn attach_grep_page(
+    mut result: ToolCallResult,
+    page: &GrepPage,
+    request: &super::utils::PageRequest,
+) -> ToolCallResult {
+    let Some(content) = result.content.first_mut() else {
+        return result;
+    };
+    let Ok(mut output) = serde_json::from_str::<Value>(&content.text) else {
+        return result;
+    };
+
+    output["resultStatus"]["page"] = grep_page_value(page, request);
+    if page.offset > 0
+        && let Some(reasons) = output["resultStatus"]["reasons"].as_array_mut()
+    {
+        reasons.retain(|reason| reason != "max_results");
+        if !reasons.iter().any(|reason| reason == "pagination") {
+            reasons.push(json!("pagination"));
+        }
+    }
+    content.text = json_to_string(&output);
+    result
+}
+
+fn finish_grep_page(
+    result: ToolCallResult,
+    page: Option<&GrepPage>,
+    request: &super::utils::PageRequest,
+) -> ToolCallResult {
+    match page {
+        Some(page) => attach_grep_page(result, page, request),
+        None => result,
+    }
+}
+
 pub(crate) fn apply_auto_balance(
     results: &mut Vec<FileScoreEntry>,
     term_count: usize,
@@ -840,13 +941,18 @@ fn apply_invert(
         }
         complement.push(file_path.clone());
     }
+    complement.sort();
     let total_complement = complement.len();
-    let cap = params.invert_cap;
-    let truncated = cap > 0 && total_complement > cap;
-    if truncated {
-        complement.truncate(cap);
-    }
+    let page = match paginate_grep_results(
+        &mut complement,
+        &params.page_request,
+        params.invert_cap,
+    ) {
+        Ok(page) => page,
+        Err(error) => return error,
+    };
     let shown_files = complement.len();
+    let truncated = page.offset > 0 || shown_files < total_complement;
 
     // 3. Replace files array with stripped `{path}` entries. apply_files_only
     //    runs afterwards in finalize_grep_output for the forward path, but the
@@ -904,13 +1010,16 @@ fn apply_invert(
         );
         // Mirror the standard `reasons` contract: empty when complete, list
         // `max_results` when the cap dropped some of the complement.
-        let reasons: Vec<Value> = if truncated {
+        let reasons: Vec<Value> = if page.offset > 0 {
+            vec![Value::String("pagination".to_string())]
+        } else if truncated {
             vec![Value::String("max_results".to_string())]
         } else {
             Vec::new()
         };
         rs.insert("reasons".to_string(), Value::Array(reasons));
     }
+    output["resultStatus"]["page"] = grep_page_value(&page, &params.page_request);
 
     content.text = json_to_string(&output);
     result
@@ -2776,15 +2885,22 @@ fn build_grep_response(
         // global regex scan this strategy exists to avoid. Interpret it together
         // with regexExpansion.accountingScope; result and ranking semantics do not
         // depend on this accounting-only denominator.
-        let mut file_obj = json!({
-            "path": r.file_path,
-            "score": (r.tf_idf * 10000.0).round() / 10000.0,
-            "occurrences": r.occurrences,
-            "termsMatched": format!("{}/{}", r.terms_matched, execution_terms.len()),
-            "lines": r.lines,
-        });
+        let mut file_obj = if params.files_only {
+            json!({
+                "path": r.file_path,
+                "occurrences": r.occurrences,
+            })
+        } else {
+            json!({
+                "path": r.file_path,
+                "score": (r.tf_idf * 10000.0).round() / 10000.0,
+                "occurrences": r.occurrences,
+                "termsMatched": format!("{}/{}", r.terms_matched, execution_terms.len()),
+                "lines": r.lines,
+            })
+        };
 
-        if params.show_lines
+        if params.show_lines && !params.files_only
             && let Ok((content, _lossy)) = read_file_lossy(std::path::Path::new(&r.file_path)) {
                 // Index-staleness guard: verify posting lines against the
                 // freshly-read content and drop any the file no longer
@@ -3202,6 +3318,15 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         Ok(p) => p,
         Err(e) => return e,
     };
+    let page_request = match super::utils::parse_page_request(ctx, "xray_grep", args) {
+        Ok(request) => request,
+        Err(error) => return ToolCallResult::error(error),
+    };
+    if parsed.count_only && page_request.requested {
+        return ToolCallResult::error(
+            "offset and continuationToken cannot be combined with countOnly".to_string(),
+        );
+    }
 
     let search_start = Instant::now();
 
@@ -3278,6 +3403,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         show_lines: parsed.show_lines,
         context_lines: parsed.context_lines,
         max_results: parsed.max_results,
+        page_request: page_request.clone(),
         mode_and: parsed.mode_and,
         count_only: parsed.count_only,
         search_start,
@@ -3295,6 +3421,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         requested_mode,
         files_only: parsed.files_only,
         invert_cap: parsed.invert_cap,
+        invert: parsed.invert,
     };
     let file_scope = resolve_grep_file_scope(&index, &grep_params);
     let scope_coverage = if coverage_requested {
@@ -3424,9 +3551,14 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     let (mut results, total_files, total_occurrences) =
         finalize_grep_results(file_scores, parsed.mode_and, term_count_for_all);
 
-    if parsed.max_results > 0 {
-        results.truncate(parsed.max_results);
-    }
+    let page = if parsed.count_only || parsed.invert {
+        None
+    } else {
+        match paginate_grep_results(&mut results, &page_request, parsed.max_results) {
+            Ok(page) => Some(page),
+            Err(error) => return error,
+        }
+    };
 
     let execution_terms = regex_expansion.as_ref()
         .map(|expansion| expansion.expanded_tokens.as_slice())
@@ -3448,6 +3580,9 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         ctx,
         &grep_params,
     );
+    if let Some(page) = page.as_ref() {
+        result = attach_grep_page(result, page, &page_request);
+    }
 
     // Explain regex constructs whose meaning differs between token and line search.
     // Token regex has no whitespace; anchors apply to each indexed token.
@@ -3741,14 +3876,21 @@ fn build_substring_response(
     let json_start = Instant::now();
     let mut stale_line_files = 0usize;
     let files_json: Vec<Value> = results.iter().map(|r| {
-        let mut file_obj = json!({
-            "path": r.file_path,
-            "score": (r.tf_idf * 10000.0).round() / 10000.0,
-            "occurrences": r.occurrences,
-            "lines": r.lines,
-        });
+        let mut file_obj = if params.files_only {
+            json!({
+                "path": r.file_path,
+                "occurrences": r.occurrences,
+            })
+        } else {
+            json!({
+                "path": r.file_path,
+                "score": (r.tf_idf * 10000.0).round() / 10000.0,
+                "occurrences": r.occurrences,
+                "lines": r.lines,
+            })
+        };
 
-        if params.show_lines
+        if params.show_lines && !params.files_only
             && let Ok((content, _lossy)) = read_file_lossy(std::path::Path::new(&r.file_path)) {
                 // Index-staleness guard: verify posting lines against the
                 // freshly-read content and drop any the file no longer
@@ -3910,15 +4052,21 @@ fn handle_substring_search(
         None
     };
 
-    if params.max_results > 0 {
-        results.truncate(params.max_results);
-    }
+    let page = if params.count_only || params.invert {
+        None
+    } else {
+        match paginate_grep_results(&mut results, &params.page_request, params.max_results) {
+            Ok(page) => Some(page),
+            Err(error) => return error,
+        }
+    };
 
-    build_substring_response(
+    let result = build_substring_response(
         &results, &raw_terms, &all_matched_tokens, &warnings,
         total_files, total_occurrences, search_mode, index, ctx, params,
         auto_balance_info.as_ref(),
-    )
+    );
+    finish_grep_page(result, page.as_ref(), &params.page_request)
 }
 
 
@@ -3957,9 +4105,14 @@ fn handle_phrase_search(
             .then_with(|| a.file_path.cmp(&b.file_path))
     });
 
-    if max_results > 0 {
-        results.truncate(max_results);
-    }
+    let page = if count_only || params.invert {
+        None
+    } else {
+        match paginate_grep_results(&mut results, &params.page_request, max_results) {
+            Ok(page) => Some(page),
+            Err(error) => return error,
+        }
+    };
 
     let search_elapsed = search_start.elapsed();
     let search_mode = "phrase";
@@ -3989,13 +4142,20 @@ fn handle_phrase_search(
     }
 
     let files_json: Vec<Value> = results.iter().map(|r| {
-        let mut file_obj = json!({
-            "path": r.file_path,
-            "occurrences": r.lines.len(),
-            "lines": r.lines,
-        });
+        let mut file_obj = if params.files_only {
+            json!({
+                "path": r.file_path,
+                "occurrences": r.lines.len(),
+            })
+        } else {
+            json!({
+                "path": r.file_path,
+                "occurrences": r.lines.len(),
+                "lines": r.lines,
+            })
+        };
 
-        if show_lines {
+        if show_lines && !params.files_only {
             // Use cached content from phrase verification (no second read)
             if let Some(ref content) = r.content {
                 file_obj["lineContent"] = build_line_content_from_matches(content, &r.lines, context_lines);
@@ -4035,7 +4195,11 @@ fn handle_phrase_search(
         params,
     );
 
-    ToolCallResult::success(json_to_string(&output))
+    finish_grep_page(
+        ToolCallResult::success(json_to_string(&output)),
+        page.as_ref(),
+        &params.page_request,
+    )
 }
 
 /// Diagnostic counters for phrase search sub-timings.
@@ -4669,9 +4833,14 @@ fn handle_multi_phrase_search(
             .then_with(|| a.file_path.cmp(&b.file_path))
     });
 
-    if max_results > 0 {
-        results.truncate(max_results);
-    }
+    let page = if count_only || params.invert {
+        None
+    } else {
+        match paginate_grep_results(&mut results, &params.page_request, max_results) {
+            Ok(page) => Some(page),
+            Err(error) => return error,
+        }
+    };
 
     let search_elapsed = search_start.elapsed();
     let search_mode = if mode_and { "phrase-and" } else { "phrase-or" };
@@ -4701,12 +4870,19 @@ fn handle_multi_phrase_search(
     }
 
     let files_json: Vec<Value> = results.iter().map(|r| {
-        let mut file_obj = json!({
-            "path": r.file_path,
-            "occurrences": r.lines.len(),
-            "lines": r.lines,
-        });
-        if show_lines
+        let mut file_obj = if params.files_only {
+            json!({
+                "path": r.file_path,
+                "occurrences": r.lines.len(),
+            })
+        } else {
+            json!({
+                "path": r.file_path,
+                "occurrences": r.lines.len(),
+                "lines": r.lines,
+            })
+        };
+        if show_lines && !params.files_only
             && let Some(ref content) = r.content {
                 file_obj["lineContent"] = build_line_content_from_matches(content, &r.lines, context_lines);
             }
@@ -4743,7 +4919,11 @@ fn handle_multi_phrase_search(
         params,
     );
 
-    ToolCallResult::success(json_to_string(&output))
+    finish_grep_page(
+        ToolCallResult::success(json_to_string(&output)),
+        page.as_ref(),
+        &params.page_request,
+    )
 }
 
 /// Line-based regex search: applies the user-supplied regex to each line of
@@ -5156,9 +5336,14 @@ fn handle_line_regex_search_inner(
             .then_with(|| left.file_path.cmp(&right.file_path))
     });
 
-    if params.max_results > 0 {
-        results.truncate(params.max_results);
-    }
+    let page = if params.count_only || params.invert {
+        None
+    } else {
+        match paginate_grep_results(&mut results, &params.page_request, params.max_results) {
+            Ok(page) => Some(page),
+            Err(error) => return error,
+        }
+    };
     scan_telemetry.rank_truncate_duration = rank_truncate_start.elapsed();
 
     let search_elapsed = params.search_start.elapsed();
@@ -5222,18 +5407,25 @@ fn handle_line_regex_search_inner(
     }
 
     let response_build_start = Instant::now();
-    let line_content_truncated = if params.show_lines {
+    let line_content_truncated = if params.show_lines && !params.files_only {
         attach_line_regex_content_previews(&mut results)
     } else {
         false
     };
     let files_json: Vec<Value> = results.iter().map(|result| {
-        let mut file_obj = json!({
-            "path": result.file_path,
-            "occurrences": result.lines.len(),
-            "lines": result.lines,
-        });
-        if params.show_lines
+        let mut file_obj = if params.files_only {
+            json!({
+                "path": result.file_path,
+                "occurrences": result.lines.len(),
+            })
+        } else {
+            json!({
+                "path": result.file_path,
+                "occurrences": result.lines.len(),
+                "lines": result.lines,
+            })
+        };
+        if params.show_lines && !params.files_only
             && let Some(ref content) = result.content {
                 file_obj["lineContent"] = build_line_content_from_matches(content, &result.lines, params.context_lines);
             }
@@ -5319,7 +5511,11 @@ fn handle_line_regex_search_inner(
         ),
     );
 
-    ToolCallResult::success(response)
+    finish_grep_page(
+        ToolCallResult::success(response),
+        page.as_ref(),
+        &params.page_request,
+    )
 }
 
 /// Merge phrase results with OR semantics: union of all files.

@@ -2369,6 +2369,162 @@ fn test_recoverable_page_oversized_first_item_returns_bounded_error() {
     assert!(serde_json::to_vec(&truncated).unwrap().len() <= 800, "{truncated:#}");
 }
 
+#[test]
+fn test_recoverable_grep_page_strips_oversized_details_and_advances_cursor() {
+    let first_path = "a".repeat(200);
+    let second_path = "b".repeat(800);
+    let output = json!({
+        "files": [
+            {
+                "path": first_path,
+                "occurrences": 10_000,
+                "lines": (1..=10_000).collect::<Vec<u32>>(),
+                "lineContent": [{ "lines": ["x".repeat(20_000)] }],
+            },
+            {
+                "path": second_path,
+                "occurrences": 1,
+                "lines": [1],
+            },
+        ],
+        "summary": {
+            "totalFiles": 2,
+            "totalOccurrences": 10_001,
+        },
+        "resultStatus": {
+            "status": "partial",
+            "complete": false,
+            "safeForExhaustiveClaims": false,
+            "safeForExactSemantics": true,
+            "totalKnown": true,
+            "evidenceLevel": "snippet",
+            "reasons": ["max_results"],
+            "shown": { "files": 2, "occurrences": 10_001 },
+            "total": { "files": 2, "occurrences": 10_001 },
+            "omitted": { "files": 0, "occurrences": 0 },
+            "page": {
+                "unit": "files",
+                "offset": 0,
+                "returned": 2,
+                "total": 2,
+                "totalKnown": true,
+                "workspaceGeneration": 1,
+                "indexEpoch": 1,
+                "queryFingerprint": "c".repeat(64),
+            },
+        },
+    });
+
+    let truncated = truncate_large_response(output, 1_600);
+    assert!(truncated.get("error").is_none(), "{truncated:#}");
+    let files = truncated["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1, "{truncated:#}");
+    assert_eq!(files[0]["path"], first_path);
+    assert!(files[0].get("lines").is_none());
+    assert!(files[0].get("lineContent").is_none());
+    assert_eq!(files[0]["lineContentOmitted"], true);
+    assert_eq!(truncated["resultStatus"]["page"]["returned"], 1);
+    assert_eq!(truncated["resultStatus"]["page"]["nextOffset"], 1);
+    assert!(truncated["resultStatus"]["page"]["continuationToken"].is_string());
+    assert!(measure_json_size(&truncated) <= 1_600);
+}
+
+#[test]
+fn test_single_file_compact_page_does_not_advertise_missing_cursor() {
+    let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
+    let output = json!({
+        "execution": { "details": "x".repeat(500) },
+        "analysisContext": { "details": "x".repeat(500) },
+        "files": [{
+            "path": "only.rs",
+            "occurrences": 10_000,
+            "lines": (1..=10_000).collect::<Vec<u32>>(),
+            "lineContent": [{ "lines": ["x".repeat(20_000)] }],
+        }],
+        "summary": {
+            "totalFiles": 1,
+            "totalOccurrences": 10_000,
+            "nextStepHint": "Narrow the query with file or directory filters.",
+            "hint": "Use countOnly=true or narrow the query.",
+        },
+        "resultStatus": {
+            "status": "complete",
+            "complete": true,
+            "safeForExhaustiveClaims": true,
+            "safeForExactSemantics": true,
+            "totalKnown": true,
+            "evidenceLevel": "snippet",
+            "reasons": [],
+            "shown": { "files": 1, "occurrences": 10_000 },
+            "total": { "files": 1, "occurrences": 10_000 },
+            "omitted": { "files": 0, "occurrences": 0 },
+            "page": {
+                "unit": "files",
+                "offset": 0,
+                "returned": 1,
+                "total": 1,
+                "totalKnown": true,
+                "workspaceGeneration": 1,
+                "indexEpoch": 1,
+                "queryFingerprint": "d".repeat(64),
+            },
+        },
+    });
+
+    let truncated = truncate_large_response(output, 1_600);
+    assert!(truncated.get("error").is_none(), "{truncated:#}");
+    assert!(truncated["resultStatus"]["page"].get("continuationToken").is_none());
+    assert!(!truncated["summary"]["nextStepHint"]
+        .as_str()
+        .unwrap_or("")
+        .contains("continuationToken"));
+    assert!(truncated["summary"]["hint"].as_str().is_some());
+    assert!(measure_json_size(&truncated) <= 1_600);
+}
+
+#[test]
+fn test_empty_grep_page_truncation_preserves_provenance() {
+    let output = json!({
+        "files": [],
+        "summary": {
+            "totalFiles": 0,
+            "totalOccurrences": 0,
+            "termsSearched": (0..500)
+                .map(|index| format!("oversized_term_{index:03}_{}", "x".repeat(40)))
+                .collect::<Vec<_>>(),
+        },
+        "resultStatus": {
+            "status": "complete",
+            "complete": true,
+            "safeForExhaustiveClaims": true,
+            "safeForExactSemantics": true,
+            "totalKnown": true,
+            "evidenceLevel": "snippet",
+            "reasons": [],
+            "shown": { "files": 0, "occurrences": 0 },
+            "total": { "files": 0, "occurrences": 0 },
+            "omitted": { "files": 0, "occurrences": 0 },
+            "page": {
+                "unit": "files",
+                "offset": 0,
+                "returned": 0,
+                "total": 0,
+                "totalKnown": true,
+                "workspaceGeneration": 1,
+                "indexEpoch": 1,
+                "queryFingerprint": "e".repeat(64),
+            },
+        },
+    });
+    let original_bytes = measure_json_size(&output);
+
+    let truncated = truncate_large_response(output, 1_200);
+    assert!(truncated.get("error").is_none(), "{truncated:#}");
+    assert_eq!(truncated["summary"]["responseTruncated"], true);
+    assert_eq!(truncated["summary"]["originalResponseBytes"], original_bytes);
+    assert_eq!(truncated["resultStatus"]["status"], "partial");
+    assert!(truncated["resultStatus"]["truncationDetails"].is_array());
+}
 
 #[test]
 fn test_oversized_call_tree_node_pages_reconstruct_original_tree() {
@@ -2625,7 +2781,6 @@ fn test_recoverable_page_tiny_budgets_remain_bounded() {
         ToolCallResult::success("{}".to_string()),
         &HandlerContext::default(),
         std::time::Instant::now(),
-        0,
     );
     assert!(!unlimited.is_error);
 }

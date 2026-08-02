@@ -70,7 +70,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
     let mut tools = vec![
         ToolDefinition {
             name: "xray_grep".to_string(),
-            description: "Preferred for content/pattern search across indexed files. Use before built-in text/regex search for indexed file types. Search file contents using TF-IDF ranking plus a normalized file-stem signal for single exact-token requests. LANGUAGE-AGNOSTIC: works with any text file (C#, Rust, Python, JS/TS, XML, JSON, config, etc.). Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). Substring search is ON by default. Large results are auto-truncated to ~16KB (~4K tokens). Use countOnly=true or narrow with dir/ext/excludeDir for focused results. Multi-term OR/AND via array `terms` — each entry is one term; literal commas inside an entry are preserved.".to_string(),
+            description: "Preferred indexed-content search; use before built-in text/regex search. Language-agnostic. Supports token, substring (default), regex, phrase, and lineRegex modes; multi-term OR/AND; scope and exclusion filters. Results use deterministic relevance ranking. Pagination runs after ranking and substring-OR auto-balance but before previews; `maxResults` is page size and `continuationToken` advances by complete files actually returned. `countOnly` is global and rejects cursors. Narrow with dir/ext/excludeDir for focused results. Each `terms` array entry is preserved, including literal commas.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -112,7 +112,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "showLines": {
                         "type": "boolean",
-                        "description": "Include matching source lines in results (default: false)"
+                        "description": "Include source lines (default: false). Ignored by filesOnly/invert; preview reads and stale-line checks are skipped."
                     },
                     "contextLines": {
                         "type": "integer",
@@ -120,7 +120,15 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "maxResults": {
                         "type": "integer",
-                        "description": "Max results (0=unlimited, default: 50)"
+                        "description": "Page size after final stable ranking (default: 50, 0=all remaining)"
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Ranked file offset (default: 0). Cannot be combined with continuationToken or countOnly."
+                    },
+                    "continuationToken": {
+                        "type": "string",
+                        "description": "Next page: repeat this query with the token, omit offset; stop when absent. Cannot be combined with countOnly."
                     },
                     "excludeDir": {
                         "type": "array",
@@ -1392,16 +1400,17 @@ fn finalize_response(
         if tool_name == "xray_help" {
             utils::truncate_response_if_needed(result, effective_max)
         } else {
-            utils::inject_metrics(result, ctx, dispatch_start, effective_max)
+            utils::inject_metrics(result, ctx, dispatch_start)
         }
     } else {
         utils::truncate_response_if_needed(result, effective_max)
     };
 
-    utils::render_guidance_prefix_for_policy(
+    utils::render_guidance_prefix_for_policy_with_budget(
         result,
         tool_name,
         include_policy_reminder,
+        effective_max,
     )
 }
 

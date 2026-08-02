@@ -2020,13 +2020,14 @@ fn test_invert_caps_complement_at_user_max_results() {
         ],
         vec!["cs"],
     );
-    let result = handle_xray_grep(&ctx, &json!({
+    let args = json!({
         "terms": ["httpclient"],
         "substring": true,
         "invert": true,
         "ext": ["cs"],
         "maxResults": 2,
-    }));
+    });
+    let result = handle_xray_grep(&ctx, &args);
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFilesWithMatches"], json!(5));
@@ -2047,6 +2048,110 @@ fn test_invert_caps_complement_at_user_max_results() {
         "capped invert should cite max_results in reasons: {:?}", reasons);
     // And the actual files array honors the cap.
     assert_eq!(output["files"].as_array().unwrap().len(), 2);
+    assert_eq!(output["resultStatus"]["page"]["unit"], "files");
+    assert_eq!(output["resultStatus"]["page"]["offset"], 0);
+    assert_eq!(output["resultStatus"]["page"]["returned"], 2);
+    assert_eq!(output["resultStatus"]["page"]["total"], 5);
+    let first_paths: Vec<&str> = output["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(first_paths, vec!["C:/test/F.cs", "C:/test/G.cs"]);
+
+    let mut second_args = args.clone();
+    second_args["continuationToken"] =
+        output["resultStatus"]["page"]["continuationToken"].clone();
+    let second = handle_xray_grep(&ctx, &second_args);
+    assert!(!second.is_error);
+    let second_output: Value = serde_json::from_str(&second.content[0].text).unwrap();
+    let second_paths: Vec<&str> = second_output["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(second_paths, vec!["C:/test/H.cs", "C:/test/I.cs"]);
+    assert_eq!(second_output["resultStatus"]["page"]["offset"], 2);
+    assert!(second_output["resultStatus"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "pagination"));
+
+    let mut third_args = args;
+    third_args["continuationToken"] =
+        second_output["resultStatus"]["page"]["continuationToken"].clone();
+    let third = handle_xray_grep(&ctx, &third_args);
+    assert!(!third.is_error);
+    let third_output: Value = serde_json::from_str(&third.content[0].text).unwrap();
+    let third_paths: Vec<&str> = third_output["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|file| file["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(third_paths, vec!["C:/test/J.cs"]);
+    assert_eq!(third_output["resultStatus"]["page"]["offset"], 4);
+    assert!(third_output["resultStatus"]["page"].get("continuationToken").is_none());
+}
+
+#[test]
+fn test_invert_byte_fit_advances_by_returned_files() {
+    let mut file_names = vec!["C:/test/matched.cs".to_string()];
+    for index in 0..40 {
+        file_names.push(format!("C:/test/{index:03}_{}.cs", "x".repeat(120)));
+    }
+    let file_refs: Vec<&str> = file_names.iter().map(String::as_str).collect();
+    let mut expected = file_names[1..].to_vec();
+    expected.sort();
+    let mut ctx = make_grep_ctx(
+        vec![("needle", 0, vec![1])],
+        file_refs,
+        vec!["cs"],
+    );
+    ctx.metrics = true;
+    ctx.max_response_bytes = 2_000;
+    let mut args = json!({
+        "terms": ["needle"],
+        "substring": false,
+        "invert": true,
+        "ext": ["cs"],
+        "maxResults": 0,
+    });
+
+    let mut combined = Vec::new();
+    let mut expected_offset = 0usize;
+    let mut first_page = true;
+    loop {
+        let result = super::super::dispatch_tool(&ctx, "xray_grep", &args);
+        assert!(!result.is_error, "{}", result.content[0].text);
+        assert!(result.content[0].text.len() <= ctx.max_response_bytes);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let files = output["files"].as_array().unwrap();
+        let page = &output["resultStatus"]["page"];
+        assert_eq!(page["offset"], expected_offset);
+        assert_eq!(page["returned"], files.len());
+        assert_eq!(page["total"], expected.len());
+        if first_page {
+            assert!(!files.is_empty());
+            assert!(files.len() < expected.len(), "{output:#}");
+            first_page = false;
+        }
+        combined.extend(
+            files
+                .iter()
+                .map(|file| file["path"].as_str().unwrap().to_string()),
+        );
+        expected_offset += files.len();
+        let Some(token) = page["continuationToken"].as_str() else {
+            break;
+        };
+        args["continuationToken"] = json!(token);
+    }
+
+    assert_eq!(combined, expected);
 }
 
 #[test]

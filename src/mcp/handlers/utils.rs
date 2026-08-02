@@ -281,6 +281,8 @@ fn pagination_query_fingerprint(tool_name: &str, args: &Value) -> String {
     if let Some(object) = normalized_args.as_object_mut() {
         object.remove("offset");
         object.remove("continuationToken");
+        #[cfg(test)]
+        object.remove("__testTokenRegexStrategy");
     }
     let payload = canonicalize_json(json!({
         "tool": tool_name,
@@ -1761,10 +1763,98 @@ pub(crate) fn render_guidance_prefix_if_enabled(
     render_guidance_prefix_for_policy(result, tool_name, true)
 }
 
+fn merge_truncation_details(output: &Value, details: &mut Vec<String>) {
+    let Some(values) = output["resultStatus"]["truncationDetails"].as_array() else {
+        return;
+    };
+    for value in values.iter().filter_map(Value::as_str) {
+        if !details.iter().any(|detail| detail == value) {
+            details.push(value.to_string());
+        }
+    }
+}
+
+fn restore_truncation_provenance(
+    output: &mut Value,
+    details: &[String],
+    original_bytes: usize,
+) {
+    if details.is_empty() {
+        return;
+    }
+    if let Some(summary) = output.get_mut("summary") {
+        summary["originalResponseBytes"] = json!(original_bytes);
+        summary["truncationReason"] = json!(details.join("; "));
+    }
+    output["resultStatus"]["truncationDetails"] = json!(details);
+}
+
+fn fit_guidance_output(
+    mut output: Value,
+    max_bytes: usize,
+    prefix_bytes: usize,
+    has_response_bytes: bool,
+    has_estimated_tokens: bool,
+) -> (Value, bool) {
+    if max_bytes == 0 {
+        return (output, false);
+    }
+    let suffix_budget = max_bytes.saturating_sub(prefix_bytes).max(1);
+    let original_bytes = output["summary"]["originalResponseBytes"]
+        .as_u64()
+        .map(|bytes| bytes as usize)
+        .unwrap_or_else(|| measure_json_size(&output));
+    if let Some(summary) = output.get_mut("summary") {
+        if has_response_bytes {
+            summary["responseBytes"] = json!(max_bytes);
+        }
+        if has_estimated_tokens {
+            summary["estimatedTokens"] = json!(max_bytes / 4);
+        }
+    }
+    let truncation_applied = measure_json_size(&output) > suffix_budget;
+    let mut truncation_details = Vec::new();
+    merge_truncation_details(&output, &mut truncation_details);
+    let mut fit_budget = suffix_budget;
+    for _ in 0..8 {
+        output = truncate_large_response(output, fit_budget);
+        merge_truncation_details(&output, &mut truncation_details);
+        restore_truncation_provenance(&mut output, &truncation_details, original_bytes);
+        let fitted_size = measure_json_size(&output);
+        if fitted_size <= suffix_budget {
+            break;
+        }
+        let overflow = fitted_size.saturating_sub(suffix_budget).max(1);
+        let next_budget = fit_budget.saturating_sub(overflow).max(1);
+        if next_budget == fit_budget {
+            break;
+        }
+        fit_budget = next_budget;
+    }
+    let structured_error = is_response_truncation_error(&output, truncation_applied);
+    let residual_size_error = measure_json_size(&output) > suffix_budget;
+    (output, structured_error || residual_size_error)
+}
+
+#[cfg(test)]
 pub(crate) fn render_guidance_prefix_for_policy(
+    result: ToolCallResult,
+    tool_name: &str,
+    include_policy_reminder: bool,
+) -> ToolCallResult {
+    render_guidance_prefix_for_policy_with_budget(
+        result,
+        tool_name,
+        include_policy_reminder,
+        0,
+    )
+}
+
+pub(crate) fn render_guidance_prefix_for_policy_with_budget(
     result: ToolCallResult,
     _tool_name: &str,
     include_policy_reminder: bool,
+    max_bytes: usize,
 ) -> ToolCallResult {
     // Prefix presentation and policy cadence are independent. Every response is
     // budgeted with the policy present; off-cycle rendering removes it only from
@@ -1783,7 +1873,11 @@ pub(crate) fn render_guidance_prefix_for_policy(
     };
 
     let Some(summary) = output.get_mut("summary").and_then(|v| v.as_object_mut()) else {
-        return result;
+        return if prefix_enabled {
+            truncate_response_if_needed(result, max_bytes)
+        } else {
+            result
+        };
     };
 
     let next_step_hint = summary
@@ -1819,9 +1913,18 @@ pub(crate) fn render_guidance_prefix_for_policy(
         summary.remove("policyReminder");
     }
 
-    if !prefix_enabled
-        || (next_step_hint.is_none() && !has_policy_reminder && unknown_args_warning.is_none())
-    {
+    if !prefix_enabled {
+        let (output, force_error) = if has_response_bytes || has_estimated_tokens {
+            fit_guidance_output(
+                output,
+                max_bytes,
+                0,
+                has_response_bytes,
+                has_estimated_tokens,
+            )
+        } else {
+            (output, false)
+        };
         let text = serialize_guidance_response(
             output,
             None,
@@ -1829,7 +1932,29 @@ pub(crate) fn render_guidance_prefix_for_policy(
             has_estimated_tokens,
         );
         let rendered = ToolCallResult::success(text);
-        return if was_error {
+        return if was_error || force_error {
+            ToolCallResult { is_error: true, ..rendered }
+        } else {
+            rendered
+        };
+    }
+
+    if next_step_hint.is_none() && !has_policy_reminder && unknown_args_warning.is_none() {
+        let (output, force_error) = fit_guidance_output(
+            output,
+            max_bytes,
+            0,
+            has_response_bytes,
+            has_estimated_tokens,
+        );
+        let text = serialize_guidance_response(
+            output,
+            None,
+            has_response_bytes,
+            has_estimated_tokens,
+        );
+        let rendered = ToolCallResult::success(text);
+        return if was_error || force_error {
             ToolCallResult { is_error: true, ..rendered }
         } else {
             rendered
@@ -1839,35 +1964,73 @@ pub(crate) fn render_guidance_prefix_for_policy(
     summary.remove("nextStepHint");
     summary.remove("policyReminder");
 
-    let mut guidance_lines = Vec::new();
-    if let Some(warning) = unknown_args_warning {
-        guidance_lines.push(format!("⚠ {}", warning));
-    }
-    if let Some(hint) = next_step_hint {
-        guidance_lines.push(format!("→ {}", hint));
-    }
-    if has_policy_reminder {
-        guidance_lines.push(COMPACT_POLICY_GUIDANCE.to_string());
-    }
-
-    let guidance_prefix = if has_policy_reminder {
-        format!(
-            "{}\n{}\n{}",
-            GUIDANCE_PREFIX_HEADER,
-            guidance_lines.join("\n"),
-            GUIDANCE_PREFIX_FOOTER
-        )
-    } else {
-        guidance_lines.join("\n")
+    let build_guidance_prefix = |include_warning: bool, include_next_step: bool| {
+        let mut guidance_lines = Vec::new();
+        if include_warning
+            && let Some(warning) = unknown_args_warning.as_deref()
+        {
+            guidance_lines.push(format!("⚠ {}", warning));
+        }
+        if include_next_step
+            && let Some(hint) = next_step_hint.as_deref()
+        {
+            guidance_lines.push(format!("→ {}", hint));
+        }
+        if has_policy_reminder {
+            guidance_lines.push(COMPACT_POLICY_GUIDANCE.to_string());
+            format!(
+                "{}\n{}\n{}",
+                GUIDANCE_PREFIX_HEADER,
+                guidance_lines.join("\n"),
+                GUIDANCE_PREFIX_FOOTER
+            )
+        } else {
+            guidance_lines.join("\n")
+        }
     };
+    let fit_with_prefix = |guidance_prefix: &str| {
+        fit_guidance_output(
+            output.clone(),
+            max_bytes,
+            if guidance_prefix.is_empty() {
+                0
+            } else {
+                guidance_prefix.len().saturating_add(2)
+            },
+            has_response_bytes,
+            has_estimated_tokens,
+        )
+    };
+
+    let exceeds_wire_budget = |output: &Value, guidance_prefix: &str| {
+        max_bytes > 0
+            && measure_json_size(output)
+                .saturating_add(if guidance_prefix.is_empty() {
+                    0
+                } else {
+                    guidance_prefix.len().saturating_add(2)
+                })
+                > max_bytes
+    };
+    let mut guidance_prefix = build_guidance_prefix(true, true);
+    let (mut output, mut force_error) = fit_with_prefix(&guidance_prefix);
+    if exceeds_wire_budget(&output, &guidance_prefix) && unknown_args_warning.is_some() {
+        guidance_prefix = build_guidance_prefix(false, true);
+        (output, force_error) = fit_with_prefix(&guidance_prefix);
+    }
+    if exceeds_wire_budget(&output, &guidance_prefix) && next_step_hint.is_some() {
+        guidance_prefix = build_guidance_prefix(false, false);
+        (output, force_error) = fit_with_prefix(&guidance_prefix);
+    }
+    let prefix = (!guidance_prefix.is_empty()).then_some(guidance_prefix.as_str());
     let text = serialize_guidance_response(
         output,
-        Some(&guidance_prefix),
+        prefix,
         has_response_bytes,
         has_estimated_tokens,
     );
     let rendered = ToolCallResult::success(text);
-    if was_error {
+    if was_error || force_error {
         ToolCallResult {
             is_error: true,
             ..rendered
@@ -2503,6 +2666,7 @@ fn recoverable_page_array_key(output: &Value) -> Option<&'static str> {
         "definitions" => "definitions",
         "topLevelRoots" => "callTree",
         "methods" => "results",
+        "files" => "files",
         _ => return None,
     };
     output.get(key).and_then(Value::as_array).map(|_| key)
@@ -2546,6 +2710,15 @@ fn update_recoverable_page(output: &mut Value, array_key: &str, keep: usize) {
         summary["returned"] = json!(keep);
     }
 
+    let shown_file_occurrences = (array_key == "files").then(|| {
+        output
+            .get("files")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(|file| file.get("occurrences").and_then(Value::as_u64))
+            .sum::<u64>()
+    });
     let shown_nodes = match array_key {
         "callTree" => output
             .get("callTree")
@@ -2570,6 +2743,15 @@ fn update_recoverable_page(output: &mut Value, array_key: &str, keep: usize) {
                 status["omitted"]["definitions"] =
                     json!(total_definitions.saturating_sub(keep as u64));
             }
+        } else if let Some(shown_occurrences) = shown_file_occurrences {
+            let total = status.get("total").cloned().unwrap_or_else(|| {
+                json!({ "files": total, "occurrences": shown_occurrences })
+            });
+            add_collection_accounting(
+                status,
+                json!({ "files": keep, "occurrences": shown_occurrences }),
+                total,
+            );
         } else if let Some(shown_nodes) = shown_nodes {
             status["shown"]["nodes"] = json!(shown_nodes);
             if let Some(total_nodes) = status["total"]["nodes"].as_u64() {
@@ -2629,71 +2811,165 @@ fn oversized_page_item_error(output: &Value, max_bytes: usize) -> Value {
     result
 }
 
-fn fit_recoverable_page(
-    output: Value,
+fn compact_response_text(text: &str, max_chars: usize) -> Option<String> {
+    let mut chars = text.chars();
+    let compact: String = chars.by_ref().take(max_chars).collect();
+    chars.next().map(|_| format!("{compact}..."))
+}
+
+fn try_fit_recoverable_page(
+    output: &Value,
     array_key: &str,
     max_bytes: usize,
     reasons: &[String],
     original_bytes: usize,
-) -> Value {
+) -> Option<Value> {
     let original_count = output
         .get(array_key)
         .and_then(Value::as_array)
         .map(Vec::len)
         .unwrap_or(0);
     if original_count == 0 {
-        return output;
+        return Some(output.clone());
     }
 
-    let build_candidate = |keep: usize, measurement: bool| {
+    let build_candidate = |keep: usize, compact_hint: bool| {
         let mut candidate = output.clone();
         update_recoverable_page(&mut candidate, array_key, keep);
-        if measurement
-            && candidate["resultStatus"]["page"].get("continuationToken").is_none()
-        {
-            let (offset, epoch, fingerprint) = {
-                let page = &candidate["resultStatus"]["page"];
-                (
-                    page["offset"].as_u64().unwrap_or(0) as usize,
-                    page["indexEpoch"].as_u64().unwrap_or(0),
-                    page["queryFingerprint"].as_str().unwrap_or("").to_string(),
-                )
-            };
-            candidate["resultStatus"]["page"]["nextOffset"] = json!(offset + keep);
-            candidate["resultStatus"]["page"]["continuationToken"] =
-                json!(continuation_token(epoch, offset + keep, &fingerprint));
-        }
         let mut candidate_reasons = reasons.to_vec();
         candidate_reasons.push(format!(
             "byte-fitted '{}' page from {} to {} complete entries",
             array_key, original_count, keep,
         ));
+        let supports_continuation = candidate["resultStatus"]["page"]["unit"] == "files"
+            && candidate["resultStatus"]["page"]["queryFingerprint"].is_string()
+            && candidate["resultStatus"]["page"]["continuationToken"].is_string();
+        if array_key == "files" && compact_hint {
+            let removed_execution = candidate
+                .as_object_mut()
+                .and_then(|object| object.remove("execution"))
+                .is_some();
+            let removed_analysis_context = candidate
+                .as_object_mut()
+                .and_then(|object| object.remove("analysisContext"))
+                .is_some();
+            let removed_next_queries = candidate
+                .as_object_mut()
+                .and_then(|object| object.remove("recommendedNextQueries"))
+                .is_some();
+            let adjusted_summary_hints = candidate
+                .get_mut("summary")
+                .and_then(Value::as_object_mut)
+                .is_some_and(|summary| {
+                    let compacted_warning = summary
+                        .get("unknownArgsWarning")
+                        .and_then(Value::as_str)
+                        .and_then(|warning| compact_response_text(warning, 64));
+                    let warning_changed = if let Some(compacted_warning) = compacted_warning {
+                        summary.insert("unknownArgsWarning".to_string(), json!(compacted_warning));
+                        true
+                    } else {
+                        false
+                    };
+                    let unknown_args_changed = summary
+                        .get_mut("unknownArgs")
+                        .and_then(Value::as_array_mut)
+                        .is_some_and(|unknown_args| {
+                            let mut changed = false;
+                            for unknown_arg in unknown_args {
+                                let Some(object) = unknown_arg.as_object_mut() else {
+                                    continue;
+                                };
+                                for field in ["key", "hint"] {
+                                    if let Some(value) = object.get(field).and_then(Value::as_str)
+                                        && let Some(compact) = compact_response_text(value, 64)
+                                    {
+                                        object.insert(field.to_string(), json!(compact));
+                                        changed = true;
+                                    }
+                                }
+                            }
+                            changed
+                        });
+                    let guidance_changed = if guidance_prefix_enabled() {
+                        let compacted_next_step = summary
+                            .get("nextStepHint")
+                            .and_then(Value::as_str)
+                            .and_then(|hint| {
+                                if supports_continuation {
+                                    Some("Use continuationToken.".to_string())
+                                } else {
+                                    compact_response_text(hint, 96)
+                                }
+                            });
+                        if let Some(compacted_next_step) = compacted_next_step {
+                            summary.insert("nextStepHint".to_string(), json!(compacted_next_step));
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        let removed_policy = summary.remove("policyReminder").is_some();
+                        let removed_next_step = summary.remove("nextStepHint").is_some();
+                        removed_policy || removed_next_step
+                    };
+                    warning_changed || unknown_args_changed || guidance_changed
+                });
+            if removed_execution
+                || removed_analysis_context
+                || removed_next_queries
+                || adjusted_summary_hints
+            {
+                candidate_reasons.push("compacted response metadata".to_string());
+            }
+            if supports_continuation && candidate_reasons.len() > 3 {
+                let first_reason = candidate_reasons.first().cloned();
+                let page_reason = candidate_reasons
+                    .iter()
+                    .rev()
+                    .find(|reason| reason.starts_with("byte-fitted"))
+                    .cloned();
+                candidate_reasons.clear();
+                candidate_reasons.extend(first_reason);
+                candidate_reasons.extend(page_reason);
+                candidate_reasons.push("compacted response metadata".to_string());
+            }
+        }
         inject_truncation_metadata(&mut candidate, &candidate_reasons, original_bytes);
+        if array_key == "files" && compact_hint && supports_continuation
+            && let Some(summary) = candidate
+                .get_mut("summary")
+                .and_then(Value::as_object_mut)
+        {
+            summary.remove("hint");
+        }
         candidate
     };
 
-    let mut low = 1usize;
-    let mut high = original_count;
-    let mut best_keep: Option<usize> = None;
-    while low <= high {
-        let midpoint = low + (high - low) / 2;
-        let candidate = build_candidate(midpoint, true);
-        if measure_json_size(&candidate) <= max_bytes {
-            best_keep = Some(midpoint);
-            low = midpoint.saturating_add(1);
-        } else {
-            high = midpoint.saturating_sub(1);
+    let find_best = |compact_hint: bool| {
+        let mut low = 1usize;
+        let mut high = original_count;
+        let mut best_keep: Option<usize> = None;
+        while low <= high {
+            let midpoint = low + (high - low) / 2;
+            let candidate = build_candidate(midpoint, compact_hint);
+            if measure_json_size(&candidate) <= max_bytes {
+                best_keep = Some(midpoint);
+                low = midpoint.saturating_add(1);
+            } else {
+                high = midpoint.saturating_sub(1);
+            }
         }
-    }
+        best_keep
+    };
 
-    if let Some(keep) = best_keep {
-        build_candidate(keep, false)
-    } else if array_key == "callTree" {
-        fit_call_tree_node_page(&output, max_bytes, reasons, original_bytes)
-            .unwrap_or_else(|| oversized_page_item_error(&output, max_bytes))
-    } else {
-        oversized_page_item_error(&output, max_bytes)
-    }
+    let best_keep = find_best(false).map(|keep| (keep, false)).or_else(|| {
+        (array_key == "files")
+            .then(|| find_best(true))
+            .flatten()
+            .map(|keep| (keep, true))
+    });
+    best_keep.map(|(keep, compact_hint)| build_candidate(keep, compact_hint))
 }
 
 
@@ -2739,6 +3015,31 @@ fn phase_truncate_largest_array(output: &mut Value, max_bytes: usize, reasons: &
     }
 }
 
+fn fit_recoverable_page(
+    output: Value,
+    array_key: &str,
+    max_bytes: usize,
+    reasons: &[String],
+    original_bytes: usize,
+) -> Value {
+    if let Some(fitted) = try_fit_recoverable_page(
+        &output,
+        array_key,
+        max_bytes,
+        reasons,
+        original_bytes,
+    ) {
+        return fitted;
+    }
+    if array_key == "callTree" {
+        fit_call_tree_node_page(&output, max_bytes, reasons, original_bytes)
+            .unwrap_or_else(|| oversized_page_item_error(&output, max_bytes))
+    } else {
+        oversized_page_item_error(&output, max_bytes)
+    }
+}
+
+
 pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Value {
     if max_bytes == 0 {
         return output;
@@ -2749,6 +3050,11 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
         .and_then(|status| status.get("page"))
         .and_then(|page| page.get("nodeOffset"))
         .is_some_and(Value::is_number);
+    let recoverable_array_key = recoverable_page_array_key(&output);
+    let recoverable_array_has_items = recoverable_array_key
+        .and_then(|key| output.get(key))
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty());
     if initial_size <= max_bytes && !node_page_requested {
         return output;
     }
@@ -2767,10 +3073,43 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
         return output;
     }
 
-    phase_reduce_file_count(&mut output, max_bytes, &mut reasons);
-    if measure_json_size(&output) <= max_bytes && !node_page_requested {
-        inject_truncation_metadata(&mut output, &reasons, initial_size);
-        return output;
+    if recoverable_array_key == Some("files") {
+        let compacted_policy_marker = guidance_prefix_enabled()
+            && output
+                .get_mut("summary")
+                .and_then(Value::as_object_mut)
+                .is_some_and(|summary| {
+                    if summary.get("policyReminder").is_some() {
+                        summary.insert("policyReminder".to_string(), json!("1"));
+                        true
+                    } else {
+                        false
+                    }
+                });
+        if compacted_policy_marker {
+            reasons.push("compacted policy reminder marker".to_string());
+        }
+        if measure_json_size(&output) <= max_bytes && !node_page_requested {
+            inject_truncation_metadata(&mut output, &reasons, initial_size);
+            return output;
+        }
+        if recoverable_array_has_items
+            && let Some(fitted) = try_fit_recoverable_page(
+                &output,
+                "files",
+                max_bytes,
+                &reasons,
+                initial_size,
+            )
+        {
+            return fitted;
+        }
+    } else {
+        phase_reduce_file_count(&mut output, max_bytes, &mut reasons);
+        if measure_json_size(&output) <= max_bytes && !node_page_requested {
+            inject_truncation_metadata(&mut output, &reasons, initial_size);
+            return output;
+        }
     }
 
     phase_remove_lines_arrays(&mut output, &mut reasons);
@@ -2796,7 +3135,9 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
             .unwrap_or_else(|| oversized_page_item_error(&output, max_bytes));
     }
 
-    if let Some(array_key) = recoverable_page_array_key(&output) {
+    if let Some(array_key) = recoverable_array_key
+        && (array_key != "files" || recoverable_array_has_items)
+    {
         return fit_recoverable_page(output, array_key, max_bytes, &reasons, initial_size);
     }
 
@@ -2903,9 +3244,9 @@ pub(crate) fn truncate_response_if_needed(result: ToolCallResult, max_bytes: usi
 
 /// Inject performance metrics into a successful tool response.
 /// Parses the JSON text, adds searchTimeMs/responseBytes/estimatedTokens/indexFiles/indexTokens
-/// to the "summary" object (if present), then re-serializes.
-/// Also applies response size truncation to keep output within LLM context budgets.
-pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start: Instant, max_bytes: usize) -> ToolCallResult {
+/// to the "summary" object (if present), then re-serializes. The final response
+/// renderer applies the exact wire budget after moving guidance fields.
+pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start: Instant) -> ToolCallResult {
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
     let was_error = result.is_error;
 
@@ -2934,17 +3275,8 @@ pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start
             }
         }
 
-        let truncation_budget = if max_bytes > 128 {
-            max_bytes - 128
-        } else {
-            max_bytes
-        };
-        let truncation_applied =
-            truncation_budget > 0 && measure_json_size(&output) > truncation_budget;
-        output = truncate_large_response(output, truncation_budget);
-        let force_error = is_response_truncation_error(&output, truncation_applied);
-
-        // Measure response size after truncation.
+        // Measure response size before the final guidance-aware fit.
+        // The renderer applies the exact wire budget after policy fields move.
         let bytes = json_to_string(&output).len();
         if let Some(summary) = output.get_mut("summary") {
             summary["responseBytes"] = json!(bytes);
@@ -2952,7 +3284,7 @@ pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start
         }
 
         ToolCallResult {
-            is_error: was_error || force_error,
+            is_error: was_error,
             ..ToolCallResult::success(json_to_string(&output))
         }
     } else {

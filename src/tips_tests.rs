@@ -1597,9 +1597,9 @@ fn test_tool_help_xray_edit_includes_decision_card() {
 }
 
 #[test]
-fn test_tool_help_definitions_and_callers_explain_pagination_loop() {
+fn test_tool_help_paged_tools_explain_pagination_loop() {
     let ext = vec!["rs".to_string()];
-    for tool in ["xray_definitions", "xray_callers"] {
+    for tool in ["xray_grep", "xray_definitions", "xray_callers"] {
         let help = tool_help(tool, &ext).unwrap();
         let workflow = &help["paginationWorkflow"];
         assert!(workflow["steps"].as_array().is_some_and(|steps| steps.len() == 3));
@@ -1617,6 +1617,11 @@ fn test_tool_help_definitions_and_callers_explain_pagination_loop() {
 
     let catalog = render_json(&ext);
     assert_eq!(catalog["paginationWorkflow"]["appliesTo"][0], "xray_definitions");
+    assert!(catalog["paginationWorkflow"]["appliesTo"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|tool| tool == "xray_grep"));
 }
 
 

@@ -255,6 +255,58 @@ fn test_policy_reminder_always_frames_consecutive_responses() {
 }
 
 #[test]
+fn test_prefix_mode_still_bounds_oversized_xray_info_without_guidance_fields() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _mode = PolicyReminderModeOverrideGuard::set(Some(
+        utils::PolicyReminderMode::Off,
+    ));
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp_dir.path());
+    let mut files = Vec::new();
+    for index in 0..60 {
+        let name = format!("metadata_{index:03}_{}.txt", "x".repeat(80));
+        std::fs::write(root.join(&name), "x\n").unwrap();
+        files.push(name);
+    }
+    let ctx = super::handlers_test_utils::HandlerContextBuilder::new()
+        .with_server_dir(root.to_string_lossy().to_string())
+        .with_server_ext("txt")
+        .with_metrics(true)
+        .with_max_response_bytes(2_000)
+        .build();
+
+    for prefix_enabled in [true, false] {
+        let _prefix = GuidancePrefixOverrideGuard::set(Some(prefix_enabled));
+        let result = dispatch_tool(&ctx, "xray_info", &json!({ "file": files }));
+        assert!(
+            !result.is_error,
+            "prefix_enabled={prefix_enabled}: {}",
+            result.content[0].text,
+        );
+        let text = &result.content[0].text;
+        assert!(text.len() <= ctx.max_response_bytes, "{} > {}", text.len(), ctx.max_response_bytes);
+        let output = assert_json_without_guidance_prefix(text);
+        assert_eq!(output["summary"]["responseTruncated"], true);
+        assert!(output["summary"]["originalResponseBytes"].as_u64().unwrap() > 2_000);
+        assert!(output["summary"]["truncationReason"]
+            .as_str()
+            .unwrap()
+            .contains("reduced files from 60"));
+        assert!(output["resultStatus"]["truncationDetails"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|detail| detail.as_str().unwrap().contains("reduced files from 60")));
+        assert!(!output["summary"]["hint"]
+            .as_str()
+            .unwrap_or("")
+            .contains("continuationToken"));
+        assert_eq!(output["summary"]["responseBytes"], text.len());
+        assert!(output["files"].as_array().unwrap().len() < 60);
+    }
+}
+
+#[test]
 fn test_guidance_prefix_applies_to_previously_excluded_tools_through_dispatch() {
     // 2026-04-30: previously these four tools short-circuited the guidance-prefix
     // pipeline and leaked summary.policyReminder into JSON. Contract is now
@@ -332,17 +384,25 @@ fn test_guidance_prefix_dispatch_after_truncation_recomputes_wire_metrics() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+    let unknown_key = format!("oversizedUnknown{}", "x".repeat(4_000));
+    let mut args = json!({
         "terms": ["targettoken"],
         "maxResults": 0,
         "substring": false
-    }));
-    assert!(!result.is_error);
+    });
+    args[unknown_key.clone()] = json!(15);
+    let result = dispatch_tool(&ctx, "xray_grep", &args);
+    assert!(!result.is_error, "{}", result.content[0].text);
 
     let text = &result.content[0].text;
+    assert!(text.len() <= ctx.max_response_bytes, "{} > {}", text.len(), ctx.max_response_bytes);
     let (prefix, output) = split_guidance_prefixed_response(text);
     assert!(prefix.starts_with("=== XRAY AGENT GUIDANCE ==="));
     let summary = output["summary"].as_object().unwrap();
+    assert!(summary["unknownArgsWarning"]
+        .as_str()
+        .unwrap()
+        .contains("oversizedUnknown"));
     assert!(!summary.contains_key("policyReminder"));
     assert!(!summary.contains_key("nextStepHint"));
     assert_eq!(summary["responseTruncated"], true);
