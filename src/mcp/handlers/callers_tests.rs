@@ -1471,7 +1471,8 @@ fn test_callers_template_navigation_next_step_hint_points_to_result_file() {
     let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
         "method": ["child-comp"],
         "direction": "up",
-        "depth": 3
+        "depth": 3,
+        "ext": ["ts"]
     }));
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1501,7 +1502,8 @@ fn test_callers_next_step_hint_template_navigation_accepts_known_non_hyphen_sele
     let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
         "method": ["menu"],
         "direction": "up",
-        "depth": 3
+        "depth": 3,
+        "ext": ["ts"]
     }));
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1520,7 +1522,8 @@ fn test_callers_template_navigation_known_selector_with_no_parents_does_not_fall
     let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
         "method": ["menu"],
         "direction": "up",
-        "depth": 3
+        "depth": 3,
+        "ext": ["ts"]
     }));
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1534,6 +1537,536 @@ fn test_callers_template_navigation_known_selector_with_no_parents_does_not_fall
         "known selector should stay in template-navigation mode: {}",
         hint
     );
+}
+
+
+#[test]
+fn test_callers_non_typescript_component_attribute_does_not_trigger_template_navigation() {
+    let mut definition = class_def(0, "Widget", vec![]);
+    definition.attributes = vec!["Component(name: \"widget\")".to_string()];
+    let mut def_idx = make_def_index(vec![definition], HashMap::new());
+    def_idx.files[0] = "src/Widget.cs".to_string();
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["Widget"],
+        "direction": "up",
+        "depth": 1,
+        "ext": ["cs"]
+    }));
+    assert!(!result.is_error);
+    let value: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert!(value["summary"].get("templateNavigation").is_none(), "{value}");
+}
+
+
+#[test]
+fn test_is_known_angular_component_ignores_selector_name_alias() {
+    let definitions = vec![angular_class_def(0, "RootComp", "root-selector")];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.name_index.insert("root-selector".to_string(), vec![0]);
+    def_idx.selector_index.insert("root-selector".to_string(), vec![0]);
+
+    assert!(!is_known_angular_component("root-selector", &def_idx));
+    assert!(is_known_angular_selector("root-selector", &def_idx));
+}
+
+#[test]
+fn test_angular_component_selector_legacy_fallback_requires_unique_selector() {
+    let definitions = vec![angular_class_def(0, "RootComp", "root-selector")];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.selector_index.insert("first-selector".to_string(), vec![0]);
+    def_idx.selector_index.insert("second-selector".to_string(), vec![0]);
+
+    assert_eq!(angular_component_selector(0, &def_idx), None);
+}
+
+
+#[test]
+fn test_callers_template_navigation_up_by_class_matches_selector() {
+    let definitions = vec![
+        angular_class_def(0, "ParentComp", "parent-comp"),
+        angular_class_def(1, "ChildComp", "child-comp"),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.template_parents.insert("child-comp".to_string(), vec![0]);
+    def_idx.selector_index.insert("parent-comp".to_string(), vec![0]);
+    def_idx.selector_index.insert("child-comp".to_string(), vec![1]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let invoke = |method: &str| {
+        let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+            "method": [method],
+            "direction": "up",
+            "depth": 3,
+            "ext": ["ts"]
+        }));
+        assert!(!result.is_error);
+        serde_json::from_str::<serde_json::Value>(&result.content[0].text).unwrap()
+    };
+    let by_selector = invoke("child-comp");
+    let by_class = invoke("ChildComp");
+
+    assert_eq!(by_class["summary"]["templateNavigation"].as_bool(), Some(true));
+    assert_eq!(by_class["query"]["templateRootInterpretation"], "class");
+    assert_eq!(by_selector["query"]["templateRootInterpretation"], "selector");
+    assert_eq!(by_class["callTree"], by_selector["callTree"]);
+    assert_eq!(by_class["callTree"][0]["class"], "ParentComp");
+}
+
+
+#[test]
+fn test_callers_template_navigation_prefers_in_scope_class_over_same_text_selector() {
+    let definitions = vec![
+        angular_class_def(0, "menu", "menu"),
+        angular_class_def(1, "SelectorRoot", "menu"),
+        angular_class_def(0, "ClassChild", "class-child"),
+        angular_class_def(1, "SelectorChild", "selector-child"),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.template_children.insert(0, vec!["class-child".to_string()]);
+    def_idx.template_children.insert(1, vec!["selector-child".to_string()]);
+    def_idx.selector_index.insert("menu".to_string(), vec![0, 1]);
+    def_idx.selector_index.insert("class-child".to_string(), vec![2]);
+    def_idx.selector_index.insert("selector-child".to_string(), vec![3]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["menu"],
+        "direction": "down",
+        "depth": 1,
+        "ext": ["ts"]
+    }));
+    assert!(!result.is_error);
+    let value: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = value["callTree"].as_array().unwrap();
+
+    assert_eq!(value["query"]["templateRootInterpretation"], "class");
+    assert_eq!(tree.len(), 1, "{value}");
+    assert_eq!(tree[0]["class"], "ClassChild", "{value}");
+}
+
+
+#[test]
+fn test_callers_template_navigation_up_falls_back_to_selector_when_class_root_is_out_of_scope() {
+    let definitions = vec![
+        angular_class_def(0, "ParentComp", "parent-comp"),
+        angular_class_def(1, "menu", "menu"),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.files[1] = "src/menu.component.spec.ts".to_string();
+    def_idx.template_parents.insert("menu".to_string(), vec![0]);
+    def_idx.selector_index.insert("menu".to_string(), vec![1]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["menu"],
+        "direction": "up",
+        "depth": 2,
+        "productionOnly": true,
+        "ext": ["ts"]
+    }));
+    assert!(!result.is_error);
+    let value: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(value["summary"]["templateNavigation"], true);
+    assert_eq!(value["query"]["templateRootInterpretation"], "selector");
+    assert_eq!(value["callTree"][0]["class"], "ParentComp", "{value}");
+}
+
+#[test]
+fn test_callers_template_navigation_down_by_selector_resolves_component_root() {
+    let definitions = vec![
+        angular_class_def(0, "RootComp", "root-selector"),
+        angular_class_def(1, "ChildComp", "child-comp"),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.template_children.insert(0, vec!["child-comp".to_string()]);
+    def_idx.selector_index.insert("root-selector".to_string(), vec![0]);
+    def_idx.selector_index.insert("child-comp".to_string(), vec![1]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["root-selector"],
+        "direction": "down",
+        "depth": 1,
+        "ext": ["ts"]
+    }));
+    assert!(!result.is_error);
+    let value: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(value["summary"]["templateNavigation"], true);
+    assert_eq!(value["callTree"][0]["class"], "ChildComp", "{value}");
+}
+
+
+#[test]
+fn test_callers_template_navigation_production_only_filters_test_parent() {
+    let definitions = vec![
+        angular_class_def(0, "ParentComp", "parent-comp"),
+        angular_class_def(1, "MockParentComp", "mock-parent-comp"),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.files[1] = "src/mock-parent.component.spec.ts".to_string();
+    def_idx.template_parents.insert("child-comp".to_string(), vec![0, 1]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["child-comp"],
+        "direction": "up",
+        "depth": 1,
+        "productionOnly": true,
+        "ext": ["ts"]
+    }));
+    assert!(!result.is_error);
+    let value: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = value["callTree"].as_array().unwrap();
+
+    assert_eq!(tree.len(), 1);
+    assert_eq!(tree[0]["class"], "ParentComp");
+    assert_eq!(value["summary"]["totalNodes"].as_u64(), Some(1));
+    assert_eq!(value["resultStatus"]["scope"]["includesTests"].as_bool(), Some(false));
+}
+
+
+#[test]
+fn test_callers_template_navigation_reports_ambiguous_class_root() {
+    let definitions = vec![
+        angular_class_def(0, "RootComp", "root-primary"),
+        angular_class_def(1, "RootComp", "root-secondary"),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.files[0] = "src/primary/root.component.ts".to_string();
+    def_idx.files[1] = "src/secondary/root.component.ts".to_string();
+    def_idx.template_children.insert(0, vec!["first-child".to_string()]);
+    def_idx.template_children.insert(1, vec!["second-child".to_string()]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["RootComp"],
+        "direction": "down",
+        "depth": 1,
+        "ext": ["ts"]
+    }));
+    assert!(!result.is_error);
+    let value: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let candidates = value["rootResolution"]["candidates"].as_array().unwrap();
+
+    assert!(value["callTree"].as_array().unwrap().is_empty());
+    assert_eq!(value["rootResolution"]["reason"], "ambiguous_template_root");
+    assert_eq!(value["resultStatus"]["evidenceLevel"], "template_index");
+    assert_eq!(value["query"]["templateRootInterpretation"], "class");
+    assert_eq!(candidates.len(), 2);
+    assert_eq!(candidates[0]["file"], "src/primary/root.component.ts");
+    assert_eq!(candidates[1]["file"], "src/secondary/root.component.ts");
+}
+
+#[test]
+fn test_callers_template_navigation_up_reports_ambiguous_class_root() {
+    let definitions = vec![
+        angular_class_def(0, "RootComp", "root-primary"),
+        angular_class_def(1, "RootComp", "root-secondary"),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["RootComp"],
+        "direction": "up",
+        "depth": 1,
+        "ext": ["ts"]
+    }));
+    assert!(!result.is_error);
+    let value: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert!(value["callTree"].as_array().unwrap().is_empty());
+    assert_eq!(value["rootResolution"]["reason"], "ambiguous_template_root");
+    assert_eq!(value["rootResolution"]["candidates"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn test_callers_template_navigation_down_selector_reports_bounded_ambiguity() {
+    let definitions: Vec<_> = (0..12)
+        .map(|index| angular_class_def(index % 2, &format!("Root{index}"), "shared-root"))
+        .collect();
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.selector_index.insert("shared-root".to_string(), (0..12).collect());
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["shared-root"],
+        "direction": "down",
+        "depth": 1,
+        "ext": ["ts"]
+    }));
+    assert!(!result.is_error);
+    let value: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert!(value["callTree"].as_array().unwrap().is_empty());
+    assert_eq!(value["rootResolution"]["reason"], "ambiguous_template_root");
+    assert_eq!(value["query"]["templateRootInterpretation"], "selector");
+    assert_eq!(value["rootResolution"]["totalCandidates"], 12);
+    assert_eq!(value["rootResolution"]["candidatesTruncated"], true);
+    assert_eq!(value["rootResolution"]["candidates"].as_array().unwrap().len(), 10);
+}
+
+#[test]
+fn test_callers_template_navigation_reports_root_filtered_out_of_scope() {
+    let definitions = vec![angular_class_def(1, "RootComp", "root-comp")];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.files[1] = "src/root.component.spec.ts".to_string();
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["RootComp"],
+        "direction": "up",
+        "depth": 1,
+        "productionOnly": true,
+        "ext": ["ts"]
+    }));
+    assert!(!result.is_error);
+    let value: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let reasons = value["resultStatus"]["reasons"].as_array().unwrap();
+
+    assert_eq!(value["summary"]["templateNavigation"], true);
+    assert!(reasons.iter().any(|reason| reason == "template_root_out_of_scope"), "{value}");
+}
+
+#[test]
+fn test_callers_template_navigation_ignores_inactive_root_posting() {
+    let definitions = vec![
+        angular_class_def(0, "RootComp", "active-root"),
+        angular_class_def(1, "RootComp", "stale-root"),
+        angular_class_def(0, "ChildComp", "child-comp"),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.file_index.get_mut(&1).unwrap().clear();
+    def_idx.template_children.insert(0, vec!["child-comp".to_string()]);
+    def_idx.selector_index.insert("child-comp".to_string(), vec![2]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["RootComp"],
+        "direction": "down",
+        "depth": 1,
+        "ext": ["ts"]
+    }));
+    assert!(!result.is_error);
+    let value: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert!(value.get("rootResolution").is_none(), "{value}");
+    assert_eq!(value["callTree"][0]["class"], "ChildComp", "{value}");
+}
+
+
+#[test]
+fn test_callers_template_navigation_scope_disambiguates_class_and_selector_roots() {
+    let definitions = vec![
+        angular_class_def(0, "RootComp", "root-comp"),
+        angular_class_def(1, "RootComp", "root-comp"),
+        angular_class_def(0, "ExpectedChild", "expected-child"),
+        angular_class_def(1, "MockChild", "mock-child"),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.files[1] = "src/root.component.spec.ts".to_string();
+    def_idx.template_children.insert(0, vec!["expected-child".to_string()]);
+    def_idx.template_children.insert(1, vec!["mock-child".to_string()]);
+    def_idx.selector_index.insert("root-comp".to_string(), vec![0, 1]);
+    def_idx.selector_index.insert("expected-child".to_string(), vec![2]);
+    def_idx.selector_index.insert("mock-child".to_string(), vec![3]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    for (method, interpretation) in [("RootComp", "class"), ("root-comp", "selector")] {
+        let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+            "method": [method],
+            "direction": "down",
+            "depth": 1,
+            "productionOnly": true,
+            "ext": ["ts"]
+        }));
+        assert!(!result.is_error);
+        let value: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let tree = value["callTree"].as_array().unwrap();
+
+        assert!(value.get("rootResolution").is_none(), "{value}");
+        assert_eq!(value["query"]["templateRootInterpretation"], interpretation);
+        assert_eq!(tree.len(), 1, "{value}");
+        assert_eq!(tree[0]["selector"], "expected-child", "{value}");
+        assert_eq!(tree[0]["class"], "ExpectedChild", "{value}");
+    }
+}
+
+
+#[test]
+fn test_callers_template_navigation_scope_and_decorator_disambiguate_class_root() {
+    let definitions = vec![
+        angular_class_def(0, "RootComp", "root-comp"),
+        class_def(0, "RootComp", vec![]),
+        angular_class_def(1, "RootComp", "e2e-root-comp"),
+        angular_class_def(2, "RootComp", "mock-root-comp"),
+        angular_class_def(3, "RootComp", "js-root-comp"),
+        angular_class_def(0, "ExpectedChild", "expected-child"),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.files = vec![
+        "src/root.component.ts".to_string(),
+        "e2e/root.component.ts".to_string(),
+        "src/mock-root.component.ts".to_string(),
+        "src/root.component.js".to_string(),
+    ];
+    def_idx.template_children.insert(0, vec!["expected-child".to_string()]);
+    def_idx.selector_index.insert("expected-child".to_string(), vec![5]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["RootComp"],
+        "direction": "down",
+        "depth": 1,
+        "excludeDir": ["e2e"],
+        "excludeFile": ["mock-root.component.ts"],
+        "ext": ["ts"]
+    }));
+    assert!(!result.is_error);
+    let value: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = value["callTree"].as_array().unwrap();
+
+    assert!(value.get("rootResolution").is_none());
+    assert_eq!(tree.len(), 1);
+    assert_eq!(tree[0]["class"], "ExpectedChild");
+}
+
+#[test]
+fn test_callers_template_navigation_filters_child_candidates_before_ambiguity() {
+    let definitions = vec![
+        angular_class_def(0, "RootComp", "root-comp"),
+        angular_class_def(0, "ExpectedChild", "child-comp"),
+        angular_class_def(1, "E2eChild", "child-comp"),
+        angular_class_def(2, "MockChild", "child-comp"),
+        angular_class_def(3, "JsChild", "child-comp"),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.files = vec![
+        "src/root.component.ts".to_string(),
+        "e2e/child.component.ts".to_string(),
+        "src/mock-child.component.ts".to_string(),
+        "src/child.component.js".to_string(),
+    ];
+    def_idx.template_children.insert(0, vec!["child-comp".to_string()]);
+    def_idx.selector_index.insert("child-comp".to_string(), vec![1, 2, 3, 4]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["RootComp"],
+        "direction": "down",
+        "depth": 1,
+        "excludeDir": ["e2e"],
+        "excludeFile": ["mock-child.component.ts"],
+        "ext": ["ts"]
+    }));
+    assert!(!result.is_error);
+    let value: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = value["callTree"].as_array().unwrap();
+
+    assert_eq!(tree.len(), 1);
+    assert_eq!(tree[0]["class"], "ExpectedChild");
+    assert!(tree[0].get("resolution").is_none());
+}
+
+#[test]
+fn test_callers_template_navigation_filters_recursive_nodes_in_both_directions() {
+    let definitions = vec![
+        angular_class_def(0, "RootComp", "root-comp"),
+        angular_class_def(0, "ChildComp", "child-comp"),
+        angular_class_def(1, "TestGrandChild", "grand-child"),
+    ];
+    let mut down_idx = make_def_index(definitions, HashMap::new());
+    down_idx.files[1] = "src/test-grand-child.component.spec.ts".to_string();
+    down_idx.template_children.insert(0, vec!["child-comp".to_string()]);
+    down_idx.template_children.insert(1, vec!["grand-child".to_string()]);
+    down_idx.selector_index.insert("child-comp".to_string(), vec![1]);
+    down_idx.selector_index.insert("grand-child".to_string(), vec![2]);
+    let down_ctx = make_ctx_with_idx(down_idx);
+
+    let down_result = super::super::dispatch_tool(&down_ctx, "xray_callers", &serde_json::json!({
+        "method": ["RootComp"],
+        "direction": "down",
+        "depth": 3,
+        "productionOnly": true,
+        "ext": ["ts"]
+    }));
+    assert!(!down_result.is_error);
+    let down_value: serde_json::Value =
+        serde_json::from_str(&down_result.content[0].text).unwrap();
+    let down_tree = down_value["callTree"].as_array().unwrap();
+    assert_eq!(down_tree.len(), 1);
+    assert!(down_tree[0].get("children").is_none());
+    assert_eq!(down_value["summary"]["totalNodes"], 1);
+
+    let definitions = vec![
+        angular_class_def(0, "ChildComp", "child-comp"),
+        angular_class_def(1, "TestGrandParent", "grand-parent"),
+        angular_class_def(0, "TargetComp", "target-comp"),
+    ];
+    let mut up_idx = make_def_index(definitions, HashMap::new());
+    up_idx.files[1] = "src/test-grand-parent.component.spec.ts".to_string();
+    up_idx.template_parents.insert("target-comp".to_string(), vec![0]);
+    up_idx.template_parents.insert("child-comp".to_string(), vec![1]);
+    up_idx.selector_index.insert("child-comp".to_string(), vec![0]);
+    up_idx.selector_index.insert("grand-parent".to_string(), vec![1]);
+    up_idx.selector_index.insert("target-comp".to_string(), vec![2]);
+    let up_ctx = make_ctx_with_idx(up_idx);
+
+    let up_result = super::super::dispatch_tool(&up_ctx, "xray_callers", &serde_json::json!({
+        "method": ["target-comp"],
+        "direction": "up",
+        "depth": 3,
+        "productionOnly": true,
+        "ext": ["ts"]
+    }));
+    assert!(!up_result.is_error);
+    let up_value: serde_json::Value = serde_json::from_str(&up_result.content[0].text).unwrap();
+    let up_tree = up_value["callTree"].as_array().unwrap();
+    assert_eq!(up_tree.len(), 1);
+    assert_eq!(up_tree[0]["class"], "ChildComp");
+    assert!(up_tree[0].get("parents").is_none());
+    assert_eq!(up_value["summary"]["totalNodes"], 1);
+}
+
+#[test]
+fn test_callers_template_navigation_legacy_policy_preserves_root_fan_out() {
+    let definitions = vec![
+        angular_class_def(0, "RootComp", "first-root"),
+        angular_class_def(1, "RootComp", "second-root"),
+        angular_class_def(0, "FirstChild", "first-child"),
+        angular_class_def(1, "SecondChild", "second-child"),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.template_children.insert(0, vec!["first-child".to_string()]);
+    def_idx.template_children.insert(1, vec!["second-child".to_string()]);
+    def_idx.selector_index.insert("first-child".to_string(), vec![2]);
+    def_idx.selector_index.insert("second-child".to_string(), vec![3]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["RootComp"],
+        "direction": "down",
+        "depth": 1,
+        "ambiguityPolicy": "legacy",
+        "ext": ["ts"]
+    }));
+    assert!(!result.is_error);
+    let value: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let mut selectors: Vec<_> = value["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["selector"].as_str().unwrap())
+        .collect();
+    selectors.sort_unstable();
+
+    assert_eq!(selectors, vec!["first-child", "second-child"]);
+    assert_eq!(value["summary"]["legacyAmbiguousRootFanOut"], true);
 }
 
 
@@ -1557,7 +2090,8 @@ fn test_callers_template_navigation_next_step_hint_uses_repo_relative_path_with_
     let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
         "method": ["child-comp"],
         "direction": "up",
-        "depth": 3
+        "depth": 3,
+        "ext": ["ts"]
     }));
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
