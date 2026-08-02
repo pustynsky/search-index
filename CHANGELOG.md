@@ -11,7 +11,7 @@
 
 - **Invalidated continuation tokens after every completed in-scope edit reindex attempt.** Successful writes no longer leave pagination tokens valid when a transient read failure or poisoned index lock prevents the immediate in-memory update; update telemetry remains truthful and the watcher can reconcile afterward.
 
-- **Made response-size truncation recoverable for definitions and call trees.** `xray_definitions` and `xray_callers` now expose stable pages with offsets and index-epoch-bound continuation tokens; byte fitting preserves complete structural entries after optional body stripping, covers attribute-filtered definitions and caller/callee roots, keeps interface-expanded root order stable at recursive depths, and returns a bounded error when one item cannot fit.
+- **Made response-size truncation recoverable for definitions and call trees.** `xray_definitions` and `xray_callers` now expose stable pages with offsets and index-epoch-bound continuation tokens; byte fitting preserves complete structural entries after optional body stripping, covers attribute-filtered definitions and caller/callee roots, keeps interface-expanded root order stable at recursive depths, and splits an oversized single-method caller subtree into reconstructable node/edge pages instead of blocking the cursor chain.
 
 - **Made `xray_info` file reachability truthful.** Per-file `indexed` now reflects actual content-index inclusion rather than extension eligibility alone; additive content/definition reachability fields and exclusion reasons expose hidden, ignored, `.git`, and extension-policy outcomes.
 

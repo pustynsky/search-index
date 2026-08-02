@@ -828,8 +828,8 @@ pub const KNOWN_TOOL_NAMES: &[&str] = &[
     "xray_branch_status",
 ];
 
-fn pagination_workflow() -> Value {
-    json!({
+fn pagination_workflow(include_call_tree_nodes: bool) -> Value {
+    let mut workflow = json!({
         "appliesTo": ["xray_definitions", "xray_callers"],
         "steps": [
             "Send the first request with the desired query arguments and maxResults.",
@@ -841,7 +841,16 @@ fn pagination_workflow() -> Value {
             "Use offset only for a manual starting position; prefer continuationToken for subsequent pages.",
             "If the token is stale, the index changed; restart from the first page."
         ]
-    })
+    });
+    if include_call_tree_nodes {
+        workflow["callTreeNodes"] = json!({
+            "when": "An oversized caller root switches resultStatus.page.unit to callTreeNodes automatically.",
+            "record": "Each record carries nodeId, parentNodeId, relation, ordinal, and the original node without child arrays.",
+            "reconstruct": "Attach records to parentNodeId under relation in ordinal order; continue with the returned token until absent. The cursor returns to topLevelRoots after the subtree is complete.",
+            "auxiliaryFields": "Node pages omit non-graph fields; the exact list for this response is in summary.nodePageOmittedFields."
+        });
+    }
+    workflow
 }
 
 /// Per-tool reference card returned by `xray_help { tool: "<name>" }`.
@@ -874,7 +883,7 @@ pub fn tool_help(tool_name: &str, def_extensions: &[String]) -> Result<Value, St
     });
 
     if matches!(tool_name, "xray_definitions" | "xray_callers") {
-        payload["paginationWorkflow"] = pagination_workflow();
+        payload["paginationWorkflow"] = pagination_workflow(tool_name == "xray_callers");
     }
 
     // xray_edit is the only tool with two valid mode shapes — surface both
@@ -939,7 +948,7 @@ pub fn render_json(def_extensions: &[String]) -> Value {
         "performanceTiers": tiers,
         "toolPriority": priority,
         "parameterExamples": parameter_examples(def_extensions),
-        "paginationWorkflow": pagination_workflow(),
+        "paginationWorkflow": pagination_workflow(true),
     })
 }
 

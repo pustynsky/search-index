@@ -2155,6 +2155,65 @@ fn test_continuation_token_rejects_query_and_generation_drift() {
 
 
 #[test]
+fn test_call_tree_continuation_token_carries_root_and_node_offsets() {
+    let ctx = HandlerContext::default();
+    let args = json!({ "method": ["process"], "maxResults": 2 });
+    let first = parse_page_request(&ctx, "xray_callers", &args).unwrap();
+    let token = call_tree_node_continuation_token(
+        first.index_epoch,
+        3,
+        7,
+        &first.query_fingerprint,
+    );
+    let continued = parse_page_request(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["process"],
+            "maxResults": 2,
+            "continuationToken": token,
+        }),
+    ).unwrap();
+    assert_eq!(continued.offset, 3);
+    assert_eq!(continued.node_offset, Some(7));
+
+    let malformed = parse_page_request(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["process"],
+            "maxResults": 2,
+            "continuationToken": format!(
+                "xrt1.{}.3.bad.{}",
+                first.index_epoch,
+                first.query_fingerprint,
+            ),
+        }),
+    ).unwrap_err();
+    assert!(malformed.contains("malformed"), "{malformed}");
+
+    let definition_args = json!({ "name": ["Service"], "maxResults": 2 });
+    let definition_page =
+        parse_page_request(&ctx, "xray_definitions", &definition_args).unwrap();
+    let wrong_tool = parse_page_request(
+        &ctx,
+        "xray_definitions",
+        &json!({
+            "name": ["Service"],
+            "maxResults": 2,
+            "continuationToken": call_tree_node_continuation_token(
+                definition_page.index_epoch,
+                0,
+                1,
+                &definition_page.query_fingerprint,
+            ),
+        }),
+    ).unwrap_err();
+    assert!(wrong_tool.contains("only valid for xray_callers"), "{wrong_tool}");
+}
+
+
+#[test]
 fn test_content_index_publication_invalidates_continuation_token() {
     let ctx = HandlerContext::default();
     let first = parse_page_request(
@@ -2240,6 +2299,7 @@ fn test_body_stripping_lowers_evidence_level() {
 fn test_recoverable_page_truncation_advances_by_actual_prefix() {
     let page_request = PageRequest {
         offset: 4,
+        node_offset: None,
         requested: true,
         workspace_generation: 7,
         index_epoch: 7,
@@ -2279,6 +2339,7 @@ fn test_recoverable_page_truncation_advances_by_actual_prefix() {
 fn test_recoverable_page_oversized_first_item_returns_bounded_error() {
     let page_request = PageRequest {
         offset: 0,
+        node_offset: None,
         requested: false,
         workspace_generation: 1,
         index_epoch: 1,
@@ -2308,10 +2369,222 @@ fn test_recoverable_page_oversized_first_item_returns_bounded_error() {
     assert!(serde_json::to_vec(&truncated).unwrap().len() <= 800, "{truncated:#}");
 }
 
+
+#[test]
+fn test_oversized_call_tree_node_pages_reconstruct_original_tree() {
+    fn make_node(method: String, callers: Vec<Value>) -> Value {
+        let mut node = json!({
+            "nodeKind": "caller",
+            "method": method,
+            "file": "LargeGraph.cs",
+            "line": 10,
+            "signature": "x".repeat(180),
+        });
+        if !callers.is_empty() {
+            node["callers"] = json!(callers);
+        }
+        node
+    }
+
+    fn reconstruct(node_id: &str, records: &[Value]) -> Value {
+        let record = records
+            .iter()
+            .find(|record| record["nodeId"] == node_id)
+            .unwrap();
+        let mut node = record["node"].clone();
+        for relation in ["callers", "callees", "children", "parents"] {
+            let mut children: Vec<&Value> = records
+                .iter()
+                .filter(|candidate| {
+                    candidate["parentNodeId"] == node_id
+                        && candidate["relation"] == relation
+                })
+                .collect();
+            children.sort_by_key(|child| child["ordinal"].as_u64().unwrap());
+            if !children.is_empty() {
+                node[relation] = Value::Array(
+                    children
+                        .into_iter()
+                        .map(|child| reconstruct(child["nodeId"].as_str().unwrap(), records))
+                        .collect(),
+                );
+            }
+        }
+        node
+    }
+
+    let children: Vec<Value> = (0..20)
+        .map(|child| {
+            let grandchildren = (0..2)
+                .map(|grandchild| make_node(format!("Leaf{child}_{grandchild}"), Vec::new()))
+                .collect();
+            make_node(format!("Child{child}"), grandchildren)
+        })
+        .collect();
+    let root = make_node("Root".to_string(), children);
+    let total_nodes = count_tree_nodes(std::slice::from_ref(&root));
+    assert_eq!(total_nodes, 61);
+
+    let page_request = PageRequest {
+        offset: 0,
+        node_offset: None,
+        requested: false,
+        workspace_generation: 1,
+        index_epoch: 1,
+        query_fingerprint: "d".repeat(64),
+    };
+    let mut status = build_result_status(
+        "complete",
+        true,
+        true,
+        true,
+        "ast_call_graph",
+        Vec::new(),
+    );
+    add_collection_accounting(
+        &mut status,
+        json!({ "nodes": total_nodes }),
+        json!({ "nodes": total_nodes }),
+    );
+    attach_page_status(&mut status, "topLevelRoots", &page_request, 1, 1);
+    let tests_covering: Vec<Value> = (0..50)
+        .map(|index| json!({ "method": format!("Test{index}"), "detail": "x".repeat(200) }))
+        .collect();
+    let original = json!({
+        "callTree": [root.clone()],
+        "rootMethod": { "method": "Root", "signature": "x".repeat(500) },
+        "testsCovering": tests_covering,
+        "grepReferences": [{ "file": "Other.cs", "lineContent": "x".repeat(500) }],
+        "query": { "method": "Root", "depth": 3 },
+        "summary": { "totalNodes": total_nodes },
+        "resultStatus": status,
+    });
+
+    let max_bytes = 1_800usize;
+    let mut node_offset = 0usize;
+    let mut all_records = Vec::new();
+    for _ in 0..100 {
+        let mut request_output = original.clone();
+        if node_offset > 0 {
+            request_output["resultStatus"]["page"]["nodeOffset"] = json!(node_offset);
+        }
+        let page = truncate_large_response(request_output, max_bytes);
+        assert!(measure_json_size(&page) <= max_bytes, "{page:#}");
+        assert_eq!(page["resultStatus"]["page"]["unit"], "callTreeNodes", "{page:#}");
+        assert!(page.get("rootMethod").is_none());
+        assert!(page.get("testsCovering").is_none());
+        assert!(page.get("grepReferences").is_none());
+        let omitted_fields = page["summary"]["nodePageOmittedFields"].as_array().unwrap();
+        assert!(omitted_fields.iter().any(|field| field == "testsCovering"));
+        assert!(page["resultStatus"]["reasons"].as_array().unwrap().iter()
+            .any(|reason| reason == "node_page_omits_auxiliary_fields"));
+        let records = page["callTreeNodes"].as_array().unwrap();
+        assert!(!records.is_empty(), "{page:#}");
+        all_records.extend(records.iter().cloned());
+
+        let Some(next_offset) = page["resultStatus"]["page"]["nextOffset"].as_u64() else {
+            assert!(page["resultStatus"]["page"].get("continuationToken").is_none());
+            break;
+        };
+        assert!(page["resultStatus"]["page"]["continuationToken"]
+            .as_str()
+            .unwrap()
+            .starts_with("xrt1."));
+        node_offset = next_offset as usize;
+    }
+
+    assert_eq!(all_records.len(), total_nodes);
+    let unique_ids: std::collections::HashSet<_> = all_records
+        .iter()
+        .map(|record| record["nodeId"].as_str().unwrap())
+        .collect();
+    assert_eq!(unique_ids.len(), total_nodes);
+    let root_record = all_records
+        .iter()
+        .find(|record| record["parentNodeId"].is_null())
+        .unwrap();
+    for record in &all_records {
+        if let Some(parent) = record["parentNodeId"].as_str() {
+            assert!(unique_ids.contains(parent));
+        }
+        for relation in ["callers", "callees", "children", "parents"] {
+            assert!(record["node"].get(relation).is_none());
+        }
+    }
+    let reconstructed = reconstruct(root_record["nodeId"].as_str().unwrap(), &all_records);
+    assert_eq!(reconstructed, root);
+
+    let mut out_of_range = original.clone();
+    out_of_range["resultStatus"]["page"]["nodeOffset"] = json!(total_nodes);
+    let error = truncate_large_response(out_of_range.clone(), max_bytes);
+    assert_eq!(error["error"]["code"], "continuation_offset_out_of_range");
+    assert_eq!(error["error"]["unit"], "callTreeNodes");
+    assert_eq!(error["error"]["rootOffset"], 0);
+    assert_eq!(error["error"]["nodeOffset"], total_nodes);
+    let result = truncate_response_if_needed(
+        ToolCallResult::success(json_to_string(&out_of_range)),
+        max_bytes,
+    );
+    assert!(result.is_error);
+}
+
+#[test]
+fn test_oversized_single_call_tree_node_error_is_bounded() {
+    let page_request = PageRequest {
+        offset: 0,
+        node_offset: None,
+        requested: false,
+        workspace_generation: 1,
+        index_epoch: 1,
+        query_fingerprint: "e".repeat(64),
+    };
+    let mut status = build_result_status(
+        "complete",
+        true,
+        true,
+        true,
+        "ast_call_graph",
+        Vec::new(),
+    );
+    add_collection_accounting(
+        &mut status,
+        json!({ "nodes": 1 }),
+        json!({ "nodes": 1 }),
+    );
+    attach_page_status(&mut status, "topLevelRoots", &page_request, 1, 1);
+    let output = json!({
+        "callTree": [{
+            "nodeKind": "caller",
+            "method": "Huge",
+            "signature": "x".repeat(20_000),
+        }],
+        "summary": { "totalNodes": 1 },
+        "resultStatus": status,
+    });
+
+    let error = truncate_large_response(output.clone(), 1_600);
+    assert_eq!(error["error"]["code"], "single_item_exceeds_response_budget");
+    assert_eq!(error["error"]["unit"], "callTreeNodes");
+    assert_eq!(error["error"]["rootOffset"], 0);
+    assert_eq!(error["error"]["nodeOffset"], 0);
+    assert!(measure_json_size(&error) <= 1_600);
+
+    for budget in [1usize, 2, 10, 50] {
+        let bounded = truncate_large_response(output.clone(), budget);
+        assert!(measure_json_size(&bounded) <= budget, "budget={budget}: {bounded:#}");
+        let result = truncate_response_if_needed(
+            ToolCallResult::success(json_to_string(&output)),
+            budget,
+        );
+        assert!(result.is_error, "budget={budget}: {}", result.content[0].text);
+    }
+}
+
 #[test]
 fn test_recoverable_page_tiny_budgets_remain_bounded() {
     let page_request = PageRequest {
         offset: 0,
+        node_offset: None,
         requested: false,
         workspace_generation: 1,
         index_epoch: 1,
@@ -2335,7 +2608,7 @@ fn test_recoverable_page_tiny_budgets_remain_bounded() {
     for budget in [1usize, 2, 10, 50] {
         let truncated = truncate_large_response(output.clone(), budget);
         assert!(serde_json::to_vec(&truncated).unwrap().len() <= budget, "budget={budget}: {truncated:#}");
-        assert!(is_single_item_budget_error(&truncated, true));
+        assert!(is_response_truncation_error(&truncated, true));
 
         let result = truncate_response_if_needed(
             ToolCallResult::success(json_to_string(&output)),
@@ -2343,11 +2616,11 @@ fn test_recoverable_page_tiny_budgets_remain_bounded() {
         );
         assert!(result.is_error, "budget={budget}: {}", result.content[0].text);
     }
-    assert!(!is_single_item_budget_error(&json!({
+    assert!(!is_response_truncation_error(&json!({
         "error": { "code": "domain_specific_error" },
         "results": [],
     }), false));
-    assert!(!is_single_item_budget_error(&json!({}), false));
+    assert!(!is_response_truncation_error(&json!({}), false));
     let unlimited = inject_metrics(
         ToolCallResult::success("{}".to_string()),
         &HandlerContext::default(),

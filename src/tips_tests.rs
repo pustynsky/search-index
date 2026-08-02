@@ -1606,6 +1606,13 @@ fn test_tool_help_definitions_and_callers_explain_pagination_loop() {
         assert!(workflow["rules"].as_array().unwrap().iter().any(|rule| {
             rule.as_str().is_some_and(|text| text.contains("Do not send offset"))
         }));
+        if tool == "xray_callers" {
+            assert!(workflow["callTreeNodes"]["reconstruct"]
+                .as_str()
+                .is_some_and(|text| text.contains("parentNodeId")));
+        } else {
+            assert!(workflow.get("callTreeNodes").is_none());
+        }
     }
 
     let catalog = render_json(&ext);

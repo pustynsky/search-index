@@ -4140,6 +4140,127 @@ fn test_byte_fitted_offset_caller_page_preserves_lower_bound_accounting() {
     assert!(total_nodes >= shown_nodes + (30 - roots.len()) as u64, "{output:#}");
 }
 
+
+#[test]
+fn test_oversized_callee_subtree_continues_through_node_pages() {
+    let mut definitions = vec![
+        class_def(0, "Graph", vec![]),
+        method_def(0, "Start", "Graph", 10, 20),
+        method_def(0, "Branch", "Graph", 30, 40),
+        method_def(0, "Tail", "Graph", 41, 45),
+    ];
+    for leaf in 0..80 {
+        definitions.push(method_def(
+            0,
+            &format!("Leaf{leaf}"),
+            "Graph",
+            50 + leaf,
+            50 + leaf,
+        ));
+    }
+    let mut method_calls = HashMap::new();
+    method_calls.insert(1, vec![
+        CallSite {
+            method_name: "Branch".to_string(),
+            receiver_type: Some("Graph".to_string()),
+            line: 15,
+            call_kind: Default::default(),
+            receiver_is_generic: false,
+        },
+        CallSite {
+            method_name: "Tail".to_string(),
+            receiver_type: Some("Graph".to_string()),
+            line: 16,
+            call_kind: Default::default(),
+            receiver_is_generic: false,
+        },
+    ]);
+    method_calls.insert(
+        2,
+        (0..80)
+            .map(|leaf| CallSite {
+                method_name: format!("Leaf{leaf}"),
+                receiver_type: Some("Graph".to_string()),
+                line: 35,
+                call_kind: Default::default(),
+                receiver_is_generic: false,
+            })
+            .collect(),
+    );
+    let mut definition_index = make_def_index(definitions, method_calls);
+    definition_index.files = vec!["src/Graph.cs".to_string()];
+    definition_index.extensions = vec!["cs".to_string()];
+    definition_index.path_to_id = HashMap::from([(
+        crate::path_identity_key(std::path::Path::new("src/Graph.cs")),
+        0,
+    )]);
+    let mut ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(crate::ContentIndex {
+            root: ".".to_string(),
+            files: definition_index.files.clone(),
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![0],
+            ..Default::default()
+        })),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(definition_index))),
+        server_ext: "cs".to_string(),
+        ..Default::default()
+    };
+    ctx.max_response_bytes = 5_000;
+    let base_args = json!({
+        "method": ["Start"],
+        "class": "Graph",
+        "direction": "down",
+        "depth": 2,
+        "maxCallersPerLevel": 100,
+        "maxTotalNodes": 200,
+        "maxResults": 1,
+    });
+
+    let mut token = None;
+    let mut records = Vec::new();
+    let mut saw_tail = false;
+    for _ in 0..100 {
+        let mut args = base_args.clone();
+        if let Some(current_token) = token.take() {
+            args["continuationToken"] = json!(current_token);
+        }
+        let result = super::super::dispatch_tool(&ctx, "xray_callers", &args);
+        assert!(!result.is_error, "{}", result.content[0].text);
+        assert!(result.content[0].text.len() <= 5_000);
+        let page: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        if page["resultStatus"]["page"]["unit"] == "callTreeNodes" {
+            assert_eq!(page["resultStatus"]["page"]["rootOffset"], 0);
+            assert_eq!(page["resultStatus"]["page"]["rootTotal"], 2);
+            records.extend(page["callTreeNodes"].as_array().unwrap().iter().cloned());
+        } else {
+            assert_eq!(page["resultStatus"]["page"]["unit"], "topLevelRoots", "{page:#}");
+            assert_eq!(page["resultStatus"]["page"]["offset"], 1);
+            assert_eq!(page["callTree"].as_array().unwrap().len(), 1, "{page:#}");
+            assert_eq!(page["callTree"][0]["method"], "Tail");
+            saw_tail = true;
+        }
+        token = page["resultStatus"]["page"]["continuationToken"]
+            .as_str()
+            .map(str::to_string);
+        if token.is_none() {
+            break;
+        }
+    }
+
+    assert!(saw_tail, "node cursor must transition to the next top-level root");
+    assert_eq!(records.len(), 81);
+    let unique_ids: std::collections::HashSet<_> = records
+        .iter()
+        .map(|record| record["nodeId"].as_str().unwrap())
+        .collect();
+    assert_eq!(unique_ids.len(), 81);
+    assert_eq!(
+        records.iter().filter(|record| record["parentNodeId"].is_null()).count(),
+        1,
+    );
+}
+
 #[test]
 fn test_multi_method_offset_pages_input_order() {
     let definitions = vec![
