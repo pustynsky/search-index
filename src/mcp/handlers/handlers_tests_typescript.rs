@@ -799,6 +799,626 @@ export function differentCoalescing(
         );
     }
 
+
+    cleanup_tmp(&tmp_dir);
+}
+
+#[test]
+fn test_ts_local_arrow_call_does_not_resolve_to_other_module_function() {
+    static COUNTER: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray_ts_local_bare_call_{}_{}",
+        std::process::id(),
+        id
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let tmp_dir = crate::canonicalize_test_root(&tmp_dir);
+
+    let caller_file = tmp_dir.join("caller.ts");
+    let other_file = tmp_dir.join("other.ts");
+    std::fs::write(
+        &caller_file,
+        r#"import { importedFn } from './other';
+function work(): void {}
+export function sameFile(): void {}
+export function shadowed(): void {}
+function outer(): void {
+    function sameFile(): void {}
+    function shadowed(): void {}
+    sameFile();
+    shadowed();
+}
+class WorkOwner {
+    runClass(): void {
+        const classCallback = () => work();
+        classCallback();
+    }
+}
+export function run(param: () => void): void {
+    const callback = () => work();
+    callback();
+    sameFile();
+    shadowed();
+    param();
+    const dynamic = sameFile;
+    dynamic();
+    importedFn();
+    setTimeout(() => {}, 0);
+}
+const privateHelper = () => work();
+export function usePrivateHelper(): void { privateHelper(); }
+export const exportedHelper = () => work();
+export function recursiveRoot(): void {
+    const recursiveRoot = () => work();
+    recursiveRoot();
+}
+class ArrowOwner {
+    arrowRoot = () => work();
+    callArrow(): void { this.arrowRoot(); }
+}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        &other_file,
+        "const shadowed = () => {};\nexport function callback(): void {}\nexport function sameFile(): void {}\nexport function importedFn(): void {}\nconst privateHelper = () => {};\nexport function useOtherPrivateHelper(): void { privateHelper(); }\n",
+    )
+    .unwrap();
+
+    let mut def_index = DefinitionIndex {
+        root: tmp_dir.to_string_lossy().to_string(),
+        extensions: vec!["ts".to_string()],
+        ..Default::default()
+    };
+    for path in [&other_file, &caller_file] {
+        let clean_path = PathBuf::from(crate::clean_path(&path.to_string_lossy()));
+        crate::definitions::update_file_definitions(&mut def_index, &clean_path);
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        ext: "ts".to_string(),
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(
+            tmp_dir.to_string_lossy().to_string(),
+        ))),
+        server_ext: "ts".to_string(),
+        ..Default::default()
+    };
+
+    let local_definition_result = dispatch_tool(
+        &ctx,
+        "xray_definitions",
+        &json!({
+            "name": ["classCallback"],
+            "kind": ["function"]
+        }),
+    );
+    assert!(
+        !local_definition_result.is_error,
+        "{}",
+        local_definition_result.content[0].text
+    );
+    let local_definition_output: Value =
+        serde_json::from_str(&local_definition_result.content[0].text).unwrap();
+    let local_definition = &local_definition_output["definitions"][0];
+    assert_eq!(local_definition["parent"], "WorkOwner");
+    assert_eq!(local_definition["signature"], "classCallback()");
+    assert!(
+        local_definition["modifiers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|modifier| modifier == "local"),
+        "{local_definition_output}"
+    );
+
+
+    let result = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["run"],
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let callback_nodes: Vec<_> = output["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["method"].as_str() == Some("callback"))
+        .collect();
+    assert_eq!(callback_nodes.len(), 1, "{output}");
+    assert_eq!(callback_nodes[0]["file"], "caller.ts", "{output}");
+    assert_eq!(callback_nodes[0]["line"], 18, "{output}");
+
+    let same_file_nodes: Vec<_> = output["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["method"].as_str() == Some("sameFile"))
+        .collect();
+    assert_eq!(same_file_nodes.len(), 1, "{output}");
+    assert_eq!(same_file_nodes[0]["file"], "caller.ts", "{output}");
+    assert_eq!(same_file_nodes[0]["line"], 3, "{output}");
+    assert_eq!(output["summary"]["unresolvedCallSites"], 4, "{output}");
+    assert_eq!(
+        output["summary"]["unresolvedCallSitesScope"],
+        "traversedGraph",
+        "{output}"
+    );
+    assert_eq!(
+        output["summary"]["unresolvedCallReasons"]["dynamic_callable_parameter"],
+        1,
+        "{output}"
+    );
+
+    assert_eq!(
+        output["summary"]["unresolvedCallReasons"]["unresolved_local_binding"],
+        1,
+        "{output}"
+    );
+    assert_eq!(
+        output["summary"]["unresolvedCallReasons"]["module_resolution_failed"],
+        1,
+        "{output}"
+    );
+    assert_eq!(
+        output["summary"]["unresolvedCallReasons"]["unknown_global"],
+        1,
+        "{output}"
+    );
+    assert_eq!(output["resultStatus"]["status"], "partial", "{output}");
+    assert_eq!(output["resultStatus"]["complete"], false, "{output}");
+
+    assert_eq!(
+        output["resultStatus"]["resolutionCompleteness"]["exact"],
+        false,
+        "{output}"
+    );
+    assert_eq!(
+        output["resultStatus"]["resolutionCompleteness"]["allStaticTargetsUnique"],
+        false,
+        "{output}"
+    );
+    assert_eq!(
+        output["resultStatus"]["safeForExhaustiveClaims"],
+        false,
+        "{output}"
+    );
+
+    let multi_result = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["run", "sameFile"],
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!multi_result.is_error, "{}", multi_result.content[0].text);
+    let multi_output: Value = serde_json::from_str(&multi_result.content[0].text).unwrap();
+    assert_eq!(multi_output["summary"]["unresolvedCallSites"], 4, "{multi_output}");
+    assert_eq!(
+        multi_output["summary"]["unresolvedCallSitesScope"],
+        "traversedGraph",
+        "{multi_output}"
+    );
+    assert_eq!(multi_output["resultStatus"]["status"], "partial", "{multi_output}");
+
+    let run_batch = multi_output["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|result| result["method"].as_str() == Some("run"))
+        .unwrap();
+    assert_eq!(
+        run_batch["unresolvedCallSitesScope"],
+        "traversedGraph",
+        "{multi_output}"
+    );
+
+    let up_result = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["work"],
+            "direction": "up",
+            "depth": 1
+        }),
+    );
+    assert!(!up_result.is_error, "{}", up_result.content[0].text);
+    let up_output: Value = serde_json::from_str(&up_result.content[0].text).unwrap();
+    let class_callback = up_output["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["method"].as_str() == Some("classCallback"))
+        .unwrap_or_else(|| panic!("missing classCallback caller: {up_output}"));
+    assert_eq!(class_callback["class"], "WorkOwner", "{up_output}");
+
+    let same_file_up = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["shadowed"],
+            "direction": "up",
+            "depth": 1
+        }),
+    );
+    assert!(!same_file_up.is_error, "{}", same_file_up.content[0].text);
+    let same_file_up_output: Value =
+        serde_json::from_str(&same_file_up.content[0].text).unwrap();
+    let same_file_callers = same_file_up_output["callTree"].as_array().unwrap();
+    assert!(
+        same_file_callers
+            .iter()
+            .any(|node| node["method"].as_str() == Some("run")),
+        "{same_file_up_output}"
+    );
+    assert!(
+        same_file_callers
+            .iter()
+            .all(|node| node["method"].as_str() != Some("outer")),
+        "{same_file_up_output}"
+    );
+
+    let ambiguous_same_file = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["sameFile"],
+            "direction": "up",
+            "depth": 1
+        }),
+    );
+    assert!(
+        !ambiguous_same_file.is_error,
+        "{}",
+        ambiguous_same_file.content[0].text
+    );
+    let ambiguous_output: Value =
+        serde_json::from_str(&ambiguous_same_file.content[0].text).unwrap();
+    assert_eq!(ambiguous_output["rootResolution"]["status"], "ambiguous");
+    assert_eq!(
+        ambiguous_output["rootResolution"]["reason"],
+        "ambiguous_typescript_root"
+    );
+    assert_eq!(
+        ambiguous_output["rootResolution"]["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "{ambiguous_output}"
+    );
+
+    let batch_up = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["shadowed", "sameFile", "importedFn", "setTimeout"],
+            "direction": "up",
+            "depth": 1,
+            "includeBody": true
+        }),
+    );
+    assert!(!batch_up.is_error, "{}", batch_up.content[0].text);
+    let batch_output: Value = serde_json::from_str(&batch_up.content[0].text).unwrap();
+    let batch_results = batch_output["results"].as_array().unwrap();
+    let result_for = |name: &str| {
+        batch_results
+            .iter()
+            .find(|result| result["method"].as_str() == Some(name))
+            .unwrap_or_else(|| panic!("missing {name}: {batch_output}"))
+    };
+    let shadowed_batch = result_for("shadowed");
+    assert!(
+        shadowed_batch["callTree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["method"].as_str() == Some("run")),
+        "{batch_output}"
+    );
+    assert!(
+        shadowed_batch["callTree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|node| node["method"].as_str() != Some("outer")),
+        "{batch_output}"
+    );
+    assert_eq!(
+        result_for("sameFile")["rootResolution"]["reason"],
+        "ambiguous_typescript_root"
+    );
+
+    assert!(result_for("sameFile").get("rootMethod").is_none());
+
+    assert!(result_for("sameFile").get("hint").is_none());
+    assert!(
+        result_for("setTimeout")["callTree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|node| node["method"].as_str() != Some("run")),
+        "{batch_output}"
+    );
+    assert_eq!(batch_output["resultStatus"]["status"], "partial");
+    assert!(
+        batch_output["resultStatus"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "ambiguous_typescript_root"),
+        "{batch_output}"
+    );
+    for (unresolved_name, reason) in [
+        ("importedFn", "module_resolution_failed"),
+        ("setTimeout", "unknown_global"),
+    ] {
+        assert_eq!(
+            result_for(unresolved_name)["unresolvedCallReasons"][reason],
+            1,
+            "{batch_output}"
+        );
+        assert_eq!(
+            batch_output["summary"]["unresolvedCallReasons"][reason],
+            1,
+            "{batch_output}"
+        );
+    }
+
+    for (unresolved_name, reason) in [
+        ("importedFn", "module_resolution_failed"),
+        ("setTimeout", "unknown_global"),
+    ] {
+        let unresolved_up = dispatch_tool(
+            &ctx,
+            "xray_callers",
+            &json!({
+                "method": [unresolved_name],
+                "direction": "up",
+                "depth": 1
+            }),
+        );
+        assert!(!unresolved_up.is_error, "{}", unresolved_up.content[0].text);
+        let unresolved_output: Value =
+            serde_json::from_str(&unresolved_up.content[0].text).unwrap();
+        assert!(
+            unresolved_output["callTree"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|node| node["method"].as_str() != Some("run")),
+            "{unresolved_name}: {unresolved_output}"
+        );
+        assert_eq!(
+            unresolved_output["summary"]["unresolvedCallReasons"][reason],
+            1,
+            "{unresolved_output}"
+        );
+        assert_eq!(
+            unresolved_output["summary"]["unresolvedCallSitesScope"],
+            "traversedGraph",
+            "{unresolved_output}"
+        );
+        assert_eq!(unresolved_output["resultStatus"]["status"], "partial");
+        assert_eq!(unresolved_output["resultStatus"]["complete"], false);
+        assert_eq!(
+            unresolved_output["resultStatus"]["safeForExhaustiveClaims"],
+            false
+        );
+    }
+
+    let recursive_down = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["recursiveRoot"],
+            "direction": "down",
+            "depth": 1,
+            "includeBody": true
+        }),
+    );
+    assert!(!recursive_down.is_error, "{}", recursive_down.content[0].text);
+    let recursive_output: Value =
+        serde_json::from_str(&recursive_down.content[0].text).unwrap();
+    let recursive_nodes: Vec<_> = recursive_output["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["method"].as_str() == Some("recursiveRoot"))
+        .collect();
+    assert_eq!(recursive_nodes.len(), 1, "{recursive_output}");
+    assert_ne!(
+        recursive_nodes[0]["line"],
+        recursive_output["rootMethod"]["line"],
+        "nested binding must not resolve to the enclosing root: {recursive_output}"
+    );
+
+
+    let exact_down = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["shadowed"],
+            "direction": "down",
+            "depth": 1,
+            "includeBody": true
+        }),
+    );
+    assert!(!exact_down.is_error, "{}", exact_down.content[0].text);
+    let exact_down_output: Value = serde_json::from_str(&exact_down.content[0].text).unwrap();
+    assert_eq!(exact_down_output["rootMethod"]["file"], "caller.ts");
+    assert_eq!(exact_down_output["rootMethod"]["line"], 4);
+
+    let private_helper_down = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["privateHelper"],
+            "direction": "down",
+            "depth": 1,
+            "includeBody": true
+        }),
+    );
+    assert!(
+        !private_helper_down.is_error,
+        "{}",
+        private_helper_down.content[0].text
+    );
+    let private_down_output: Value =
+        serde_json::from_str(&private_helper_down.content[0].text).unwrap();
+    assert!(private_down_output["callTree"].as_array().unwrap().is_empty());
+    assert_eq!(
+        private_down_output["rootResolution"]["reason"],
+        "ambiguous_typescript_root"
+    );
+    assert!(private_down_output.get("rootMethod").is_none());
+
+    let batch_down = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["shadowed", "privateHelper"],
+            "direction": "down",
+            "depth": 1,
+            "includeBody": true
+        }),
+    );
+    assert!(!batch_down.is_error, "{}", batch_down.content[0].text);
+    let batch_down_output: Value = serde_json::from_str(&batch_down.content[0].text).unwrap();
+    let batch_down_results = batch_down_output["results"].as_array().unwrap();
+    let exact_batch = batch_down_results
+        .iter()
+        .find(|result| result["method"].as_str() == Some("shadowed"))
+        .unwrap();
+    let private_batch = batch_down_results
+        .iter()
+        .find(|result| result["method"].as_str() == Some("privateHelper"))
+        .unwrap();
+    assert_eq!(exact_batch["rootMethod"]["file"], "caller.ts");
+    assert_eq!(private_batch["rootResolution"]["reason"], "ambiguous_typescript_root");
+    assert!(private_batch.get("rootMethod").is_none());
+
+
+    let exported_helper_down = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["exportedHelper"],
+            "direction": "down",
+            "depth": 1,
+            "includeBody": true
+        }),
+    );
+    assert!(
+        !exported_helper_down.is_error,
+        "{}",
+        exported_helper_down.content[0].text
+    );
+    let exported_helper_output: Value =
+        serde_json::from_str(&exported_helper_down.content[0].text).unwrap();
+    assert_eq!(exported_helper_output["rootMethod"]["method"], "exportedHelper");
+    assert_eq!(exported_helper_output["rootMethod"]["file"], "caller.ts");
+    assert!(
+        exported_helper_output["callTree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["method"].as_str() == Some("work")),
+        "{exported_helper_output}"
+    );
+
+
+    let arrow_down = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["arrowRoot"],
+            "class": "ArrowOwner",
+            "direction": "down",
+            "depth": 1,
+            "includeBody": true
+        }),
+    );
+    assert!(!arrow_down.is_error, "{}", arrow_down.content[0].text);
+    let arrow_down_output: Value = serde_json::from_str(&arrow_down.content[0].text).unwrap();
+    assert_eq!(arrow_down_output["rootMethod"]["class"], "ArrowOwner");
+    assert!(
+        arrow_down_output["callTree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["method"].as_str() == Some("work")),
+        "{arrow_down_output}"
+    );
+
+    let arrow_up = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["arrowRoot"],
+            "class": "ArrowOwner",
+            "direction": "up",
+            "depth": 1
+        }),
+    );
+    assert!(!arrow_up.is_error, "{}", arrow_up.content[0].text);
+    let arrow_up_output: Value = serde_json::from_str(&arrow_up.content[0].text).unwrap();
+    assert!(
+        arrow_up_output["callTree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["method"].as_str() == Some("callArrow")),
+        "{arrow_up_output}"
+    );
+
+
+    let private_helper_up = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["privateHelper"],
+            "direction": "up",
+            "depth": 1
+        }),
+    );
+    assert!(
+        !private_helper_up.is_error,
+        "{}",
+        private_helper_up.content[0].text
+    );
+    let private_helper_output: Value =
+        serde_json::from_str(&private_helper_up.content[0].text).unwrap();
+    assert!(private_helper_output.get("rootResolution").is_none());
+    let private_callers: std::collections::HashSet<_> = private_helper_output["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node["method"].as_str())
+        .collect();
+    assert_eq!(
+        private_callers,
+        std::collections::HashSet::from(["usePrivateHelper", "useOtherPrivateHelper"]),
+        "{private_helper_output}"
+    );
+
+
     cleanup_tmp(&tmp_dir);
 }
 
@@ -1202,12 +1822,19 @@ fn test_mixed_cs_ts_callers_ext_filter() {
             parent: Some("TsComponent".to_string()), signature: None,
             modifiers: vec![], attributes: vec![], base_types: vec![],
         },
-        // 4: Shared method getUser (used by both)
+        // 4: C# method getUser (used by both)
         DefinitionEntry {
             file_id: 0, name: "getUser".to_string(),
             kind: DefinitionKind::Method, line_start: 12, line_end: 18,
             parent: Some("CsService".to_string()), signature: None,
             modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        // 5: Same-named TypeScript function must not hijack a mixed-language query.
+        DefinitionEntry {
+            file_id: 1, name: "getUser".to_string(),
+            kind: DefinitionKind::Function, line_start: 17, line_end: 18,
+            parent: None, signature: Some("getUser()".to_string()),
+            modifiers: vec!["export".to_string()], attributes: vec![], base_types: vec![],
         },
     ];
 
@@ -1268,6 +1895,30 @@ fn test_mixed_cs_ts_callers_ext_filter() {
     let output_all: Value = serde_json::from_str(&result_all.content[0].text).unwrap();
     let tree_all = output_all["callTree"].as_array().unwrap();
     assert!(tree_all.len() >= 2, "Without ext filter, should find callers from both .cs and .ts, got {}", tree_all.len());
+
+    let mixed_name_result = dispatch_tool(&ctx, "xray_callers", &json!({
+        "method": ["getUser"],
+        "depth": 1,
+        "includeBody": true
+    }));
+    assert!(!mixed_name_result.is_error);
+    let mixed_name_output: Value =
+        serde_json::from_str(&mixed_name_result.content[0].text).unwrap();
+    assert!(
+        mixed_name_output["callTree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["method"].as_str() == Some("DoWork")),
+        "same-named TS root must not suppress C# callers: {mixed_name_output}"
+    );
+
+    assert_eq!(
+        mixed_name_output["rootMethod"]["file"],
+        "Service.cs",
+        "mixed-language query must retain the non-TS root body: {mixed_name_output}"
+    );
+
 
     // With ext=ts filter — should only find TS callers
     let result_ts = dispatch_tool(&ctx, "xray_callers", &json!({

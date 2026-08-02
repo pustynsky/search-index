@@ -169,6 +169,42 @@ fn build_callers_result_status(
     result_status
 }
 
+fn attach_unresolved_call_status(
+    output: &mut Value,
+    result_status: &mut Value,
+    unresolved_reasons: &std::collections::BTreeMap<String, usize>,
+) {
+    if unresolved_reasons.is_empty() {
+        return;
+    }
+    let total: usize = unresolved_reasons.values().sum();
+    output["summary"]["unresolvedCallSites"] = json!(total);
+    output["summary"]["unresolvedCallReasons"] = json!(unresolved_reasons);
+    output["summary"]["unresolvedCallSitesScope"] = json!("traversedGraph");
+
+    result_status["status"] = json!("partial");
+    result_status["complete"] = json!(false);
+    result_status["safeForExhaustiveClaims"] = json!(false);
+    result_status["totalKnown"] = json!(false);
+    if let Some(reasons) = result_status["reasons"].as_array_mut() {
+        for reason in unresolved_reasons.keys() {
+            if !reasons.iter().any(|existing| existing == reason) {
+                reasons.push(json!(reason));
+            }
+        }
+    }
+    if !result_status["resolutionCompleteness"].is_object() {
+        result_status["resolutionCompleteness"] = json!({});
+    }
+    let resolution = result_status["resolutionCompleteness"]
+        .as_object_mut()
+        .expect("resolution completeness must be an object");
+    resolution.insert("exact".to_string(), json!(false));
+    resolution.insert("allCallsResolved".to_string(), json!(false));
+    resolution.insert("allStaticTargetsUnique".to_string(), json!(false));
+}
+
+
 fn page_omits_items(
     page_request: &utils::PageRequest,
     returned: usize,
@@ -678,6 +714,39 @@ fn csharp_ambiguous_root_candidates(
     }
 }
 
+fn ambiguous_root_resolution_value(
+    index: &DefinitionIndex,
+    candidates: &[u32],
+    reason: &str,
+) -> Value {
+    let total_candidates = candidates.len();
+    let typescript_root = reason == "ambiguous_typescript_root";
+    let mut candidate_values: Vec<_> = candidates
+        .iter()
+        .filter_map(|&candidate| {
+            if typescript_root {
+                root_resolution_candidate(index, candidate)
+            } else {
+                csharp_resolution_candidate(index, candidate)
+            }
+        })
+        .collect();
+    if typescript_root {
+        candidate_values.truncate(10);
+    }
+    let mut resolution = json!({
+        "status": "ambiguous",
+        "reason": reason,
+        "candidates": candidate_values,
+    });
+    if typescript_root {
+        resolution["totalCandidates"] = json!(total_candidates);
+        resolution["candidatesTruncated"] = json!(total_candidates > 10);
+    }
+    resolution
+}
+
+
 fn build_ambiguous_root_result(
     index: &DefinitionIndex,
     method_name: &str,
@@ -687,9 +756,7 @@ fn build_ambiguous_root_result(
     reason: &str,
     production_only: bool,
 ) -> ToolCallResult {
-    let candidate_values: Vec<_> = candidates.iter()
-        .filter_map(|&candidate| csharp_resolution_candidate(index, candidate))
-        .collect();
+    let root_resolution = ambiguous_root_resolution_value(index, candidates, reason);
     let mut output = json!({
         "callTree": [],
         "query": {
@@ -697,11 +764,7 @@ fn build_ambiguous_root_result(
             "direction": direction,
             "productionOnly": production_only,
         },
-        "rootResolution": {
-            "status": "ambiguous",
-            "reason": reason,
-            "candidates": candidate_values,
-        },
+        "rootResolution": root_resolution,
         "summary": {
             "totalNodes": 0,
             "truncated": false,
@@ -1043,7 +1106,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         impact_analysis_truncated: &impact_analysis_truncated,
         exclude_patterns,
         exclude_file_lower,
-        ext_filter_list,
+        ext_filter_list: ext_filter_list.clone(),
         extension_methods_lower,
         production_only,
     };
@@ -1052,12 +1115,43 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
     let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
 
-    // Build root method info (for includeBody — includes the searched method's own body)
-    let root_method = if include_body {
+    let typescript_roots = if exact_root_definition.is_none() {
+        find_typescript_root_definitions(
+            &def_idx,
+            &method_name,
+            class_filter.as_deref(),
+            production_only,
+            &ext_filter_list,
+        )
+    } else {
+        TypeScriptRootCandidates::default()
+    };
+    let selected_typescript_roots = typescript_roots.selected(direction);
+    if selected_typescript_roots.len() > 1 {
+        return build_ambiguous_root_result(
+            &def_idx,
+            &method_name,
+            class_filter.as_deref(),
+            direction,
+            selected_typescript_roots,
+            "ambiguous_typescript_root",
+            production_only,
+        );
+    }
+    let traversal_root_definition = exact_root_definition
+        .or_else(|| selected_typescript_roots.first().copied());
+    let root_body_definition = exact_root_definition.or_else(|| {
+        typescript_roots.root_body_definition(selected_typescript_roots)
+    });
+    let suppress_root_body = exact_root_definition.is_none()
+        && root_body_definition.is_none()
+        && typescript_roots.has_typescript();
+    let root_method = if include_body && !suppress_root_body {
         build_root_method_info(
             &method_lower,
             class_filter.as_deref(),
             &def_idx,
+            root_body_definition,
             &mut file_cache,
             &mut total_body_lines_emitted,
             max_body_lines,
@@ -1069,6 +1163,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
     } else {
         None
     };
+
 
     if direction == "up" {
         let initial_chain = vec![method_name.clone()];
@@ -1086,8 +1181,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             root_page_size: max_results,
             root_total_candidates: 0,
             interface_lookup_cache: HashMap::new(),
+            unresolved_call_reasons: std::collections::BTreeMap::new(),
         };
-        let tree = if let Some(root_definition) = exact_root_definition {
+        let tree = if let Some(root_definition) = traversal_root_definition {
             builder.build_exact_root(
                 &method_name,
                 class_filter.as_deref(),
@@ -1274,6 +1370,11 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         if has_external_grep_refs {
             mark_grep_reference_uncertainty(&mut result_status);
         }
+        attach_unresolved_call_status(
+            &mut output,
+            &mut result_status,
+            &builder.unresolved_call_reasons,
+        );
         if ambiguous_references > 0 {
             result_status["status"] = json!("partial");
             result_status["complete"] = json!(false);
@@ -1316,8 +1417,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             root_page_offset: page_request.offset,
             root_page_size: max_results,
             root_total_candidates: 0,
+            unresolved_call_reasons: std::collections::BTreeMap::new(),
         };
-        let tree = if let Some(root_definition) = exact_root_definition {
+        let tree = if let Some(root_definition) = traversal_root_definition {
             builder.build_exact_root(
                 &method_name,
                 class_filter.as_deref(),
@@ -1437,6 +1539,11 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         if has_external_grep_refs {
             mark_grep_reference_uncertainty(&mut result_status);
         }
+        attach_unresolved_call_status(
+            &mut output,
+            &mut result_status,
+            &builder.unresolved_call_reasons,
+        );
         if ambiguous_edges > 0 {
             result_status["status"] = json!("partial");
             result_status["complete"] = json!(false);
@@ -1554,6 +1661,8 @@ fn handle_multi_method_callers(
     let mut total_nodes_lower_bound_all: usize = 0;
     // MINOR-7: aggregate per-level truncation across all methods in the batch.
     let mut total_per_level_dropped: usize = 0;
+    let mut unresolved_call_reasons_all = std::collections::BTreeMap::new();
+    let mut ambiguous_typescript_roots = 0usize;
 
     let total_methods = methods.len();
     let offset = page_request.offset.min(total_methods);
@@ -1606,13 +1715,30 @@ fn handle_multi_method_callers(
 
         // Per-method ambiguity check (same logic as single-method path)
         let method_warning = check_method_ambiguity(method_name, &method_lower, class_filter, &def_idx);
+        let typescript_roots = find_typescript_root_definitions(
+            &def_idx,
+            method_name,
+            class_filter,
+            production_only,
+            &ext_filter_list,
+        );
+        let selected_typescript_roots = typescript_roots.selected(&direction);
+        let selected_root = selected_typescript_roots.first().copied();
+        let root_body_definition =
+            typescript_roots.root_body_definition(selected_typescript_roots);
+        let suppress_root_body =
+            root_body_definition.is_none() && typescript_roots.has_typescript();
 
-        // Build root method info
-        let root_method = if include_body {
+        // An ambiguous or aggregated root has no honest body to attach.
+        let root_method = if include_body
+            && selected_typescript_roots.len() <= 1
+            && !suppress_root_body
+        {
             build_root_method_info(
                 &method_lower,
                 class_filter,
                 &def_idx,
+                root_body_definition,
                 &mut file_cache,
                 &mut total_body_lines_emitted,
                 max_body_lines,
@@ -1643,13 +1769,32 @@ fn handle_multi_method_callers(
                 root_page_size: 0,
                 root_total_candidates: 0,
                 interface_lookup_cache: HashMap::new(),
+                unresolved_call_reasons: std::collections::BTreeMap::new(),
             };
-            let tree = builder.build(
-                method_name,
-                class_filter,
-                0,
-                &initial_chain,
-            );
+            let tree = if selected_typescript_roots.len() > 1 {
+                ambiguous_typescript_roots += 1;
+                method_result["rootResolution"] = ambiguous_root_resolution_value(
+                    &def_idx,
+                    selected_typescript_roots,
+                    "ambiguous_typescript_root",
+                );
+                Vec::new()
+            } else if let Some(root_definition) = selected_root {
+                builder.build_exact_root(
+                    method_name,
+                    class_filter,
+                    0,
+                    &initial_chain,
+                    root_definition,
+                )
+            } else {
+                builder.build(
+                    method_name,
+                    class_filter,
+                    0,
+                    &initial_chain,
+                )
+            };
             file_cache = builder.file_cache;
             total_body_lines_emitted = builder.total_body_lines_emitted;
             // CALL-005: only dedup when resolveInterfaces=true (see single-method handler).
@@ -1673,6 +1818,15 @@ fn handle_multi_method_callers(
                 method_result["perLevelTruncated"] = json!(true);
                 method_result["callersDroppedPerLevel"] = json!(method_dropped);
             }
+            if !builder.unresolved_call_reasons.is_empty() {
+                let unresolved_total: usize = builder.unresolved_call_reasons.values().sum();
+                method_result["unresolvedCallSites"] = json!(unresolved_total);
+                method_result["unresolvedCallReasons"] = json!(&builder.unresolved_call_reasons);
+                method_result["unresolvedCallSitesScope"] = json!("traversedGraph");
+                for (reason, count) in &builder.unresolved_call_reasons {
+                    *unresolved_call_reasons_all.entry(reason.clone()).or_insert(0) += count;
+                }
+            }
 
             if let Some(root) = &root_method {
                 method_result["rootMethod"] = root.clone();
@@ -1680,6 +1834,7 @@ fn handle_multi_method_callers(
 
             // Nearest-match hint when callTree is empty
             if tree.is_empty()
+                && method_result.get("rootResolution").is_none()
                 && let Some(h) = generate_callers_hint(method_name, class_filter, &def_idx) {
                     method_result["hint"] = json!(h);
                 }
@@ -1732,12 +1887,30 @@ fn handle_multi_method_callers(
                 root_page_offset: 0,
                 root_page_size: 0,
                 root_total_candidates: 0,
+                unresolved_call_reasons: std::collections::BTreeMap::new(),
             };
-            let tree = builder.build(
-                method_name,
-                class_filter,
-                0,
-            );
+            let tree = if selected_typescript_roots.len() > 1 {
+                ambiguous_typescript_roots += 1;
+                method_result["rootResolution"] = ambiguous_root_resolution_value(
+                    &def_idx,
+                    selected_typescript_roots,
+                    "ambiguous_typescript_root",
+                );
+                Vec::new()
+            } else if let Some(root_definition) = selected_root {
+                builder.build_exact_root(
+                    method_name,
+                    class_filter,
+                    0,
+                    root_definition,
+                )
+            } else {
+                builder.build(
+                    method_name,
+                    class_filter,
+                    0,
+                )
+            };
             file_cache = builder.file_cache;
             total_body_lines_emitted = builder.total_body_lines_emitted;
             let method_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
@@ -1757,6 +1930,15 @@ fn handle_multi_method_callers(
                 method_result["perLevelTruncated"] = json!(true);
                 method_result["callersDroppedPerLevel"] = json!(method_dropped);
             }
+            if !builder.unresolved_call_reasons.is_empty() {
+                let unresolved_total: usize = builder.unresolved_call_reasons.values().sum();
+                method_result["unresolvedCallSites"] = json!(unresolved_total);
+                method_result["unresolvedCallReasons"] = json!(&builder.unresolved_call_reasons);
+                method_result["unresolvedCallSitesScope"] = json!("traversedGraph");
+                for (reason, count) in &builder.unresolved_call_reasons {
+                    *unresolved_call_reasons_all.entry(reason.clone()).or_insert(0) += count;
+                }
+            }
 
             if let Some(root) = &root_method {
                 method_result["rootMethod"] = root.clone();
@@ -1764,6 +1946,7 @@ fn handle_multi_method_callers(
 
             // Nearest-match hint when callTree is empty
             if tree.is_empty()
+                && method_result.get("rootResolution").is_none()
                 && let Some(h) = generate_callers_hint(method_name, class_filter, &def_idx) {
                     method_result["hint"] = json!(h);
                 }
@@ -1792,6 +1975,16 @@ fn handle_multi_method_callers(
     if total_per_level_dropped > 0 {
         summary["perLevelTruncated"] = json!(true);
         summary["callersDroppedPerLevel"] = json!(total_per_level_dropped);
+    }
+    if !unresolved_call_reasons_all.is_empty() {
+        summary["unresolvedCallSites"] = json!(unresolved_call_reasons_all.values().sum::<usize>());
+        summary["unresolvedCallReasons"] = json!(unresolved_call_reasons_all);
+    }
+
+    if ambiguous_typescript_roots > 0 {
+        summary["resolutionSummary"] = json!({
+            "ambiguousRoots": ambiguous_typescript_roots,
+        });
     }
     let mut total_body_lines_available: usize = 0;
     if include_body {
@@ -1858,6 +2051,28 @@ fn handle_multi_method_callers(
             .iter()
             .any(|method| is_sql_routine_query(&def_idx, method, class_filter)),
     );
+    attach_unresolved_call_status(
+        &mut output,
+        &mut result_status,
+        &unresolved_call_reasons_all,
+    );
+
+    if ambiguous_typescript_roots > 0 {
+        result_status["status"] = json!("partial");
+        result_status["complete"] = json!(false);
+        result_status["safeForExactSemantics"] = json!(false);
+        result_status["safeForExhaustiveClaims"] = json!(false);
+        if let Some(reasons) = result_status["reasons"].as_array_mut()
+            && !reasons.iter().any(|reason| reason == "ambiguous_typescript_root")
+        {
+            reasons.push(json!("ambiguous_typescript_root"));
+        }
+        result_status["resolutionCompleteness"] = json!({
+            "exact": false,
+            "allCallsResolved": false,
+            "allStaticTargetsUnique": false,
+        });
+    }
     attach_traversal_page_status(
         &mut result_status,
         "methods",
@@ -2431,6 +2646,7 @@ struct CallerTreeBuilder<'a> {
     /// once per (class, method) node to gate `expand_interface_callers`; the
     /// cache keeps cost O(unique pairs) instead of O(nodes).
     interface_lookup_cache: HashMap<(String, String), Vec<String>>,
+    unresolved_call_reasons: std::collections::BTreeMap<String, usize>,
 }
 
 impl CallerTreeBuilder<'_> {
@@ -2747,11 +2963,54 @@ fn verify_call_site_target_with_policy(
         );
     }
 
-    // Unscoped SQL caller queries still require exact AST evidence, but do not
-    // need receiver-type filtering after the method and line have matched.
+    // Unscoped TypeScript queries still require a parser-resolved target.
+    // This rejects imported, dynamic, unresolved-local, and unknown-global
+    // bare calls even when no matching root definition exists.
     let target_class = match target_class {
         Some(target_class) => target_class,
-        None => return true,
+        None => {
+            let typed_typescript_call = matching_calls.iter().any(|call| {
+                matches!(
+                    call.call_kind,
+                    CallSiteKind::TypeScriptSameFile { .. }
+                        | CallSiteKind::TypeScriptLocalCallable { .. }
+                        | CallSiteKind::TypeScriptMember
+                        | CallSiteKind::TypeScriptAnalysisIncomplete
+                        | CallSiteKind::TypeScriptDynamicCallableParameter
+                        | CallSiteKind::TypeScriptUnresolvedLocal
+                        | CallSiteKind::TypeScriptImported
+                        | CallSiteKind::TypeScriptUnknownGlobal
+                )
+            });
+            if !typed_typescript_call {
+                return true;
+            }
+            let caller_parent = def_idx
+                .definitions
+                .get(caller_di as usize)
+                .and_then(|definition| definition.parent.as_deref());
+            return call_sites
+                .iter()
+                .enumerate()
+                .filter(|(_, call)| {
+                    call.line == call_line
+                        && call.method_name.to_lowercase() == method_name_lower
+                })
+                .any(|(ordinal, call)| {
+                    matches!(
+                        resolve_call_site_for_graph(
+                            call,
+                            def_idx,
+                            caller_di,
+                            ordinal,
+                            caller_parent,
+                            policy,
+                            production_only,
+                        ),
+                        CSharpCallResolution::Resolved(candidates) if !candidates.is_empty()
+                    )
+                });
+        }
     };
 
     let target_lower = target_class.to_lowercase();
@@ -2912,6 +3171,7 @@ fn build_root_method_info(
     method_lower: &str,
     class_filter: Option<&str>,
     def_idx: &DefinitionIndex,
+    root_definition: Option<u32>,
     file_cache: &mut HashMap<String, Option<String>>,
     total_body_lines_emitted: &mut usize,
     max_body_lines: usize,
@@ -2920,7 +3180,11 @@ fn build_root_method_info(
     body_line_start: Option<u32>,
     body_line_end: Option<u32>,
 ) -> Option<Value> {
-    let name_indices = def_idx.name_index.get(method_lower)?;
+    let exact_indices = root_definition.map(|definition| vec![definition]);
+    let name_indices = match exact_indices.as_deref() {
+        Some(indices) => indices,
+        None => def_idx.name_index.get(method_lower)?,
+    };
 
     // Find the best matching method definition
     for &di in name_indices {
@@ -2929,7 +3193,13 @@ fn build_root_method_info(
             None => continue, // tombstone or invalid index — skip
         };
         if !matches!(def.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function
+            | DefinitionKind::Field | DefinitionKind::Variable
             | DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction) {
+            continue;
+        }
+        if matches!(def.kind, DefinitionKind::Field | DefinitionKind::Variable)
+            && !def.modifiers.iter().any(|modifier| modifier == "callable")
+        {
             continue;
         }
         // Apply class filter if provided
@@ -2969,10 +3239,169 @@ fn build_root_method_info(
     None
 }
 
-/// Find the `line_start` of the first matching method definition for overload disambiguation.
-/// Searches the name index for definitions with callable kinds (Method, Constructor, Function,
-/// StoredProcedure, SqlFunction). When `parent_class` is provided, only matches definitions
-/// whose parent matches (case-insensitive).
+/// Classify active, in-scope TypeScript roots without hiding mixed-language candidates.
+/// Public and private roots stay separate because upward private-name queries aggregate exact
+/// call-site edges, while downward traversal must select or reject a concrete root.
+#[derive(Default)]
+struct TypeScriptRootCandidates {
+    public: Vec<u32>,
+    private: Vec<u32>,
+    non_typescript: Vec<u32>,
+    mixed_language: bool,
+}
+
+impl TypeScriptRootCandidates {
+    fn selected(&self, direction: &str) -> &[u32] {
+        if self.mixed_language {
+            &[]
+        } else if !self.public.is_empty() {
+            &self.public
+        } else if direction == "down" {
+            &self.private
+        } else {
+            &[]
+        }
+    }
+
+    fn has_typescript(&self) -> bool {
+        !self.public.is_empty() || !self.private.is_empty()
+    }
+
+    fn root_body_definition(&self, selected: &[u32]) -> Option<u32> {
+        selected.first().copied().or_else(|| {
+            (self.mixed_language || !self.has_typescript())
+                .then(|| self.non_typescript.first().copied())
+                .flatten()
+        })
+    }
+}
+
+
+fn find_typescript_root_definitions(
+    def_idx: &DefinitionIndex,
+    method_name: &str,
+    parent_class: Option<&str>,
+    production_only: bool,
+    ext_filter: &[String],
+) -> TypeScriptRootCandidates {
+    let is_typescript_extension = |extension: &str| {
+        extension.eq_ignore_ascii_case("ts") || extension.eq_ignore_ascii_case("tsx")
+    };
+    let query_allows_typescript = ext_filter.is_empty()
+        || ext_filter
+            .iter()
+            .any(|extension| is_typescript_extension(extension));
+    if !query_allows_typescript {
+        return TypeScriptRootCandidates::default();
+    }
+    let query_is_typescript_only = !ext_filter.is_empty()
+        && ext_filter
+            .iter()
+            .all(|extension| is_typescript_extension(extension));
+
+    let method_lower = method_name.to_lowercase();
+    let Some(candidates) = def_idx.name_index.get(&method_lower) else {
+        return TypeScriptRootCandidates::default();
+    };
+    let mut public = Vec::new();
+    let mut private = Vec::new();
+    let mut non_typescript = Vec::new();
+    for &definition_index in candidates {
+        let Some(definition) = def_idx.definitions.get(definition_index as usize) else {
+            continue;
+        };
+        if !matches!(
+            definition.kind,
+            DefinitionKind::Method
+                | DefinitionKind::Constructor
+                | DefinitionKind::Function
+                | DefinitionKind::Field
+                | DefinitionKind::Variable
+                | DefinitionKind::StoredProcedure
+                | DefinitionKind::SqlFunction
+        ) {
+            continue;
+        }
+        if matches!(definition.kind, DefinitionKind::Field | DefinitionKind::Variable)
+            && !definition
+                .modifiers
+                .iter()
+                .any(|modifier| modifier == "callable")
+        {
+            continue;
+        }
+        if let Some(parent) = parent_class
+            && !definition
+                .parent
+                .as_deref()
+                .is_some_and(|candidate| candidate.eq_ignore_ascii_case(parent))
+        {
+            continue;
+        }
+        let active = def_idx
+            .file_index
+            .get(&definition.file_id)
+            .is_some_and(|definitions| definitions.binary_search(&definition_index).is_ok());
+        let Some(file) = def_idx.files.get(definition.file_id as usize) else {
+            continue;
+        };
+        if !active || (production_only && excluded_from_production(definition, file)) {
+            continue;
+        }
+        let Some(extension) = std::path::Path::new(file)
+            .extension()
+            .and_then(|extension| extension.to_str())
+        else {
+            continue;
+        };
+        let in_extension_scope = ext_filter.is_empty()
+            || ext_filter
+                .iter()
+                .any(|candidate| candidate.eq_ignore_ascii_case(extension));
+        if !in_extension_scope {
+            continue;
+        }
+        if !is_typescript_extension(extension) {
+            non_typescript.push((definition.file_id, definition.line_start, definition_index));
+            continue;
+        }
+        let is_local = definition
+            .modifiers
+            .iter()
+            .any(|modifier| modifier == "local")
+            || (definition.parent.is_none()
+                && !definition
+                    .modifiers
+                    .iter()
+                    .any(|modifier| modifier == "export"));
+        let target = if is_local { &mut private } else { &mut public };
+        target.push((definition.file_id, definition.line_start, definition_index));
+    }
+    public.sort_unstable();
+    private.sort_unstable();
+    non_typescript.sort_unstable();
+    let has_typescript = !public.is_empty() || !private.is_empty();
+    let mixed_language = has_typescript
+        && !non_typescript.is_empty()
+        && !query_is_typescript_only;
+    TypeScriptRootCandidates {
+        public: public
+            .into_iter()
+            .map(|(_, _, definition_index)| definition_index)
+            .collect(),
+        private: private
+            .into_iter()
+            .map(|(_, _, definition_index)| definition_index)
+            .collect(),
+        non_typescript: non_typescript
+            .into_iter()
+            .map(|(_, _, definition_index)| definition_index)
+            .collect(),
+        mixed_language,
+    }
+}
+
+
 fn find_target_line(
     def_idx: &DefinitionIndex,
     method_lower: &str,
@@ -3199,6 +3628,27 @@ impl CallerTreeBuilder<'_> {
         )
     }
 
+    fn record_unresolved_call_reasons(
+        &mut self,
+        caller_di: u32,
+        call_line: u32,
+        method_name_lower: &str,
+    ) {
+        let Some(call_sites) = self.ctx.def_idx.method_calls.get(&caller_di) else {
+            return;
+        };
+        for call in call_sites.iter().filter(|call| {
+            call.line == call_line && call.method_name.to_lowercase() == method_name_lower
+        }) {
+            if let Some(reason) = call.call_kind.unresolved_reason() {
+                *self
+                    .unresolved_call_reasons
+                    .entry(reason.to_string())
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
     fn build_with_root(
         &mut self,
         method_name: &str,
@@ -3319,11 +3769,23 @@ impl CallerTreeBuilder<'_> {
                 // SQL caller queries always require parser-emitted call-site evidence,
                 // including unscoped queries where textual definition hits would
                 // otherwise be mistaken for self-callers.
-                let is_sql = std::path::Path::new(file_path)
+                let extension = std::path::Path::new(file_path)
                     .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"));
-                let requires_call_site_validation = parent_class.is_some() || is_sql;
+                    .and_then(|extension| extension.to_str());
+                let is_sql = extension.is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("sql")
+                });
+                let is_typescript = extension.is_some_and(|extension| {
+                    extension.eq_ignore_ascii_case("ts")
+                        || extension.eq_ignore_ascii_case("tsx")
+                });
+                let requires_call_site_validation = root_definition.is_some()
+                    || parent_class.is_some()
+                    || is_sql
+                    || is_typescript;
+                if is_typescript {
+                    self.record_unresolved_call_reasons(caller_di, line, &method_lower);
+                }
                 let mut ambiguous_candidates = Vec::new();
                 if requires_call_site_validation {
                     if let Some(target_definition) = root_definition {
@@ -3606,11 +4068,25 @@ impl CallerTreeBuilder<'_> {
             // Recurse with the CALLER's parent class as the class filter.
             let mut next_chain = call_chain.to_vec();
             next_chain.push(info.name.clone());
-            let sub_callers = self.build(
+            let recursive_root = self
+                .ctx
+                .def_idx
+                .definitions
+                .get(info.di as usize)
+                .and_then(|definition| self.ctx.def_idx.files.get(definition.file_id as usize))
+                .and_then(|file| Path::new(file).extension())
+                .and_then(|extension| extension.to_str())
+                .filter(|extension| {
+                    extension.eq_ignore_ascii_case("ts")
+                        || extension.eq_ignore_ascii_case("tsx")
+                })
+                .map(|_| info.di);
+            let sub_callers = self.build_with_root(
                 &info.name,
                 info.parent.as_deref(),
                 current_depth + 1,
                 &next_chain,
+                recursive_root,
             );
 
             let mut node = build_caller_node(
@@ -3840,6 +4316,7 @@ struct CalleeTreeBuilder<'a> {
     root_page_offset: usize,
     root_page_size: usize,
     root_total_candidates: usize,
+    unresolved_call_reasons: std::collections::BTreeMap<String, usize>,
 }
 
 impl CalleeTreeBuilder<'_> {
@@ -3927,8 +4404,14 @@ impl CalleeTreeBuilder<'_> {
                         def_idx.definitions.get(di as usize)
                             .is_some_and(|d| {
                                 let kind_ok = d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor || d.kind == DefinitionKind::Function
+                                    || d.kind == DefinitionKind::Field || d.kind == DefinitionKind::Variable
                                     || d.kind == DefinitionKind::StoredProcedure || d.kind == DefinitionKind::SqlFunction;
                                 if !kind_ok { return false; }
+                                if matches!(d.kind, DefinitionKind::Field | DefinitionKind::Variable)
+                                    && !d.modifiers.iter().any(|modifier| modifier == "callable")
+                                {
+                                    return false;
+                                }
 
                                 // Apply class filter: only match methods whose parent matches
                                 if let Some(cls) = class_filter {
@@ -3966,6 +4449,13 @@ impl CalleeTreeBuilder<'_> {
             };
 
             for (call_ordinal, call) in call_sites.iter().enumerate() {
+                if let Some(reason) = call.call_kind.unresolved_reason() {
+                    *self
+                        .unresolved_call_reasons
+                        .entry(reason.to_string())
+                        .or_insert(0) += 1;
+                    continue;
+                }
                 let caller_parent = def_idx.definitions.get(method_di as usize)
                     .and_then(|d| d.parent.as_deref());
                 let resolved = match resolve_call_site_for_graph(
@@ -4289,20 +4779,38 @@ enum CSharpCallResolution {
     Ambiguous(Vec<u32>),
 }
 
-fn call_site_kind_matches(call_kind: CallSiteKind, definition_kind: &DefinitionKind) -> bool {
+fn call_site_kind_matches(call_kind: CallSiteKind, definition: &DefinitionEntry) -> bool {
+    let callable_value = matches!(definition.kind, DefinitionKind::Field | DefinitionKind::Variable)
+        && definition
+            .modifiers
+            .iter()
+            .any(|modifier| modifier == "callable");
     match call_kind {
         CallSiteKind::Unknown => matches!(
-            definition_kind,
+            definition.kind,
             DefinitionKind::Method
                 | DefinitionKind::Constructor
                 | DefinitionKind::Function
                 | DefinitionKind::StoredProcedure
                 | DefinitionKind::SqlFunction
         ),
-        CallSiteKind::SqlExecute => matches!(definition_kind, DefinitionKind::StoredProcedure),
-        CallSiteKind::SqlScalarFunction => matches!(definition_kind, DefinitionKind::SqlFunction),
+        CallSiteKind::SqlExecute => definition.kind == DefinitionKind::StoredProcedure,
+        CallSiteKind::SqlScalarFunction => definition.kind == DefinitionKind::SqlFunction,
         CallSiteKind::SqlRelation => false,
-        CallSiteKind::Constructor => matches!(definition_kind, DefinitionKind::Constructor),
+        CallSiteKind::Constructor => definition.kind == DefinitionKind::Constructor,
+        CallSiteKind::TypeScriptMember => matches!(
+            definition.kind,
+            DefinitionKind::Method | DefinitionKind::Function
+        ) || callable_value,
+        CallSiteKind::TypeScriptAnalysisIncomplete => false,
+        CallSiteKind::TypeScriptSameFile { .. }
+        | CallSiteKind::TypeScriptLocalCallable { .. } => {
+            definition.kind == DefinitionKind::Function || callable_value
+        }
+        CallSiteKind::TypeScriptDynamicCallableParameter
+        | CallSiteKind::TypeScriptUnresolvedLocal
+        | CallSiteKind::TypeScriptImported
+        | CallSiteKind::TypeScriptUnknownGlobal => false,
     }
 }
 
@@ -4315,7 +4823,13 @@ fn resolve_call_site_for_graph(
     policy: ResolutionPolicy,
     production_only: bool,
 ) -> CSharpCallResolution {
-    let legacy: Vec<_> = resolve_call_site_with_policy(call, def_idx, caller_parent, policy)
+    let legacy: Vec<_> = resolve_call_site_with_policy(
+        call,
+        def_idx,
+        Some(caller_def_idx),
+        caller_parent,
+        policy,
+    )
         .into_iter()
         .filter(|&candidate| {
             if !production_only {
@@ -4340,7 +4854,7 @@ fn resolve_call_site_for_graph(
         .filter_map(|&candidate| {
             let definition = def_idx.definitions.get(candidate as usize)?;
             if definition.name != call.method_name
-                || !call_site_kind_matches(call.call_kind, &definition.kind)
+                || !call_site_kind_matches(call.call_kind, definition)
             {
                 return None;
             }
@@ -4676,6 +5190,27 @@ fn csharp_resolution_candidates(def_idx: &DefinitionIndex, candidates: &[u32]) -
 }
 
 
+fn root_resolution_candidate(def_idx: &DefinitionIndex, candidate: u32) -> Option<Value> {
+    if let Some(candidate) = csharp_resolution_candidate(def_idx, candidate) {
+        return Some(candidate);
+    }
+    let definition = def_idx.definitions.get(candidate as usize)?;
+    let file = def_idx
+        .files
+        .get(definition.file_id as usize)
+        .and_then(|path| Path::new(path).file_name())
+        .and_then(|name| name.to_str());
+    Some(json!({
+        "name": definition.name,
+        "parent": definition.parent,
+        "kind": definition.kind,
+        "signature": definition.signature,
+        "file": file,
+        "line": definition.line_start,
+    }))
+}
+
+
 fn csharp_resolution_candidate(def_idx: &DefinitionIndex, candidate: u32) -> Option<Value> {
     let definition = def_idx.definitions.get(candidate as usize)?;
     let callable = def_idx.csharp_semantics.callable_for_definition(candidate)?;
@@ -4704,6 +5239,7 @@ pub(crate) fn resolve_call_site(
     resolve_call_site_with_policy(
         call,
         def_idx,
+        None,
         caller_parent,
         ResolutionPolicy::ExpandInterfaceImplementations,
     )
@@ -4712,6 +5248,7 @@ pub(crate) fn resolve_call_site(
 fn resolve_call_site_with_policy(
     call: &CallSite,
     def_idx: &DefinitionIndex,
+    caller_def_idx: Option<u32>,
     caller_parent: Option<&str>,
     policy: ResolutionPolicy,
 ) -> Vec<u32> {
@@ -4722,6 +5259,40 @@ fn resolve_call_site_with_policy(
     };
 
     let mut resolved: Vec<u32> = Vec::new();
+
+    match call.call_kind {
+        CallSiteKind::TypeScriptSameFile { definition_line }
+        | CallSiteKind::TypeScriptLocalCallable { definition_line } => {
+            let Some(caller_file_id) = caller_def_idx
+                .and_then(|caller| def_idx.definitions.get(caller as usize))
+                .map(|caller| caller.file_id)
+            else {
+                return Vec::new();
+            };
+            for &candidate in candidates {
+                let Some(definition) = def_idx.definitions.get(candidate as usize) else {
+                    continue;
+                };
+                if definition.file_id != caller_file_id
+                    || !matches!(
+                        definition.kind,
+                        DefinitionKind::Function | DefinitionKind::Variable
+                    )
+                    || definition.line_start != definition_line
+                {
+                    continue;
+                }
+                resolved.push(candidate);
+            }
+            return resolved;
+        }
+        CallSiteKind::TypeScriptDynamicCallableParameter
+        | CallSiteKind::TypeScriptUnresolvedLocal
+        | CallSiteKind::TypeScriptImported
+        | CallSiteKind::TypeScriptUnknownGlobal => return Vec::new(),
+        CallSiteKind::TypeScriptAnalysisIncomplete => return Vec::new(),
+        _ => {}
+    }
 
     // Skip matching for built-in types to avoid false positives
     if let Some(ref receiver_type) = call.receiver_type {
@@ -4744,7 +5315,7 @@ fn resolve_call_site_with_policy(
             None => continue,
         };
 
-        if !call_site_kind_matches(call.call_kind, &def.kind) {
+        if !call_site_kind_matches(call.call_kind, def) {
             continue;
         }
 

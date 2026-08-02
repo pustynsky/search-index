@@ -2082,7 +2082,7 @@ fn test_d20_exact_symbol_rejects_noncanonical_id() {
 }
 
 #[test]
-fn test_xray_callers_ambiguity_warning_truncated() {
+fn test_xray_callers_typescript_root_ambiguity_candidates_are_truncated() {
     // Create 15 classes each with a method named "OnInit" — exceeds MAX_LISTED (10)
     let num_classes = 15;
     let mut content_idx: HashMap<String, Vec<Posting>> = HashMap::new();
@@ -2159,15 +2159,105 @@ fn test_xray_callers_ambiguity_warning_truncated() {
     let result = dispatch_tool(&ctx, "xray_callers", &json!({ "method": ["OnInit"] }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    let warning = output["warning"].as_str().expect("should have warning");
-
-    // Warning should mention total count (15)
-    assert!(warning.contains("15 classes"), "Warning should mention 15 classes, got: {}", warning);
-    // Warning should be truncated (showing first 10)
-    assert!(warning.contains("showing first 10"), "Warning should say 'showing first 10', got: {}", warning);
-    // Warning should NOT list all 15 classes — check total length is reasonable
-    assert!(warning.len() < 500, "Warning should be truncated, but was {} bytes", warning.len());
+    assert!(output["callTree"].as_array().unwrap().is_empty(), "{output}");
+    assert_eq!(output["rootResolution"]["status"], "ambiguous");
+    assert_eq!(
+        output["rootResolution"]["reason"],
+        "ambiguous_typescript_root"
+    );
+    assert_eq!(output["rootResolution"]["totalCandidates"], 15);
+    assert_eq!(output["rootResolution"]["candidatesTruncated"], true);
+    assert_eq!(
+        output["rootResolution"]["candidates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        10
+    );
+    assert_eq!(output["resultStatus"]["status"], "partial");
 }
+
+#[test]
+fn test_xray_callers_ambiguity_warning_truncated() {
+    let num_classes = 15;
+    let mut content_idx: HashMap<String, Vec<Posting>> = HashMap::new();
+    let mut files: Vec<String> = Vec::new();
+    let mut definitions: Vec<DefinitionEntry> = Vec::new();
+
+    for i in 0..num_classes {
+        let class_name = format!("Component{}", i);
+        let file_name = format!("C:\\src\\{}.cs", class_name);
+        files.push(file_name);
+
+        definitions.push(DefinitionEntry {
+            file_id: i as u32, name: class_name.clone(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        });
+        definitions.push(DefinitionEntry {
+            file_id: i as u32, name: "OnInit".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some(class_name), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        });
+
+        content_idx.entry("oninit".to_string()).or_default().push(
+            Posting { file_id: i as u32, lines: vec![10] }
+        );
+    }
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    for (i, file) in files.iter().enumerate() {
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(file)), i as u32);
+    }
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: files.clone(),
+        index: content_idx, total_tokens: 500,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50; num_classes],
+        ..Default::default()
+    };
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files,
+        definitions,
+        name_index, kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index, path_to_id,
+        method_calls: HashMap::new(), ..Default::default()
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_ext: "cs".to_string(),
+        ..Default::default()
+    };
+
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({ "method": ["OnInit"] }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let warning = output["warning"].as_str().unwrap();
+    assert!(warning.contains("15 classes"), "{warning}");
+    assert!(warning.contains("showing first 10"), "{warning}");
+    assert!(warning.len() < 500, "warning is too long: {}", warning.len());
+}
+
 #[test]
 fn test_xray_callers_ambiguity_warning_few_classes() {
     // Create 3 classes each with a method named "Initialize" — within MAX_LISTED (10)

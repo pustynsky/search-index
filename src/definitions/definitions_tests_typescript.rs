@@ -182,6 +182,8 @@ fn test_parse_ts_variable() {
     assert_eq!(var_defs.len(), 1);
     assert_eq!(var_defs[0].name, "MAX_RETRIES");
     assert!(var_defs[0].modifiers.contains(&"export".to_string()));
+
+    assert!(!var_defs[0].modifiers.contains(&"callable".to_string()));
 }
 
 #[test]
@@ -357,6 +359,540 @@ fn test_ts_standalone_function_call() {
 }
 
 #[test]
+fn test_ts_bare_call_lexical_bindings_are_typed() {
+    let source = r#"import defaultFn from './default';
+import * as namespaceFn from './namespace';
+import { remote as importedFn } from './remote';
+function sameModule(): void {}
+function recursive(): void { recursive(); }
+export function scenario(param: () => void): void {
+    const local = () => {};
+    local();
+    param();
+    let reassigned = () => {};
+    reassigned = sameModule;
+    reassigned();
+    let changing = () => {};
+    changing();
+    changing = sameModule;
+    changing();
+    try {} catch (error) { error(); }
+    defaultFn();
+    namespaceFn();
+    namespaceFn.remote();
+    importedFn();
+    console.log('x');
+    setTimeout(() => {}, 0);
+    sameModule();
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let scenario_idx = defs.iter().position(|definition| definition.name == "scenario").unwrap();
+    let scenario_calls = &call_sites
+        .iter()
+        .find(|(definition, _)| *definition == scenario_idx)
+        .unwrap()
+        .1;
+    let kind = |name: &str| {
+        scenario_calls
+            .iter()
+            .find(|call| call.method_name == name)
+            .map(|call| call.call_kind)
+            .unwrap()
+    };
+    assert!(matches!(
+        kind("local"),
+        CallSiteKind::TypeScriptLocalCallable { .. }
+    ));
+    assert_eq!(
+        kind("param"),
+        CallSiteKind::TypeScriptDynamicCallableParameter
+    );
+    assert_eq!(
+        kind("reassigned"),
+        CallSiteKind::TypeScriptUnresolvedLocal
+    );
+    assert_eq!(kind("importedFn"), CallSiteKind::TypeScriptImported);
+
+    assert_eq!(kind("defaultFn"), CallSiteKind::TypeScriptImported);
+    assert_eq!(kind("namespaceFn"), CallSiteKind::TypeScriptImported);
+
+    assert_eq!(kind("remote"), CallSiteKind::TypeScriptImported);
+    assert_eq!(kind("error"), CallSiteKind::TypeScriptUnresolvedLocal);
+    let changing_kinds: Vec<_> = scenario_calls
+        .iter()
+        .filter(|call| call.method_name == "changing")
+        .map(|call| call.call_kind)
+        .collect();
+    assert!(matches!(
+        changing_kinds.as_slice(),
+        [CallSiteKind::TypeScriptLocalCallable { .. }, CallSiteKind::TypeScriptUnresolvedLocal]
+    ));
+    assert_eq!(kind("setTimeout"), CallSiteKind::TypeScriptUnknownGlobal);
+
+    assert_eq!(kind("log"), CallSiteKind::TypeScriptUnknownGlobal);
+    assert!(matches!(
+        kind("sameModule"),
+        CallSiteKind::TypeScriptSameFile { .. }
+    ));
+
+    let recursive_idx = defs
+        .iter()
+        .position(|definition| definition.name == "recursive" && definition.parent.is_none())
+        .unwrap();
+    let recursive_call = call_sites
+        .iter()
+        .find(|(definition, _)| *definition == recursive_idx)
+        .unwrap()
+        .1
+        .iter()
+        .find(|call| call.method_name == "recursive")
+        .unwrap();
+    assert!(matches!(
+        recursive_call.call_kind,
+        CallSiteKind::TypeScriptSameFile { .. }
+    ));
+}
+
+#[test]
+fn test_ts_var_callable_uses_nearest_function_scope() {
+    let source = r#"function moduleFn(): void {}
+export function outer(flag: boolean): void {
+    if (flag) {
+        var moduleFn = () => {};
+    }
+    moduleFn();
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
+    let outer_idx = defs
+        .iter()
+        .position(|definition| definition.name == "outer")
+        .unwrap();
+    let call = call_sites
+        .iter()
+        .find(|(definition, _)| *definition == outer_idx)
+        .unwrap()
+        .1
+        .iter()
+        .find(|call| call.method_name == "moduleFn")
+        .unwrap();
+    assert!(matches!(
+        call.call_kind,
+        CallSiteKind::TypeScriptLocalCallable { .. }
+    ));
+}
+
+
+#[test]
+fn test_ts_bare_call_scopes_preserve_shadowing_and_closure_capture() {
+    let source = r#"export function outer(flag: boolean): void {
+    function nested(): void {}
+    const captured = () => {};
+    if (flag) {
+        const branch = () => {};
+        branch();
+    } else {
+        const branch = function(): void {};
+        branch();
+    }
+    function inner(): void { captured(); }
+    nested();
+    inner();
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let outer_idx = defs
+        .iter()
+        .position(|definition| definition.name == "outer" && definition.parent.is_none())
+        .unwrap();
+    let outer_calls = &call_sites
+        .iter()
+        .find(|(definition, _)| *definition == outer_idx)
+        .unwrap()
+        .1;
+    for name in ["nested", "inner"] {
+        assert!(matches!(
+            outer_calls
+                .iter()
+                .find(|call| call.method_name == name)
+                .unwrap()
+                .call_kind,
+            CallSiteKind::TypeScriptLocalCallable { .. }
+        ));
+    }
+
+    let branch_target_lines: std::collections::HashSet<u32> = defs
+        .iter()
+        .filter(|definition| definition.name == "branch")
+        .map(|definition| definition.line_start)
+        .collect();
+    let branch_call_lines: std::collections::HashSet<u32> = outer_calls
+        .iter()
+        .filter_map(|call| match call.call_kind {
+            CallSiteKind::TypeScriptLocalCallable { definition_line }
+                if call.method_name == "branch" => Some(definition_line),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(branch_call_lines, branch_target_lines);
+
+    let inner_idx = defs
+        .iter()
+        .position(|definition| definition.name == "inner")
+        .unwrap();
+    let captured_call = call_sites
+        .iter()
+        .find(|(definition, _)| *definition == inner_idx)
+        .unwrap()
+        .1
+        .iter()
+        .find(|call| call.method_name == "captured")
+        .unwrap();
+    assert!(matches!(
+        captured_call.call_kind,
+        CallSiteKind::TypeScriptLocalCallable { .. }
+    ));
+}
+
+
+#[test]
+fn test_ts_destructured_bindings_and_loop_reassignments_are_conservative() {
+    let source = r#"function target(): void {}
+function render(): void {}
+function inspect(): void {}
+export function scenario(
+    { callback }: { callback: () => void },
+    [arrayCallback]: Array<() => void>,
+    renderers: Array<() => void>,
+    registry: Record<string, () => void>
+): void {
+    const { local } = source;
+    let exact = () => {};
+    [exact] = source;
+    let deferred = () => {};
+    on(() => { deferred(); });
+    deferred = target;
+    let looped = () => {};
+    while (condition) {
+        looped();
+        looped = target;
+    }
+    for (const render of renderers) {
+        render();
+    }
+    for (let inspect in registry) {
+        inspect();
+    }
+    render();
+    inspect();
+    callback();
+    arrayCallback();
+    local();
+    exact();
+    let postfix = () => {};
+    postfix++;
+    postfix();
+    let prefix = () => {};
+    ++prefix;
+    prefix();
+    if (condition) {
+        var duplicate = () => {};
+    } else {
+        var duplicate = () => {};
+    }
+    duplicate();
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let scenario_idx = defs.iter().position(|definition| definition.name == "scenario").unwrap();
+    let calls = &call_sites
+        .iter()
+        .find(|(definition, _)| *definition == scenario_idx)
+        .unwrap()
+        .1;
+    let kind = |name: &str| {
+        calls
+            .iter()
+            .find(|call| call.method_name == name)
+            .map(|call| call.call_kind)
+            .unwrap()
+    };
+    assert_eq!(
+        kind("callback"),
+        CallSiteKind::TypeScriptDynamicCallableParameter
+    );
+    assert_eq!(
+        kind("arrayCallback"),
+        CallSiteKind::TypeScriptDynamicCallableParameter
+    );
+    for name in ["render", "inspect"] {
+        let kinds: Vec<_> = calls
+            .iter()
+            .filter(|call| call.method_name == name)
+            .map(|call| call.call_kind)
+            .collect();
+        assert!(matches!(
+            kinds.as_slice(),
+            [CallSiteKind::TypeScriptUnresolvedLocal, CallSiteKind::TypeScriptSameFile { .. }]
+        ), "{name}: {kinds:?}");
+    }
+
+
+    for name in [
+        "local",
+        "exact",
+        "deferred",
+        "looped",
+        "postfix",
+        "prefix",
+        "duplicate",
+    ] {
+        assert_eq!(
+            kind(name),
+            CallSiteKind::TypeScriptUnresolvedLocal,
+            "{name} must not create an exact edge"
+        );
+    }
+}
+
+
+#[test]
+fn test_ts_same_named_nested_callables_keep_independent_call_sites() {
+    let source = r#"function outerTarget(): void {}
+function innerTarget(): void {}
+function visit(): void {}
+export function run(): void {
+    outerTarget();
+    const run = () => { innerTarget(); };
+    run();
+}
+export const walk = (node: Node): void => {
+    const walk = (child: Node, depth: number): void => { visit(); };
+    walk(node, 0);
+};"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let call_site_owners: std::collections::HashSet<_> =
+        call_sites.iter().map(|(definition, _)| *definition).collect();
+    assert_eq!(call_site_owners.len(), call_sites.len(), "{call_sites:#?}");
+
+    let assert_independent =
+        |name: &str, outer_call: &str, inner_call: &str, inner_signature: &str| {
+        let matching: Vec<_> = defs
+            .iter()
+            .enumerate()
+            .filter(|(_, definition)| definition.name == name)
+            .collect();
+        assert_eq!(matching.len(), 2, "{name}: {defs:#?}");
+        let (outer_index, _) = matching
+            .iter()
+            .find(|(_, definition)| {
+                !definition.modifiers.iter().any(|modifier| modifier == "local")
+            })
+            .copied()
+            .unwrap();
+        let (inner_index, inner_definition) = matching
+            .iter()
+            .find(|(_, definition)| {
+                definition.modifiers.iter().any(|modifier| modifier == "local")
+            })
+            .copied()
+            .unwrap();
+        assert_eq!(
+            inner_definition.signature.as_deref(),
+            Some(inner_signature),
+            "{inner_definition:#?}"
+        );
+        let outer_calls = &call_sites
+            .iter()
+            .find(|(definition, _)| *definition == outer_index)
+            .unwrap()
+            .1;
+        let inner_calls = &call_sites
+            .iter()
+            .find(|(definition, _)| *definition == inner_index)
+            .unwrap()
+            .1;
+        assert!(outer_calls.iter().any(|call| call.method_name == outer_call));
+        assert!(!outer_calls.iter().any(|call| call.method_name == inner_call));
+        assert!(inner_calls.iter().any(|call| call.method_name == inner_call));
+        let recursive_call = outer_calls
+            .iter()
+            .find(|call| call.method_name == name)
+            .unwrap();
+        assert_eq!(
+            recursive_call.call_kind,
+            CallSiteKind::TypeScriptLocalCallable {
+                definition_line: inner_definition.line_start,
+            }
+        );
+    };
+
+    assert_independent("run", "outerTarget", "innerTarget", "run()");
+    assert_independent(
+        "walk",
+        "walk",
+        "visit",
+        "walk(child: Node, depth: number): void",
+    );
+}
+
+
+#[test]
+fn test_ts_synthetic_callables_preserve_class_context_and_avoid_duplicates() {
+    let source = r#"function topLevel(): void {}
+export const
+    firstArrow = () => {},
+    exportedArrow = () => { topLevel(); };
+const moduleArrow = () => { topLevel(); };
+export function callExportedArrow(): void { exportedArrow(); }
+if (flag) { function helper(): void {} helper(); }
+class OrderService {
+    constructor(private repo: OrderRepo) {}
+    log(): void {}
+    process(): void {
+        const doIt = () => {
+            this.repo.save();
+            this.log();
+        };
+        doIt();
+    }
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
+
+    for name in ["firstArrow", "exportedArrow", "moduleArrow", "helper", "doIt"] {
+        assert_eq!(
+            defs.iter().filter(|definition| definition.name == name).count(),
+            1,
+            "duplicate definition for {name}: {defs:#?}"
+        );
+    }
+
+    let exported_idx = defs
+        .iter()
+        .position(|definition| definition.name == "exportedArrow")
+        .unwrap();
+    assert_eq!(defs[exported_idx].kind, DefinitionKind::Variable);
+
+    assert!(
+        defs[exported_idx]
+            .modifiers
+            .iter()
+            .any(|modifier| modifier == "callable")
+    );
+    assert!(call_sites.iter().any(|(definition, calls)| {
+        *definition == exported_idx && calls.iter().any(|call| call.method_name == "topLevel")
+    }));
+
+    let caller_idx = defs
+        .iter()
+        .position(|definition| definition.name == "callExportedArrow")
+        .unwrap();
+    let exported_call = call_sites
+        .iter()
+        .find(|(definition, _)| *definition == caller_idx)
+        .unwrap()
+        .1
+        .iter()
+        .find(|call| call.method_name == "exportedArrow")
+        .unwrap();
+    assert_eq!(
+        exported_call.call_kind,
+        CallSiteKind::TypeScriptSameFile {
+            definition_line: defs[exported_idx].line_start,
+        }
+    );
+
+    let module_arrow = defs
+        .iter()
+        .find(|definition| definition.name == "moduleArrow")
+        .unwrap();
+    assert!(module_arrow.modifiers.iter().any(|modifier| modifier == "local"));
+
+    let do_it_idx = defs.iter().position(|definition| definition.name == "doIt").unwrap();
+    assert_eq!(defs[do_it_idx].parent.as_deref(), Some("OrderService"));
+    assert!(defs[do_it_idx].modifiers.iter().any(|modifier| modifier == "local"));
+    let do_it_calls = &call_sites
+        .iter()
+        .find(|(definition, _)| *definition == do_it_idx)
+        .unwrap()
+        .1;
+    assert_eq!(
+        do_it_calls
+            .iter()
+            .find(|call| call.method_name == "save")
+            .and_then(|call| call.receiver_type.as_deref()),
+        Some("OrderRepo")
+    );
+    assert_eq!(
+        do_it_calls
+            .iter()
+            .find(|call| call.method_name == "log")
+            .and_then(|call| call.receiver_type.as_deref()),
+        Some("OrderService")
+    );
+}
+
+
+#[test]
+fn test_ts_lexical_walkers_stop_at_the_typescript_depth_limit() {
+    const DEPTH: usize = 300;
+    let mut source = String::from(
+        "function target(): void {}\nexport function deep(): void { target();",
+    );
+    for _ in 0..DEPTH {
+        source.push('{');
+    }
+    source.push_str("const deepest = () => {}; deepest();");
+    for _ in 0..DEPTH {
+        source.push('}');
+    }
+    source.push('}');
+
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, &source, 0);
+
+    assert!(defs.iter().any(|definition| definition.name == "deep"));
+    assert!(!defs.iter().any(|definition| definition.name == "deepest"));
+    let deep_index = defs
+        .iter()
+        .position(|definition| definition.name == "deep")
+        .unwrap();
+    let deep_calls = &call_sites
+        .iter()
+        .find(|(definition, _)| *definition == deep_index)
+        .unwrap()
+        .1;
+    assert!(!deep_calls.iter().any(|call| call.method_name == "deepest"));
+    assert_eq!(
+        deep_calls
+            .iter()
+            .find(|call| call.method_name == "target")
+            .unwrap()
+            .call_kind,
+        CallSiteKind::TypeScriptAnalysisIncomplete
+    );
+    assert!(deep_calls.iter().any(|call| {
+        call.call_kind == CallSiteKind::TypeScriptAnalysisIncomplete
+            && call.method_name == "<ast-depth-limit>"
+    }));
+}
+
+
+#[test]
 fn test_ts_new_expression() {
     let source = r#"class Factory {
     create(): void {
@@ -405,6 +941,21 @@ fn test_ts_arrow_function_class_property() {
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
     let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let process_item_defs: Vec<_> = defs
+        .iter()
+        .filter(|definition| definition.name == "processItem")
+        .collect();
+    assert_eq!(process_item_defs.len(), 1, "{process_item_defs:#?}");
+    assert_eq!(process_item_defs[0].kind, DefinitionKind::Field);
+
+    assert!(
+        process_item_defs[0]
+            .modifiers
+            .iter()
+            .any(|modifier| modifier == "callable")
+    );
+
 
     let pi = defs.iter().position(|d| d.name == "processItem").unwrap();
     let pc: Vec<_> = call_sites.iter().filter(|(i, _)| *i == pi).collect();

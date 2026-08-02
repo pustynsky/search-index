@@ -867,6 +867,45 @@ fn test_index_file_defs_maps_call_sites() {
 }
 
 #[test]
+fn test_index_file_defs_merges_duplicate_call_site_owners_without_data_loss() {
+    let mut index = DefinitionIndex::default();
+    index.files.push("test.ts".to_string());
+    let definitions = vec![DefinitionEntry {
+        file_id: 0,
+        name: "run".to_string(),
+        kind: DefinitionKind::Function,
+        line_start: 1,
+        line_end: 5,
+        parent: None,
+        signature: None,
+        modifiers: vec![],
+        attributes: vec![],
+        base_types: vec![],
+    }];
+    let call = |name: &str, line| CallSite {
+        method_name: name.to_string(),
+        receiver_type: None,
+        line,
+        call_kind: Default::default(),
+        receiver_is_generic: false,
+    };
+
+    let added = index_file_defs(
+        &mut index,
+        0,
+        definitions,
+        vec![(0, vec![call("first", 2)]), (0, vec![call("second", 3)])],
+        vec![],
+    );
+
+    assert_eq!(added, 2);
+    let calls = &index.method_calls[&0];
+    assert_eq!(calls.len(), 2);
+    assert!(calls.iter().any(|call| call.method_name == "first"));
+    assert!(calls.iter().any(|call| call.method_name == "second"));
+}
+
+#[test]
 fn test_index_file_defs_maps_code_stats() {
     let mut index = DefinitionIndex::default();
     index.files.push("test.cs".to_string());

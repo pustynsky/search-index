@@ -382,6 +382,14 @@ Use the `*AfterScope` pair to judge per-query selectivity (“did the prefilter 
 
 Traces who calls a method (or what a method calls) and builds a hierarchical call tree. Combines the content index (grep) with the definition index (AST) to determine which method/class contains each call site. Replaces 7+ sequential `xray_grep` + `read_file` calls with a single request. Supports C#, TypeScript/TSX, and SQL (call sites from stored procedure bodies: EXEC, FROM, JOIN, INSERT, UPDATE, DELETE). For SQL, the `class` parameter maps to schema name (e.g., `class="dbo"`).
 
+TypeScript bare calls use lexical binding identities rather than repository-wide name matching. Local and same-file callables produce exact edges. Dynamic callable parameters, unresolved or reassigned locals, imports awaiting module resolution, and unknown globals produce `dynamic_callable_parameter`, `unresolved_local_binding`, `module_resolution_failed`, and `unknown_global` reasons. In both direction-up and direction-down responses these reasons appear in `summary.unresolvedCallReasons`; `summary.unresolvedCallSites` is scoped to the `traversedGraph` (see `unresolvedCallSitesScope`), and `resultStatus` is partial and unsafe for exhaustive claims. Direction-up reports only exact indexed edges and attributes synthetic local callables to their owning class. If a TypeScript root lookup, with or without `class`, matches multiple exported or class-owned roots, traversal stops with `rootResolution.reason="ambiguous_typescript_root"` and bounded candidate locations instead of choosing one arbitrarily. Mixed-language names do not elect a TypeScript root unless the query is limited to `ts`/`tsx`.
+
+To preserve those exact identities, `xray_definitions` intentionally exposes nested and module-private TypeScript callables as `kind="function"` with `modifiers: ["local"]`. Exported callable variables and class arrow properties retain `kind="variable"` / `kind="field"` and carry a `callable` modifier. These entries retain owning-class context when applicable, use AST-derived signatures, participate in normal definition counts, and are not hidden by default.
+
+Module-private roots are excluded from upward exact root election because the same private name may exist in many files; upward queries aggregate only parser-resolved same-file/private callers. Downward queries elect a unique private root, or return `ambiguous_typescript_root` when several private roots share the name.
+
+Common ambient globals such as `setTimeout`, test-runner functions, and `require` are intentionally reported as `unknown_global` until a later resolver can prove their targets. Code that invokes them therefore produces an honest partial/non-exhaustive status in either direction rather than a guessed edge.
+
 ```json
 // Find all callers of ExecuteQueryAsync, 5 levels deep, excluding tests
 {
