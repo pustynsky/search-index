@@ -3,6 +3,10 @@
 
 ## 0.5.1 (Unreleased)
 
+- **Stopped inactive HTML contexts from creating Angular template edges.** Custom-element extraction now ignores comments, declarations, CDATA, quoted attributes, and `script`/`style` raw text while preserving symmetric navigation for active component selectors; templates above the shared 4 MiB parser limit are skipped. Rebuild persisted definition indexes after upgrading to remove stale pre-fix template edges.
+
+- **Invalidated continuation tokens after every completed in-scope edit reindex attempt.** Successful writes no longer leave pagination tokens valid when a transient read failure or poisoned index lock prevents the immediate in-memory update; update telemetry remains truthful and the watcher can reconcile afterward.
+
 - **Made response-size truncation recoverable for definitions and call trees.** `xray_definitions` and `xray_callers` now expose stable pages with offsets and index-epoch-bound continuation tokens; byte fitting preserves complete structural entries after optional body stripping, covers attribute-filtered definitions and caller/callee roots, keeps interface-expanded root order stable at recursive depths, and returns a bounded error when one item cannot fit.
 
 - **Made `xray_info` file reachability truthful.** Per-file `indexed` now reflects actual content-index inclusion rather than extension eligibility alone; additive content/definition reachability fields and exclusion reasons expose hidden, ignored, `.git`, and extension-policy outcomes.

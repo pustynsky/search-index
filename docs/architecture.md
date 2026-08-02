@@ -593,7 +593,7 @@ Angular `@Component` class definitions are automatically enriched with template 
   - `direction='up'` with a selector (e.g., `"app-footer"`) → finds parent components that use it in their templates.
 - **HTML content search:** add `html` to `--ext` / `ext` parameter for `xray_grep` to search HTML template content.
 
-**Limitations.** Only external templates (`templateUrl`), not inline `template:`. Only tags with hyphens (custom elements per HTML spec). `ng-*` tags are excluded (Angular built-ins). Template metadata updates on full `def-index` rebuild, not incrementally on `.html` changes.
+**Limitations.** Only external templates (`templateUrl`), not inline `template:`. Only active-context tags with hyphens (custom elements per HTML spec) are indexed; comments, declarations, CDATA, quoted attributes, and `script`/`style` raw text are skipped. `ng-*` tags are excluded (Angular built-ins). Templates larger than the shared 4 MiB source-parser limit are skipped with a diagnostic. Template metadata updates on full `def-index` rebuild, not incrementally on `.html` changes.
 
 ## Indexing triggers — when does indexing happen?
 

@@ -45,7 +45,7 @@ fn create_named_temp_file(dir: &std::path::Path, name: &str, content: &str) -> P
 fn test_successful_edit_reindex_increments_index_epoch() {
     let temp = tempfile::tempdir().unwrap();
     create_named_temp_file(temp.path(), "tracked.cs", "class Before {}\n");
-    let ctx = make_ctx(temp.path());
+    let ctx = make_ctx_with_ext(temp.path(), "cs");
     let before = ctx.index_epoch.load(std::sync::atomic::Ordering::Acquire);
 
     let result = handle_xray_edit(&ctx, &json!({
@@ -53,9 +53,12 @@ fn test_successful_edit_reindex_increments_index_epoch() {
         "edits": [{ "search": "Before", "replace": "After" }],
     }));
     assert!(!result.is_error, "{}", result.content[0].text);
+    let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(response["reindexStatus"], "completed", "{response}");
+    assert_eq!(response["contentIndexUpdated"], true, "{response}");
     assert!(
         ctx.index_epoch.load(std::sync::atomic::Ordering::Acquire) > before,
-        "successful synchronous reindex must invalidate continuation tokens",
+        "successful synchronous reindex must invalidate continuation tokens: {response}",
     );
 }
 
@@ -5304,6 +5307,35 @@ fn test_sync_reindex_multi_file_mixed_skipped_reasons() {
 }
 
 #[test]
+fn test_sync_reindex_single_file_invalidates_epoch_when_content_lock_is_poisoned() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.cs"), "class A {}\n").unwrap();
+    let ctx = make_ctx_with_ext(tmp.path(), "cs");
+
+    let index_clone = ctx.index.clone();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = index_clone.write().unwrap();
+        panic!("intentional panic to poison RwLock");
+    }));
+    assert!(ctx.index.write().is_err(), "Content lock must be poisoned");
+    let epoch_before = ctx.index_epoch.load(std::sync::atomic::Ordering::Acquire);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "a.cs",
+        "edits": [{"search": "class", "replace": "struct"}],
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(response["reindexStatus"], "completed");
+    assert_eq!(response["contentIndexUpdated"], false);
+    assert!(response["reindexWarning"].is_string(), "{response}");
+    assert!(
+        ctx.index_epoch.load(std::sync::atomic::Ordering::Acquire) > epoch_before,
+        "a successful write must invalidate continuation tokens even when reindexing cannot update the poisoned index",
+    );
+}
+
+#[test]
 fn test_sync_reindex_multi_file_poisoned_content_lock_reports_false() {
     // Pre-fix: `handle_multi_file_edit` set
     // `contentIndexUpdated = true` UNCONDITIONALLY for every non-skipped file
@@ -5335,6 +5367,7 @@ fn test_sync_reindex_multi_file_poisoned_content_lock_reports_false() {
         panic!("intentional panic to poison RwLock");
     }));
     assert!(ctx.index.write().is_err(), "Content lock must be poisoned");
+    let epoch_before = ctx.index_epoch.load(std::sync::atomic::Ordering::Acquire);
 
     let result = handle_xray_edit(&ctx, &json!({
         "paths": ["a.cs", "b.cs"],
@@ -5364,6 +5397,10 @@ fn test_sync_reindex_multi_file_poisoned_content_lock_reports_false() {
             entry
         );
     }
+    assert!(
+        ctx.index_epoch.load(std::sync::atomic::Ordering::Acquire) > epoch_before,
+        "a successful write batch must invalidate continuation tokens even when reindexing cannot update the poisoned index",
+    );
 }
 
 #[test]
