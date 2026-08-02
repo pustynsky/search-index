@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 
 use super::types::*;
-use super::tree_sitter_utils::{find_child_by_kind, find_descendant_by_kind, find_child_by_field, count_named_children, walk_code_stats, warn_ast_depth_exceeded, MAX_AST_RECURSION_DEPTH, MAX_PARSE_SOURCE_BYTES, PARSE_TIMEOUT_MICROS, TYPESCRIPT_CODE_STATS_CONFIG};
+use super::tree_sitter_utils::{find_child_by_kind, find_descendant_by_kind, find_child_by_field, count_named_children, walk_code_stats, warn_ast_depth_exceeded_at, MAX_PARSE_SOURCE_BYTES, PARSE_TIMEOUT_MICROS, TYPESCRIPT_CODE_STATS_CONFIG};
+
+const MAX_TYPESCRIPT_AST_RECURSION_DEPTH: usize = 256;
 
 // ─── Main entry point ───────────────────────────────────────────────
 
@@ -41,6 +43,41 @@ pub(crate) fn parse_typescript_definitions(
     let mut defs = Vec::new();
     let mut method_nodes: Vec<(usize, tree_sitter::Node)> = Vec::new();
     walk_typescript_node_collecting(tree.root_node(), source, file_id, None, &mut defs, &mut method_nodes, 0);
+
+    let lexical_model = build_ts_lexical_model(tree.root_node(), source);
+    let mut definition_by_callable_node: HashMap<usize, usize> = method_nodes
+        .iter()
+        .map(|(definition_index, node)| (node.id(), *definition_index))
+        .collect();
+    for callable in &lexical_model.callable_definitions {
+        let existing_definition = definition_by_callable_node
+            .get(&callable.node.id())
+            .copied();
+        let definition_index = existing_definition.unwrap_or_else(|| {
+            let definition_index = defs.len();
+            defs.push(DefinitionEntry {
+                file_id,
+                name: callable.name.clone(),
+                kind: DefinitionKind::Function,
+                line_start: callable.line_start,
+                line_end: callable.line_end,
+                parent: callable.parent.clone(),
+                signature: Some(ts_callable_signature(callable, source)),
+                modifiers: if callable.is_local {
+                    vec!["local".to_string()]
+                } else {
+                    Vec::new()
+                },
+                attributes: Vec::new(),
+                base_types: Vec::new(),
+            });
+            definition_index
+        });
+        if existing_definition.is_none() {
+            method_nodes.push((definition_index, callable.node));
+            definition_by_callable_node.insert(callable.node.id(), definition_index);
+        }
+    }
 
     // Build per-class field type maps from the collected defs
     let mut class_field_types: HashMap<String, HashMap<String, String>> = HashMap::new();
@@ -82,7 +119,13 @@ pub(crate) fn parse_typescript_definitions(
             .cloned()
             .unwrap_or_default();
 
-        let calls = extract_ts_call_sites(method_node, source, parent_name, &field_types);
+        let calls = extract_ts_call_sites(
+            method_node,
+            source,
+            parent_name,
+            &field_types,
+            &lexical_model,
+        );
         if !calls.is_empty() {
             call_sites.push((def_local_idx, calls));
         }
@@ -115,8 +158,12 @@ fn walk_typescript_node_collecting<'a>(
     depth: usize,
 ) {
     // MINOR-27: hard cap recursion. Normal TS code is well under 50 levels.
-    if depth > MAX_AST_RECURSION_DEPTH {
-        warn_ast_depth_exceeded("typescript", node);
+    if depth > MAX_TYPESCRIPT_AST_RECURSION_DEPTH {
+        warn_ast_depth_exceeded_at(
+            "typescript",
+            node,
+            MAX_TYPESCRIPT_AST_RECURSION_DEPTH,
+        );
         return;
     }
     let kind = node.kind();
@@ -198,13 +245,14 @@ fn walk_typescript_node_collecting<'a>(
             }
         }
         "public_field_definition" => {
-            if let Some(def) = extract_ts_field_def(node, source, file_id, parent_name) {
+            if let Some(mut def) = extract_ts_field_def(node, source, file_id, parent_name) {
                 let idx = defs.len();
-                defs.push(def);
-                // Collect arrow function fields for call-site extraction
+                // Collect arrow function fields for call-site extraction and root election.
                 if has_arrow_function_value(node) {
+                    def.modifiers.push("callable".to_string());
                     method_nodes.push((idx, node));
                 }
+                defs.push(def);
                 return;
             }
         }
@@ -222,7 +270,15 @@ fn walk_typescript_node_collecting<'a>(
         }
         // Only extract exported variable declarations
         "lexical_declaration" if is_exported(node) => {
+            let first_definition = defs.len();
             extract_ts_variable_defs(node, source, file_id, parent_name, defs);
+            collect_ts_exported_callable_nodes(
+                node,
+                source,
+                first_definition,
+                defs,
+                method_nodes,
+            );
             return;
         }
         "enum_member" | "enum_assignment" => {
@@ -552,7 +608,10 @@ fn extract_ts_function_def(
 ) -> Option<DefinitionEntry> {
     let name_node = find_child_by_field(node, "name")?;
     let name = node_text(name_node, source).to_string();
-    let modifiers = extract_ts_modifiers(node, source);
+    let mut modifiers = extract_ts_modifiers(node, source);
+    if parent_name.is_none() && !is_exported(node) {
+        modifiers.push("local".to_string());
+    }
     let decorators = extract_ts_decorators(node, source);
     let params = extract_params_text(node, source);
     let return_type = extract_type_annotation(node, source);
@@ -756,8 +815,8 @@ fn extract_ts_variable_defs(
                         file_id,
                         name,
                         kind: DefinitionKind::Variable,
-                        line_start: node.start_position().row as u32 + 1,
-                        line_end: node.end_position().row as u32 + 1,
+                        line_start: child.start_position().row as u32 + 1,
+                        line_end: child.end_position().row as u32 + 1,
                         parent: parent_name.map(|s| s.to_string()),
                         signature: Some(sig.trim().to_string()),
                         modifiers: modifiers.clone(),
@@ -765,6 +824,46 @@ fn extract_ts_variable_defs(
                         base_types: Vec::new(),
                     });
                 }
+    }
+}
+
+fn collect_ts_exported_callable_nodes<'tree>(
+    declaration: tree_sitter::Node<'tree>,
+    source: &str,
+    first_definition: usize,
+    defs: &mut [DefinitionEntry],
+    method_nodes: &mut Vec<(usize, tree_sitter::Node<'tree>)>,
+) {
+    for index in 0..declaration.child_count() {
+        let Some(declarator) = declaration
+            .child(index)
+            .filter(|child| child.kind() == "variable_declarator")
+        else {
+            continue;
+        };
+        let Some(name_node) = find_child_by_field(declarator, "name") else {
+            continue;
+        };
+        let Some(value) = find_child_by_field(declarator, "value")
+            .filter(|value| matches!(value.kind(), "arrow_function" | "function_expression"))
+        else {
+            continue;
+        };
+        let name = node_text(name_node, source);
+        if let Some(definition_index) = defs[first_definition..]
+            .iter()
+            .position(|definition| definition.name == name)
+            .map(|offset| first_definition + offset)
+        {
+            if !defs[definition_index]
+                .modifiers
+                .iter()
+                .any(|modifier| modifier == "callable")
+            {
+                defs[definition_index].modifiers.push("callable".to_string());
+            }
+            method_nodes.push((definition_index, value));
+        }
     }
 }
 
@@ -1163,10 +1262,9 @@ fn collect_ts_local_var_types(
         _ => {}
     }
 
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            collect_ts_local_var_types(child, source, vars);
-        }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_ts_local_var_types(child, source, vars);
     }
 }
 
@@ -1243,13 +1341,704 @@ fn extract_type_from_new_expr(
 }
 
 /// Extract call sites from a method/function body node.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TsBareCallBindingKind {
+    SameFile { definition_line: u32 },
+    LocalCallable { definition_line: u32 },
+    DynamicCallableParameter,
+    UnresolvedLocal,
+    Imported,
+}
+
+#[derive(Clone, Debug)]
+struct TsLexicalBinding {
+    kind: TsBareCallBindingKind,
+    reassigned_at: Vec<usize>,
+}
+
+#[derive(Default)]
+struct TsLexicalScope {
+    parent: Option<usize>,
+    bindings: HashMap<String, TsLexicalBinding>,
+    function_scope: bool,
+}
+
+struct TsCallableDefinition<'tree> {
+    name: String,
+    parent: Option<String>,
+    node: tree_sitter::Node<'tree>,
+    line_start: u32,
+    line_end: u32,
+    is_local: bool,
+}
+
+fn ts_callable_signature(callable: &TsCallableDefinition<'_>, source: &str) -> String {
+    let params = extract_params_text(callable.node, source).or_else(|| {
+        find_child_by_field(callable.node, "parameter")
+            .map(|parameter| format!("({})", node_text(parameter, source)))
+    });
+    let return_type = extract_type_annotation(callable.node, source);
+    build_function_signature(
+        &callable.name,
+        params.as_deref(),
+        return_type.as_deref(),
+        &[],
+    )
+}
+
+struct TsLexicalModel<'tree> {
+    scopes: Vec<TsLexicalScope>,
+    scope_by_node: HashMap<usize, usize>,
+    callable_definitions: Vec<TsCallableDefinition<'tree>>,
+    named_callable_nodes: std::collections::HashSet<usize>,
+    analysis_incomplete: bool,
+}
+
+impl<'tree> TsLexicalModel<'tree> {
+    fn new(root: tree_sitter::Node<'tree>) -> Self {
+        let mut scope_by_node = HashMap::new();
+        scope_by_node.insert(root.id(), 0);
+        Self {
+            scopes: vec![TsLexicalScope {
+                parent: None,
+                bindings: HashMap::new(),
+                function_scope: true,
+            }],
+            scope_by_node,
+            callable_definitions: Vec::new(),
+            named_callable_nodes: std::collections::HashSet::new(),
+            analysis_incomplete: false,
+        }
+    }
+
+    fn add_scope(
+        &mut self,
+        parent: usize,
+        node: tree_sitter::Node<'tree>,
+        function_scope: bool,
+    ) -> usize {
+        let scope = self.scopes.len();
+        self.scopes.push(TsLexicalScope {
+            parent: Some(parent),
+            bindings: HashMap::new(),
+            function_scope,
+        });
+        self.scope_by_node.insert(node.id(), scope);
+        scope
+    }
+
+    fn insert_binding(&mut self, scope: usize, name: String, kind: TsBareCallBindingKind) {
+        if let Some(binding) = self.scopes[scope].bindings.get_mut(&name) {
+            binding.kind = TsBareCallBindingKind::UnresolvedLocal;
+            return;
+        }
+        self.scopes[scope].bindings.insert(
+            name,
+            TsLexicalBinding {
+                kind,
+                reassigned_at: Vec::new(),
+            },
+        );
+    }
+
+    fn binding_scope(&self, mut scope: usize, name: &str) -> Option<usize> {
+        loop {
+            if self.scopes[scope].bindings.contains_key(name) {
+                return Some(scope);
+            }
+            scope = self.scopes[scope].parent?;
+        }
+    }
+
+    fn call_crosses_function_scope(&self, mut scope: usize, binding_scope: usize) -> bool {
+        while scope != binding_scope {
+            if self.scopes[scope].function_scope {
+                return true;
+            }
+            let Some(parent) = self.scopes[scope].parent else {
+                return false;
+            };
+            scope = parent;
+        }
+        false
+    }
+
+    fn nearest_function_scope(&self, mut scope: usize) -> usize {
+        loop {
+            if self.scopes[scope].function_scope {
+                return scope;
+            }
+            scope = self.scopes[scope].parent.unwrap_or(0);
+        }
+    }
+
+    fn classify_bare_call(&self, scope: usize, name: &str, call_start: usize) -> CallSiteKind {
+        if self.analysis_incomplete {
+            return CallSiteKind::TypeScriptAnalysisIncomplete;
+        }
+        let Some(binding_scope) = self.binding_scope(scope, name) else {
+            return CallSiteKind::TypeScriptUnknownGlobal;
+        };
+        let binding = &self.scopes[binding_scope].bindings[name];
+        let may_run_after_reassignment = self.call_crosses_function_scope(scope, binding_scope)
+            && !binding.reassigned_at.is_empty();
+        if may_run_after_reassignment
+            || binding
+                .reassigned_at
+                .iter()
+                .any(|&assignment_start| assignment_start <= call_start)
+        {
+            return CallSiteKind::TypeScriptUnresolvedLocal;
+        }
+        match binding.kind {
+            TsBareCallBindingKind::SameFile { definition_line } => {
+                CallSiteKind::TypeScriptSameFile { definition_line }
+            }
+            TsBareCallBindingKind::LocalCallable { definition_line } => {
+                CallSiteKind::TypeScriptLocalCallable { definition_line }
+            }
+            TsBareCallBindingKind::DynamicCallableParameter => {
+                CallSiteKind::TypeScriptDynamicCallableParameter
+            }
+            TsBareCallBindingKind::UnresolvedLocal => CallSiteKind::TypeScriptUnresolvedLocal,
+            TsBareCallBindingKind::Imported => CallSiteKind::TypeScriptImported,
+        }
+    }
+
+    fn scope_for_node(&self, node: tree_sitter::Node, fallback: usize) -> usize {
+        self.scope_by_node.get(&node.id()).copied().unwrap_or(fallback)
+    }
+}
+
+fn ts_binding_name(node: tree_sitter::Node, source: &str) -> Option<String> {
+    if node.kind() == "identifier" {
+        return Some(node_text(node, source).to_string());
+    }
+    find_child_by_field(node, "pattern")
+        .or_else(|| find_child_by_field(node, "name"))
+        .or_else(|| find_child_by_field(node, "left"))
+        .and_then(|child| ts_binding_name(child, source))
+}
+
+fn collect_ts_binding_names(
+    node: tree_sitter::Node,
+    source: &str,
+    names: &mut Vec<String>,
+    depth: usize,
+    analysis_incomplete: &mut bool,
+) {
+    if depth > MAX_TYPESCRIPT_AST_RECURSION_DEPTH {
+        warn_ast_depth_exceeded_at(
+            "typescript",
+            node,
+            MAX_TYPESCRIPT_AST_RECURSION_DEPTH,
+        );
+        *analysis_incomplete = true;
+        return;
+    }
+    match node.kind() {
+        "identifier" | "shorthand_property_identifier_pattern" => {
+            names.push(node_text(node, source).to_string());
+            return;
+        }
+        "pair_pattern" => {
+            if let Some(value) = find_child_by_field(node, "value") {
+                collect_ts_binding_names(
+                    value,
+                    source,
+                    names,
+                    depth + 1,
+                    analysis_incomplete,
+                );
+            }
+            return;
+        }
+        "member_expression" | "subscript_expression" => return,
+        _ => {}
+    }
+
+    if let Some(pattern) = find_child_by_field(node, "pattern")
+        .or_else(|| find_child_by_field(node, "name"))
+        .or_else(|| find_child_by_field(node, "left"))
+        .or_else(|| find_child_by_field(node, "argument"))
+    {
+        collect_ts_binding_names(
+            pattern,
+            source,
+            names,
+            depth + 1,
+            analysis_incomplete,
+        );
+        return;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        collect_ts_binding_names(
+            child,
+            source,
+            names,
+            depth + 1,
+            analysis_incomplete,
+        );
+    }
+}
+
+fn ts_binding_names(
+    node: tree_sitter::Node,
+    source: &str,
+    model: &mut TsLexicalModel<'_>,
+) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_ts_binding_names(
+        node,
+        source,
+        &mut names,
+        0,
+        &mut model.analysis_incomplete,
+    );
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn ts_reassignment_may_repeat(node: tree_sitter::Node) -> bool {
+    let mut ancestor = node.parent();
+    while let Some(parent) = ancestor {
+        match parent.kind() {
+            "for_statement" | "for_in_statement" | "for_of_statement"
+            | "while_statement" | "do_statement" => return true,
+            "function_declaration" | "method_definition" | "function_expression"
+            | "arrow_function" => return false,
+            _ => ancestor = parent.parent(),
+        }
+    }
+    false
+}
+
+fn register_ts_parameters(
+    callable: tree_sitter::Node,
+    source: &str,
+    scope: usize,
+    model: &mut TsLexicalModel,
+) {
+    if let Some(parameters) = find_child_by_kind(callable, "formal_parameters") {
+        let mut cursor = parameters.walk();
+        for parameter in parameters.named_children(&mut cursor) {
+            for name in ts_binding_names(parameter, source, model) {
+                model.insert_binding(scope, name, TsBareCallBindingKind::DynamicCallableParameter);
+            }
+        }
+    } else if callable.kind() == "arrow_function"
+        && let Some(parameter) = find_child_by_field(callable, "parameter")
+    {
+        for name in ts_binding_names(parameter, source, model) {
+            model.insert_binding(scope, name, TsBareCallBindingKind::DynamicCallableParameter);
+        }
+    }
+}
+
+fn collect_ts_import_names(
+    node: tree_sitter::Node,
+    source: &str,
+    names: &mut Vec<String>,
+    depth: usize,
+    analysis_incomplete: &mut bool,
+) {
+    if depth > MAX_TYPESCRIPT_AST_RECURSION_DEPTH {
+        warn_ast_depth_exceeded_at(
+            "typescript",
+            node,
+            MAX_TYPESCRIPT_AST_RECURSION_DEPTH,
+        );
+        *analysis_incomplete = true;
+        return;
+    }
+    match node.kind() {
+        "import_specifier" => {
+            if let Some(local) = find_child_by_field(node, "alias")
+                .or_else(|| find_child_by_field(node, "name"))
+                && let Some(name) = ts_binding_name(local, source)
+            {
+                names.push(name);
+            }
+            return;
+        }
+        "namespace_import" => {
+            let mut cursor = node.walk();
+            if let Some(identifier) = node
+                .named_children(&mut cursor)
+                .find(|child| child.kind() == "identifier")
+            {
+                names.push(node_text(identifier, source).to_string());
+            }
+            return;
+        }
+        "identifier" if node.parent().is_some_and(|parent| parent.kind() == "import_clause") => {
+            names.push(node_text(node, source).to_string());
+            return;
+        }
+        _ => {}
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_ts_import_names(
+            child,
+            source,
+            names,
+            depth + 1,
+            analysis_incomplete,
+        );
+    }
+}
+
+fn collect_ts_lexical_scopes<'tree>(
+    node: tree_sitter::Node<'tree>,
+    source: &str,
+    scope: usize,
+    class_name: Option<&str>,
+    model: &mut TsLexicalModel<'tree>,
+    depth: usize,
+) {
+    if depth > MAX_TYPESCRIPT_AST_RECURSION_DEPTH {
+        warn_ast_depth_exceeded_at(
+            "typescript",
+            node,
+            MAX_TYPESCRIPT_AST_RECURSION_DEPTH,
+        );
+        model.analysis_incomplete = true;
+        return;
+    }
+    match node.kind() {
+        "class_declaration" | "abstract_class_declaration" => {
+            let nested_class_name = find_child_by_field(node, "name")
+                .map(|name| node_text(name, source).to_string());
+            let class_name = nested_class_name.as_deref().or(class_name);
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_ts_lexical_scopes(
+                    child,
+                    source,
+                    scope,
+                    class_name,
+                    model,
+                    depth + 1,
+                );
+            }
+            return;
+        }
+        "function_declaration" => {
+            let name = find_child_by_field(node, "name")
+                .map(|name| node_text(name, source).to_string())
+                .unwrap_or_default();
+            if !name.is_empty() {
+                let definition_line = node.start_position().row as u32 + 1;
+                let kind = if scope == 0 {
+                    TsBareCallBindingKind::SameFile { definition_line }
+                } else {
+                    TsBareCallBindingKind::LocalCallable { definition_line }
+                };
+                model.insert_binding(scope, name.clone(), kind);
+                model.named_callable_nodes.insert(node.id());
+                if scope != 0 {
+                    model.callable_definitions.push(TsCallableDefinition {
+                        name: name.clone(),
+                        parent: class_name.map(str::to_string),
+                        node,
+                        line_start: definition_line,
+                        line_end: node.end_position().row as u32 + 1,
+                        is_local: true,
+                    });
+                }
+            }
+            let function_scope = model.add_scope(scope, node, true);
+            register_ts_parameters(node, source, function_scope, model);
+            if let Some(body) = find_child_by_kind(node, "statement_block") {
+                collect_ts_lexical_scopes(
+                    body,
+                    source,
+                    function_scope,
+                    class_name,
+                    model,
+                    depth + 1,
+                );
+            }
+            return;
+        }
+        "method_definition" | "function_expression" | "arrow_function" => {
+            let callable_scope = model.add_scope(scope, node, true);
+            register_ts_parameters(node, source, callable_scope, model);
+            if let Some(body) = find_child_by_kind(node, "statement_block")
+                .or_else(|| find_child_by_field(node, "body"))
+            {
+                collect_ts_lexical_scopes(
+                    body,
+                    source,
+                    callable_scope,
+                    class_name,
+                    model,
+                    depth + 1,
+                );
+            }
+            return;
+        }
+        "for_in_statement" | "for_of_statement" => {
+            let loop_scope = model.add_scope(scope, node, false);
+            let left = find_child_by_field(node, "left");
+            if let Some(left) = left {
+                for name in ts_binding_names(left, source, model) {
+                    model.insert_binding(loop_scope, name, TsBareCallBindingKind::UnresolvedLocal);
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                if left.is_some_and(|left| left.id() == child.id()) {
+                    continue;
+                }
+                collect_ts_lexical_scopes(
+                    child,
+                    source,
+                    loop_scope,
+                    class_name,
+                    model,
+                    depth + 1,
+                );
+            }
+            return;
+        }
+        "for_statement" => {
+            let loop_scope = model.add_scope(scope, node, false);
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_ts_lexical_scopes(
+                    child,
+                    source,
+                    loop_scope,
+                    class_name,
+                    model,
+                    depth + 1,
+                );
+            }
+            return;
+        }
+
+        "statement_block" => {
+            let block_scope = model.add_scope(scope, node, false);
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_ts_lexical_scopes(
+                    child,
+                    source,
+                    block_scope,
+                    class_name,
+                    model,
+                    depth + 1,
+                );
+            }
+            return;
+        }
+        "catch_clause" => {
+            let catch_scope = model.add_scope(scope, node, false);
+            if let Some(parameter) = find_child_by_field(node, "parameter") {
+                for name in ts_binding_names(parameter, source, model) {
+                    model.insert_binding(catch_scope, name, TsBareCallBindingKind::UnresolvedLocal);
+                }
+            }
+            let mut cursor = node.walk();
+            for child in node.children(&mut cursor) {
+                collect_ts_lexical_scopes(
+                    child,
+                    source,
+                    catch_scope,
+                    class_name,
+                    model,
+                    depth + 1,
+                );
+            }
+            return;
+        }
+        "import_statement" => {
+            let mut names = Vec::new();
+            collect_ts_import_names(
+                node,
+                source,
+                &mut names,
+                0,
+                &mut model.analysis_incomplete,
+            );
+            for name in names {
+                model.insert_binding(scope, name, TsBareCallBindingKind::Imported);
+            }
+            return;
+        }
+        "lexical_declaration" | "variable_declaration" => {
+            let mut keyword_cursor = node.walk();
+            let declaration_scope = if node
+                .children(&mut keyword_cursor)
+                .any(|child| child.kind() == "var")
+            {
+                model.nearest_function_scope(scope)
+            } else {
+                scope
+            };
+            let mut declarator_cursor = node.walk();
+            for declarator in node
+                .children(&mut declarator_cursor)
+                .filter(|child| child.kind() == "variable_declarator")
+            {
+                let Some(name_node) = find_child_by_field(declarator, "name") else {
+                    continue;
+                };
+                let names = ts_binding_names(name_node, source, model);
+                if names.is_empty() {
+                    continue;
+                }
+                let value = find_child_by_field(declarator, "value");
+                let callable = name_node.kind() == "identifier"
+                    && names.len() == 1
+                    && value.is_some_and(|value| {
+                        matches!(value.kind(), "arrow_function" | "function_expression")
+                    });
+                if callable {
+                    let name = names[0].clone();
+                    let definition_line = declarator.start_position().row as u32 + 1;
+                    let kind = if declaration_scope == 0 {
+                        TsBareCallBindingKind::SameFile { definition_line }
+                    } else {
+                        TsBareCallBindingKind::LocalCallable { definition_line }
+                    };
+                    model.insert_binding(declaration_scope, name.clone(), kind);
+                    if let Some(value) = value {
+                        model.named_callable_nodes.insert(value.id());
+                        model.callable_definitions.push(TsCallableDefinition {
+                            name: name.clone(),
+                            parent: class_name.map(str::to_string),
+                            node: value,
+                            line_start: definition_line,
+                            line_end: value.end_position().row as u32 + 1,
+                            is_local: declaration_scope != 0 || !is_exported(node),
+                        });
+                        collect_ts_lexical_scopes(
+                            value,
+                            source,
+                            declaration_scope,
+                            class_name,
+                            model,
+                            depth + 1,
+                        );
+                    }
+                } else {
+                    for name in names {
+                        model.insert_binding(
+                            declaration_scope,
+                            name,
+                            TsBareCallBindingKind::UnresolvedLocal,
+                        );
+                    }
+                    if let Some(value) = value {
+                        collect_ts_lexical_scopes(
+                            value,
+                            source,
+                            declaration_scope,
+                            class_name,
+                            model,
+                            depth + 1,
+                        );
+                    }
+                }
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_ts_lexical_scopes(
+            child,
+            source,
+            scope,
+            class_name,
+            model,
+            depth + 1,
+        );
+    }
+}
+
+fn collect_ts_reassignments(
+    node: tree_sitter::Node,
+    source: &str,
+    scope: usize,
+    model: &mut TsLexicalModel,
+    depth: usize,
+) {
+    if depth > MAX_TYPESCRIPT_AST_RECURSION_DEPTH {
+        warn_ast_depth_exceeded_at(
+            "typescript",
+            node,
+            MAX_TYPESCRIPT_AST_RECURSION_DEPTH,
+        );
+        model.analysis_incomplete = true;
+        return;
+    }
+    let scope = model.scope_for_node(node, scope);
+    let reassigned = match node.kind() {
+        "assignment_expression" | "augmented_assignment_expression" => {
+            find_child_by_field(node, "left")
+        }
+        "update_expression" => {
+            find_child_by_field(node, "argument").or_else(|| node.named_child(0))
+        }
+        _ => None,
+    };
+    if let Some(reassigned) = reassigned {
+        let assignment_start = if ts_reassignment_may_repeat(node) {
+            0
+        } else {
+            node.start_byte()
+        };
+        for name in ts_binding_names(reassigned, source, model) {
+            if let Some(binding_scope) = model.binding_scope(scope, &name) {
+                model.scopes[binding_scope].bindings.get_mut(&name)
+                    .expect("binding scope must contain binding")
+                    .reassigned_at
+                    .push(assignment_start);
+            }
+        }
+    }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_ts_reassignments(child, source, scope, model, depth + 1);
+    }
+}
+
+fn build_ts_lexical_model<'tree>(
+    root: tree_sitter::Node<'tree>,
+    source: &str,
+) -> TsLexicalModel<'tree> {
+    let mut model = TsLexicalModel::new(root);
+    collect_ts_lexical_scopes(root, source, 0, None, &mut model, 0);
+    collect_ts_reassignments(root, source, 0, &mut model, 0);
+    model
+}
+
+
 fn extract_ts_call_sites(
     method_node: tree_sitter::Node,
     source: &str,
     class_name: &str,
     field_types: &HashMap<String, String>,
+    lexical_model: &TsLexicalModel,
 ) -> Vec<CallSite> {
     let mut calls = Vec::new();
+    if lexical_model.analysis_incomplete {
+        calls.push(CallSite {
+            method_name: "<ast-depth-limit>".to_string(),
+            receiver_type: None,
+            line: method_node.start_position().row as u32 + 1,
+            call_kind: CallSiteKind::TypeScriptAnalysisIncomplete,
+            receiver_is_generic: false,
+        });
+    }
 
     // Find the body (statement_block for methods/functions, or walk the whole node)
     let body = find_child_by_kind(method_node, "statement_block")
@@ -1266,7 +2055,18 @@ fn extract_ts_call_sites(
         combined_types.entry(name).or_insert(type_name);
     }
 
-    walk_ts_for_invocations(body, source, class_name, &combined_types, &mut calls);
+    let callable_root = find_child_by_field(method_node, "value")
+        .filter(|value| matches!(value.kind(), "arrow_function" | "function_expression"))
+        .unwrap_or(method_node);
+    let callable_scope = lexical_model.scope_for_node(callable_root, 0);
+    let walk_context = TsInvocationWalkContext {
+        source,
+        class_name,
+        field_types: &combined_types,
+        lexical_model,
+        root_callable_node: callable_root.id(),
+    };
+    walk_ts_for_invocations(body, callable_scope, &walk_context, &mut calls, 0);
 
     calls.sort_by(|a, b| {
         a.line
@@ -1363,48 +2163,72 @@ fn normalize_ts_receiver_name(type_name: &str) -> Option<String> {
 }
 
 /// Recursively walk AST looking for call_expression and new_expression nodes.
+struct TsInvocationWalkContext<'a, 'tree> {
+    source: &'a str,
+    class_name: &'a str,
+    field_types: &'a HashMap<String, String>,
+    lexical_model: &'a TsLexicalModel<'tree>,
+    root_callable_node: usize,
+}
+
 fn walk_ts_for_invocations(
     node: tree_sitter::Node,
-    source: &str,
-    class_name: &str,
-    field_types: &HashMap<String, String>,
+    scope: usize,
+    context: &TsInvocationWalkContext<'_, '_>,
     calls: &mut Vec<CallSite>,
+    depth: usize,
 ) {
+    if depth > MAX_TYPESCRIPT_AST_RECURSION_DEPTH {
+        warn_ast_depth_exceeded_at(
+            "typescript",
+            node,
+            MAX_TYPESCRIPT_AST_RECURSION_DEPTH,
+        );
+        if !calls
+            .iter()
+            .any(|call| call.call_kind == CallSiteKind::TypeScriptAnalysisIncomplete)
+        {
+            calls.push(CallSite {
+                method_name: "<ast-depth-limit>".to_string(),
+                receiver_type: None,
+                line: node.start_position().row as u32 + 1,
+                call_kind: CallSiteKind::TypeScriptAnalysisIncomplete,
+                receiver_is_generic: false,
+            });
+        }
+        return;
+    }
+    let scope = context.lexical_model.scope_for_node(node, scope);
+    if node.id() != context.root_callable_node
+        && context.lexical_model.named_callable_nodes.contains(&node.id())
+    {
+        return;
+    }
+
     match node.kind() {
         "call_expression" => {
-            if let Some(call) = extract_ts_call(node, source, class_name, field_types) {
+            if let Some(call) = extract_ts_call(
+                node,
+                context.source,
+                context.class_name,
+                context.field_types,
+                context.lexical_model,
+                scope,
+            ) {
                 calls.push(call);
             }
-            // Recurse into ALL children — not just arguments.
-            // The function child (first child, typically member_expression)
-            // may contain nested call_expressions for chained calls like:
-            //   service.method1().method2().then(...)
-            for i in 0..node.child_count() {
-                if let Some(child) = node.child(i) {
-                    walk_ts_for_invocations(child, source, class_name, field_types, calls);
-                }
-            }
-            return;
         }
         "new_expression" => {
-            if let Some(call) = extract_ts_new_expression(node, source) {
+            if let Some(call) = extract_ts_new_expression(node, context.source) {
                 calls.push(call);
             }
-            // Same fix: recurse into all children to capture nested calls
-            for i in 0..node.child_count() {
-                if let Some(child) = node.child(i) {
-                    walk_ts_for_invocations(child, source, class_name, field_types, calls);
-                }
-            }
-            return;
         }
         _ => {}
     }
 
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            walk_ts_for_invocations(child, source, class_name, field_types, calls);
-        }
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        walk_ts_for_invocations(child, scope, context, calls, depth + 1);
     }
 }
 
@@ -1414,6 +2238,8 @@ fn extract_ts_call(
     source: &str,
     class_name: &str,
     field_types: &HashMap<String, String>,
+    lexical_model: &TsLexicalModel,
+    scope: usize,
 ) -> Option<CallSite> {
     let func_node = find_child_by_field(node, "function").or_else(|| node.child(0))?;
     let line = node.start_position().row as u32 + 1;
@@ -1421,17 +2247,28 @@ fn extract_ts_call(
     match func_node.kind() {
         "identifier" => {
             let method_name = node_text(func_node, source).to_string();
+            let call_kind = lexical_model.classify_bare_call(
+                scope,
+                &method_name,
+                node.start_byte(),
+            );
             Some(CallSite {
                 method_name,
                 receiver_type: None,
                 line,
-                call_kind: Default::default(),
+                call_kind,
                 receiver_is_generic: false,
             })
         }
-        "member_expression" => {
-            extract_ts_member_call(func_node, source, class_name, field_types, line)
-        }
+        "member_expression" => extract_ts_member_call(
+            func_node,
+            source,
+            class_name,
+            field_types,
+            lexical_model,
+            scope,
+            line,
+        ),
         _ => None,
     }
 }
@@ -1442,6 +2279,8 @@ fn extract_ts_member_call(
     source: &str,
     class_name: &str,
     field_types: &HashMap<String, String>,
+    lexical_model: &TsLexicalModel,
+    scope: usize,
     line: u32,
 ) -> Option<CallSite> {
     let property_node = find_child_by_field(member_node, "property")?;
@@ -1449,13 +2288,38 @@ fn extract_ts_member_call(
 
     let object_node =
         find_child_by_field(member_node, "object").or_else(|| member_node.child(0))?;
+    let call_kind = if object_node.kind() == "identifier" {
+        let receiver_name = node_text(object_node, source);
+        let has_known_type = field_types.contains_key(receiver_name)
+            || receiver_name.chars().next().is_some_and(char::is_uppercase);
+        match lexical_model.classify_bare_call(scope, receiver_name, member_node.start_byte()) {
+            CallSiteKind::TypeScriptImported => CallSiteKind::TypeScriptImported,
+            CallSiteKind::TypeScriptAnalysisIncomplete => {
+                CallSiteKind::TypeScriptAnalysisIncomplete
+            }
+            CallSiteKind::TypeScriptUnknownGlobal if !has_known_type => {
+                CallSiteKind::TypeScriptUnknownGlobal
+            }
+            CallSiteKind::TypeScriptDynamicCallableParameter if !has_known_type => {
+                CallSiteKind::TypeScriptDynamicCallableParameter
+            }
+            CallSiteKind::TypeScriptUnresolvedLocal
+            | CallSiteKind::TypeScriptSameFile { .. }
+            | CallSiteKind::TypeScriptLocalCallable { .. }
+                if !has_known_type => CallSiteKind::TypeScriptUnresolvedLocal,
+            _ => CallSiteKind::TypeScriptMember,
+        }
+    } else {
+        CallSiteKind::TypeScriptMember
+    };
+    // Preserve receiver telemetry even when the typed call kind suppresses an edge.
     let receiver_type = resolve_ts_receiver_type(object_node, source, class_name, field_types);
 
     Some(CallSite {
         method_name,
         receiver_type,
         line,
-        call_kind: Default::default(),
+        call_kind,
         receiver_is_generic: false,
     })
 }

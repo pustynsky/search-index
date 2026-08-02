@@ -191,7 +191,7 @@ fn test_find_def_index_meta_rejects_extension_mismatch() {
 
 #[test]
 fn test_definition_index_version_is_pinned() {
-    assert_eq!(crate::definitions::DEFINITION_INDEX_VERSION, 8);
+    assert_eq!(crate::definitions::DEFINITION_INDEX_VERSION, 9);
 }
 
 #[test]
@@ -211,6 +211,104 @@ fn test_def_index_format_version_correct_loads_ok() {
     let result = load_definition_index(&root, "rs", tmp.path());
     assert!(result.is_ok(), "Loading definition index with correct version should succeed");
     assert_eq!(result.unwrap().format_version, DEFINITION_INDEX_VERSION);
+}
+
+#[test]
+fn test_typescript_lexical_call_kinds_survive_storage_roundtrip() {
+    use crate::definitions::{CallSite, CallSiteKind, DEFINITION_INDEX_VERSION};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_string_lossy().to_string();
+    let mut index = DefinitionIndex::default();
+    index.format_version = DEFINITION_INDEX_VERSION;
+    index.root = root.clone();
+    index.extensions = vec!["ts".to_string()];
+    index.method_calls.insert(
+        0,
+        vec![
+            CallSite {
+                method_name: "local".to_string(),
+                receiver_type: None,
+                line: 7,
+                call_kind: CallSiteKind::TypeScriptLocalCallable { definition_line: 3 },
+                receiver_is_generic: false,
+            },
+            CallSite {
+                method_name: "same_file".to_string(),
+                receiver_type: None,
+                line: 8,
+                call_kind: CallSiteKind::TypeScriptSameFile { definition_line: 2 },
+                receiver_is_generic: false,
+            },
+            CallSite {
+                method_name: "member".to_string(),
+                receiver_type: Some("Owner".to_string()),
+                line: 9,
+                call_kind: CallSiteKind::TypeScriptMember,
+                receiver_is_generic: false,
+            },
+            CallSite {
+                method_name: "analysis_incomplete".to_string(),
+                receiver_type: None,
+                line: 10,
+                call_kind: CallSiteKind::TypeScriptAnalysisIncomplete,
+                receiver_is_generic: false,
+            },
+            CallSite {
+                method_name: "callback".to_string(),
+                receiver_type: None,
+                line: 11,
+                call_kind: CallSiteKind::TypeScriptDynamicCallableParameter,
+                receiver_is_generic: false,
+            },
+            CallSite {
+                method_name: "reassigned".to_string(),
+                receiver_type: None,
+                line: 9,
+                call_kind: CallSiteKind::TypeScriptUnresolvedLocal,
+                receiver_is_generic: false,
+            },
+            CallSite {
+                method_name: "imported".to_string(),
+                receiver_type: None,
+                line: 10,
+                call_kind: CallSiteKind::TypeScriptImported,
+                receiver_is_generic: false,
+            },
+            CallSite {
+                method_name: "unknown".to_string(),
+                receiver_type: None,
+                line: 11,
+                call_kind: CallSiteKind::TypeScriptUnknownGlobal,
+                receiver_is_generic: false,
+            },
+        ],
+    );
+
+    let path = definition_index_path_for(&root, "ts", tmp.path());
+    crate::index::save_compressed(&path, &index, "test").unwrap();
+    let loaded = load_definition_index(&root, "ts", tmp.path()).unwrap();
+    let calls = &loaded.method_calls[&0];
+    assert_eq!(
+        calls[0].call_kind,
+        CallSiteKind::TypeScriptLocalCallable { definition_line: 3 }
+    );
+    assert_eq!(
+        calls[1].call_kind,
+        CallSiteKind::TypeScriptSameFile { definition_line: 2 }
+    );
+    assert_eq!(calls[2].call_kind, CallSiteKind::TypeScriptMember);
+    assert_eq!(
+        calls[3].call_kind,
+        CallSiteKind::TypeScriptAnalysisIncomplete
+    );
+    assert_eq!(
+        calls[4].call_kind,
+        CallSiteKind::TypeScriptDynamicCallableParameter
+    );
+    assert_eq!(calls[5].call_kind, CallSiteKind::TypeScriptUnresolvedLocal);
+    assert_eq!(calls[6].call_kind, CallSiteKind::TypeScriptImported);
+    assert_eq!(calls[7].call_kind, CallSiteKind::TypeScriptUnknownGlobal);
 }
 
 #[test]

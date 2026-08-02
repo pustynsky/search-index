@@ -195,9 +195,30 @@ pub enum CallSiteKind {
     SqlRelation,
     SqlScalarFunction,
     Constructor,
+    TypeScriptSameFile { definition_line: u32 },
+    TypeScriptLocalCallable { definition_line: u32 },
+    TypeScriptMember,
+    TypeScriptAnalysisIncomplete,
+    TypeScriptDynamicCallableParameter,
+    TypeScriptUnresolvedLocal,
+    TypeScriptImported,
+    TypeScriptUnknownGlobal,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+impl CallSiteKind {
+    pub fn unresolved_reason(self) -> Option<&'static str> {
+        match self {
+            Self::TypeScriptDynamicCallableParameter => Some("dynamic_callable_parameter"),
+            Self::TypeScriptUnresolvedLocal => Some("unresolved_local_binding"),
+            Self::TypeScriptImported => Some("module_resolution_failed"),
+            Self::TypeScriptUnknownGlobal => Some("unknown_global"),
+            Self::TypeScriptAnalysisIncomplete => Some("ast_depth_limit"),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CallSite {
     /// Name of the method being called, e.g., "GetUser"
     pub method_name: String,
@@ -235,7 +256,7 @@ pub struct CallSite {
 
 /// Format version for DefinitionIndex. Bump when changing the struct layout.
 /// Loading an index with a different version triggers a rebuild.
-pub const DEFINITION_INDEX_VERSION: u32 = 8;
+pub const DEFINITION_INDEX_VERSION: u32 = 9;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(Default)]

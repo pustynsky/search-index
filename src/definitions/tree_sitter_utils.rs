@@ -141,19 +141,27 @@ pub(crate) const PARSE_TIMEOUT_MICROS: u64 = 2_000_000;
 /// [`MAX_AST_RECURSION_DEPTH`]. Coalesced with a process-global atomic so
 /// a single pathological file cannot flood the log. The first occurrence
 /// reports the parser name and node line; subsequent ones are silent.
-pub(crate) fn warn_ast_depth_exceeded(parser: &str, node: tree_sitter::Node) {
+pub(crate) fn warn_ast_depth_exceeded_at(
+    parser: &str,
+    node: tree_sitter::Node,
+    max_depth: usize,
+) {
     use std::sync::atomic::{AtomicBool, Ordering};
     static WARNED: AtomicBool = AtomicBool::new(false);
     if !WARNED.swap(true, Ordering::Relaxed) {
         tracing::warn!(
             parser,
             line = node.start_position().row + 1,
-            max_depth = MAX_AST_RECURSION_DEPTH,
+            max_depth,
             "AST recursion depth exceeded; subtree truncated \
              (further occurrences suppressed). Definitions / call sites \
              inside the truncated subtree will be missing from the index."
         );
     }
+}
+
+pub(crate) fn warn_ast_depth_exceeded(parser: &str, node: tree_sitter::Node) {
+    warn_ast_depth_exceeded_at(parser, node, MAX_AST_RECURSION_DEPTH);
 }
 
 // ─── Code Stats Config ──────────────────────────────────────────────

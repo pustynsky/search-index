@@ -31,7 +31,7 @@ pub use csharp_semantics::*;
 pub use storage::*;
 pub use incremental::*;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -189,7 +189,23 @@ pub(crate) fn index_file_defs_with_semantics(
     // Map local call site indices to global def indices
     for (local_idx, calls) in file_calls {
         let global_idx = base_def_idx + local_idx as u32;
-        if !calls.is_empty() {
+        if calls.is_empty() {
+            continue;
+        }
+        if let Some(existing) = index.method_calls.get_mut(&global_idx) {
+            tracing::warn!(
+                target: "xray::definitions",
+                definition_index = global_idx,
+                "duplicate call-site owner; merging batches"
+            );
+            let mut seen: HashSet<CallSite> = existing.iter().cloned().collect();
+            for call in calls {
+                if seen.insert(call.clone()) {
+                    existing.push(call);
+                    call_sites_added += 1;
+                }
+            }
+        } else {
             call_sites_added += calls.len();
             index.method_calls.insert(global_idx, calls);
         }

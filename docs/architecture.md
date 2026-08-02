@@ -559,6 +559,12 @@ Direction "up" combines the content index (where does this token appear?) with t
 
 Direction "down" uses the pre-computed call graph. Zero runtime file I/O. Call sites are extracted during `def-index` build with field type resolution (DI constructor parameter types → field types → receiver types).
 
+TypeScript bare calls are resolved against lexical module/function/block/catch scopes. Local and same-file callable bindings carry exact file/line identities, including synthetic local functions whose parent remains the owning class for `this`/DI receiver resolution and direction-up attribution. Parameters, reassigned/non-callable locals, imports pending module resolution, and unknown globals produce typed unresolved reasons in `resultStatus` and never fall back to repository-wide name matching. Definition index format v9 stores this lexical call-site metadata, so older indexes are rebuilt.
+
+Synthetic TypeScript callable definitions are part of the public definition index rather than a hidden side table. Nested and module-private entries use `DefinitionKind::Function` plus the `local` modifier; exported callable variables and class arrow properties retain `Variable`/`Field` plus a `callable` modifier. All retain AST-derived signatures, making the same identity available to `xray_definitions` and both call-graph directions. Upward exact root election considers exported or class-owned TypeScript roots only, is disabled when an in-scope non-TypeScript callable shares the name, and reports `ambiguous_typescript_root` for multiple candidates. Private-name upward queries aggregate parser-resolved same-file edges without electing a global root; downward queries elect one private root or report ambiguity when several match.
+
+Root election is shared by single/batch and upward/downward traversal. An elected definition id also owns `rootMethod`; ambiguous or private-aggregation queries omit `rootMethod` instead of attaching an arbitrary same-named body. Ambient globals remain typed `unknown_global`, so their presence intentionally makes downward semantic completeness partial.
+
 **Advanced features:**
 
 - **`includeBody`:** returns the source code of each method in the call tree inline, plus a `rootMethod` object with the searched method's own body. Removes the need for separate `xray_definitions` calls.
