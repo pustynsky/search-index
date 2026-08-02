@@ -2230,17 +2230,6 @@ fn effective_definition_build_extensions(ctx: &HandlerContext) -> Vec<String> {
 }
 
 
-fn replace_live_definition_index(
-    current: &mut crate::definitions::DefinitionIndex,
-    mut replacement: crate::definitions::DefinitionIndex,
-) {
-    replacement.definition_generation = current
-        .definition_generation
-        .max(replacement.definition_generation)
-        .saturating_add(1);
-    *current = replacement;
-}
-
 /// Cross-load definition index on workspace switch.
 /// Returns the action taken: "loaded_cache", "background_build", or None.
 fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'static str> {
@@ -2254,7 +2243,7 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
 
     if let Some(mut idx) = def_loaded {
         idx.shrink_maps();
-        replace_live_definition_index(
+        crate::definitions::replace_live_definition_index(
             &mut def_arc.write().unwrap_or_else(|e| e.into_inner()),
             idx,
         );
@@ -2310,7 +2299,7 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
                     })
                 })
         };
-        replace_live_definition_index(
+        crate::definitions::replace_live_definition_index(
             &mut bg_def.write().unwrap_or_else(|e| e.into_inner()),
             new_idx,
         );
@@ -2927,7 +2916,7 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
     // Update in-memory cache
     match def_index_arc.write() {
         Ok(mut idx) => {
-            replace_live_definition_index(&mut idx, new_index);
+            crate::definitions::replace_live_definition_index(&mut idx, new_index);
         }
         Err(e) => {
             // Rollback workspace state to avoid getting stuck in Reindexing

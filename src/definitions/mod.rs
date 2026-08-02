@@ -83,6 +83,17 @@ pub(crate) fn definition_input_key(path: &Path) -> String {
     crate::clean_path(&crate::path_identity_key(path).to_string_lossy())
 }
 
+pub(crate) fn replace_live_definition_index(
+    current: &mut DefinitionIndex,
+    mut replacement: DefinitionIndex,
+) {
+    replacement.definition_generation = current
+        .definition_generation
+        .max(replacement.definition_generation)
+        .saturating_add(1);
+    *current = replacement;
+}
+
 pub(crate) fn definition_fingerprint_conflicts(
     index: &DefinitionIndex,
     expected: &HashMap<String, Option<DefinitionInputFingerprint>>,

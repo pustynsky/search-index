@@ -85,7 +85,7 @@ fn test_replace_live_definition_index_advances_above_both_generations() {
     let mut replacement = crate::definitions::DefinitionIndex::default();
     replacement.definition_generation = 11;
 
-    super::replace_live_definition_index(&mut current, replacement);
+    crate::definitions::replace_live_definition_index(&mut current, replacement);
 
     assert_eq!(current.definition_generation, 12);
 }
