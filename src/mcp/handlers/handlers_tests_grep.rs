@@ -1465,7 +1465,8 @@ fn test_xray_grep_response_truncation_via_small_budget() {
         "substring": false
     }));
 
-    assert!(!result.is_error);
+    assert!(!result.is_error, "{}", result.content[0].text);
+    assert!(result.content[0].text.len() <= ctx.max_response_bytes);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
 
     assert_eq!(output["summary"]["totalFiles"], 100);
@@ -1478,7 +1479,243 @@ fn test_xray_grep_response_truncation_via_small_budget() {
     let files_arr = output["files"].as_array().unwrap();
     assert!(files_arr.len() < 100,
         "Expected files array to be truncated from 100, got {}", files_arr.len());
+
+    let page = &output["resultStatus"]["page"];
+    assert_eq!(page["unit"], "files");
+    assert_eq!(page["offset"], 0);
+    assert_eq!(page["returned"], files_arr.len());
+    assert_eq!(output["resultStatus"]["shown"]["files"], files_arr.len());
+    assert_eq!(output["resultStatus"]["omitted"]["files"], 100 - files_arr.len());
+    assert_eq!(page["total"], 100);
+    assert_eq!(page["nextOffset"], files_arr.len());
+    assert!(page["continuationToken"].as_str().is_some());
 }
+
+#[test]
+fn test_xray_grep_cursor_pages_stable_token_ranking_and_rejects_count_only() {
+    let files = vec![
+        "C:/src/e.rs".to_string(),
+        "C:/src/a.rs".to_string(),
+        "C:/src/d.rs".to_string(),
+        "C:/src/b.rs".to_string(),
+        "C:/src/c.rs".to_string(),
+    ];
+    let mut expected = files.clone();
+    expected.sort();
+    let postings = (0..files.len())
+        .map(|file_id| Posting {
+            file_id: file_id as u32,
+            lines: vec![1],
+        })
+        .collect();
+    let index = ContentIndex {
+        root: ".".to_string(),
+        files,
+        index: HashMap::from([("targettoken".to_string(), postings)]),
+        total_tokens: 50,
+        extensions: vec!["rs".to_string()],
+        file_token_counts: vec![10; 5],
+        ..Default::default()
+    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(index)
+        .build();
+
+    let mut combined = Vec::new();
+    let mut continuation_token: Option<String> = None;
+    let mut expected_offset = 0usize;
+    loop {
+        let mut args = json!({
+            "terms": ["targettoken"],
+            "substring": false,
+            "maxResults": 2,
+        });
+        if let Some(token) = continuation_token.as_ref() {
+            args["continuationToken"] = json!(token);
+        }
+        let result = dispatch_tool(&ctx, "xray_grep", &args);
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let page = &output["resultStatus"]["page"];
+        let page_files = output["files"].as_array().unwrap();
+        assert_eq!(page["unit"], "files");
+        assert_eq!(page["offset"], expected_offset);
+        assert_eq!(page["returned"], page_files.len());
+        assert_eq!(page["total"], expected.len());
+        combined.extend(
+            page_files
+                .iter()
+                .map(|file| file["path"].as_str().unwrap().to_string()),
+        );
+        expected_offset += page_files.len();
+        continuation_token = page["continuationToken"].as_str().map(str::to_string);
+        if continuation_token.is_none() {
+            break;
+        }
+    }
+    assert_eq!(combined, expected);
+
+    let count_result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["targettoken"],
+        "countOnly": true,
+        "offset": 0,
+    }));
+    assert!(count_result.is_error);
+    assert!(count_result.content[0].text.contains("countOnly"));
+
+    let terminal = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["targettoken"],
+        "substring": false,
+        "offset": 5,
+    }));
+    assert!(!terminal.is_error, "{}", terminal.content[0].text);
+    let terminal_output: Value = serde_json::from_str(&terminal.content[0].text).unwrap();
+    assert!(terminal_output["files"].as_array().unwrap().is_empty());
+    assert_eq!(terminal_output["resultStatus"]["page"]["offset"], 5);
+    assert_eq!(terminal_output["resultStatus"]["page"]["returned"], 0);
+    assert!(terminal_output["resultStatus"]["page"]
+        .get("continuationToken")
+        .is_none());
+
+    let out_of_range = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["targettoken"],
+        "substring": false,
+        "offset": 6,
+    }));
+    assert!(out_of_range.is_error);
+    assert!(out_of_range.content[0].text.contains("ranked file count 5"));
+}
+
+#[test]
+fn test_xray_grep_byte_fit_preserves_line_content_before_reducing_page() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp_dir.path());
+    let names = ["f.cs", "a.cs", "e.cs", "b.cs", "d.cs", "c.cs"];
+    let source_line = format!("targettoken {}", "x".repeat(300));
+    let source = format!("{}\n", vec![source_line; 10].join("\n"));
+    for name in names {
+        std::fs::write(root.join(name), &source).unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+    let total_files = content_index.files.len();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(root.to_string_lossy().to_string())
+        .with_max_response_bytes(8_000)
+        .build();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["targettoken x"],
+        "showLines": true,
+        "contextLines": 0,
+        "maxResults": 0,
+    }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+    assert!(!files.is_empty());
+    assert!(files.len() < total_files, "{output:#}");
+    assert!(files.iter().all(|file| file["lineContent"].is_array()));
+    assert!(files.iter().all(|file| file.get("lineContentOmitted").is_none()));
+    assert!(output["recommendedNextQueries"].is_array(), "{output:#}");
+    assert_eq!(output["resultStatus"]["page"]["returned"], files.len());
+    assert_eq!(output["resultStatus"]["page"]["nextOffset"], files.len());
+    assert!(output["resultStatus"]["page"]["continuationToken"].is_string());
+}
+
+#[test]
+fn test_xray_grep_cursor_walks_all_ranked_modes() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp_dir.path());
+    let names = ["f.cs", "a.cs", "e.cs", "b.cs", "d.cs", "c.cs"];
+    for name in names {
+        std::fs::write(
+            root.join(name),
+            "alpha target token\nsecond phrase\n",
+        )
+        .unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ..Default::default()
+    })
+    .unwrap();
+    let mut expected = content_index.files.clone();
+    expected.sort();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(root.to_string_lossy().to_string())
+        .build();
+    let queries = [
+        ("token-regex", json!({ "terms": ["target.*"], "regex": true })),
+        ("substring", json!({ "terms": ["arge"], "substring": true })),
+        ("auto-phrase", json!({ "terms": ["target token"] })),
+        ("phrase", json!({ "terms": ["target token"], "phrase": true })),
+        (
+            "multi-phrase",
+            json!({ "terms": ["target token", "second phrase"], "phrase": true }),
+        ),
+        (
+            "line-regex",
+            json!({ "terms": ["^alpha target token$"], "lineRegex": true, "ext": ["cs"] }),
+        ),
+        (
+            "files-only",
+            json!({ "terms": ["target"], "substring": false, "filesOnly": true, "showLines": true }),
+        ),
+    ];
+
+    for (label, mut args) in queries {
+        args["maxResults"] = json!(2);
+        let mut expected_offset = 0usize;
+        let mut combined = Vec::new();
+        let mut continuation_token: Option<String> = None;
+        loop {
+            if let Some(token) = continuation_token.as_ref() {
+                args["continuationToken"] = json!(token);
+            } else {
+                args.as_object_mut().unwrap().remove("continuationToken");
+            }
+            let result = dispatch_tool(&ctx, "xray_grep", &args);
+            assert!(!result.is_error, "{label}: {}", result.content[0].text);
+            let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+            let files = output["files"].as_array().unwrap();
+            let page = &output["resultStatus"]["page"];
+            assert_eq!(page["offset"], expected_offset, "{label}: {output:#}");
+            if expected_offset > 0 {
+                assert!(output["resultStatus"]["reasons"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|reason| reason == "pagination"), "{label}: {output:#}");
+            }
+            assert_eq!(page["returned"], files.len(), "{label}: {output:#}");
+            assert_eq!(page["total"], expected.len(), "{label}: {output:#}");
+            if label == "files-only" {
+                assert!(files.iter().all(|file| file.get("lines").is_none()));
+                assert!(files.iter().all(|file| file.get("lineContent").is_none()));
+            }
+            combined.extend(
+                files
+                    .iter()
+                    .map(|file| file["path"].as_str().unwrap().to_string()),
+            );
+            expected_offset += files.len();
+            continuation_token = page["continuationToken"].as_str().map(str::to_string);
+            if continuation_token.is_none() {
+                break;
+            }
+        }
+        assert_eq!(combined, expected, "{label}");
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // Batch 3 tests — Nice-to-have edge cases
 // ═══════════════════════════════════════════════════════════════════════
@@ -1850,6 +2087,9 @@ fn test_xray_grep_duplicate_terms_do_not_change_auto_balance() {
 
     let unique_output: Value = serde_json::from_str(&unique_result.content[0].text).unwrap();
     let duplicate_output: Value = serde_json::from_str(&duplicate_result.content[0].text).unwrap();
+    assert_eq!(unique_output["summary"]["totalFiles"], 101);
+    assert_eq!(unique_output["resultStatus"]["page"]["total"], 21);
+    assert_eq!(unique_output["resultStatus"]["page"]["returned"], 21);
     assert_eq!(unique_output["files"].as_array().unwrap().len(), 21);
     assert_eq!(duplicate_output["files"], unique_output["files"]);
     assert_eq!(
@@ -2001,6 +2241,9 @@ fn test_xray_grep_phrase_sort_tie_break_by_path() {
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
         let files = output["files"].as_array().unwrap();
         assert_eq!(files.len(), names.len(), "Run {}: expected all {} files", run, names.len());
+        assert_eq!(output["resultStatus"]["page"]["unit"], "files");
+        assert_eq!(output["resultStatus"]["page"]["returned"], names.len());
+        assert_eq!(output["resultStatus"]["page"]["total"], names.len());
 
         let paths: Vec<String> = files.iter()
             .map(|f| f["path"].as_str().unwrap().to_string())
@@ -2071,6 +2314,9 @@ fn test_xray_grep_multi_phrase_sort_tie_break_by_path() {
         assert_eq!(mode, "phrase-or", "Run {}: expected phrase-or mode, got {}", run, mode);
         let files = output["files"].as_array().unwrap();
         assert_eq!(files.len(), names.len(), "Run {}: expected all {} files", run, names.len());
+        assert_eq!(output["resultStatus"]["page"]["unit"], "files");
+        assert_eq!(output["resultStatus"]["page"]["returned"], names.len());
+        assert_eq!(output["resultStatus"]["page"]["total"], names.len());
 
         let paths: Vec<String> = files.iter()
             .map(|f| f["path"].as_str().unwrap().to_string())
@@ -2137,6 +2383,9 @@ fn test_xray_grep_line_regex_sort_tie_break_by_path() {
         assert!(mode.starts_with("lineRegex"), "Run {}: expected lineRegex mode, got {}", run, mode);
         let files = output["files"].as_array().unwrap();
         assert_eq!(files.len(), names.len(), "Run {}: expected all {} files", run, names.len());
+        assert_eq!(output["resultStatus"]["page"]["unit"], "files");
+        assert_eq!(output["resultStatus"]["page"]["returned"], names.len());
+        assert_eq!(output["resultStatus"]["page"]["total"], names.len());
 
         let paths: Vec<String> = files.iter()
 

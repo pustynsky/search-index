@@ -14,6 +14,14 @@ fn make_params<'a>(
         show_lines: false,
         context_lines: 0,
         max_results: 50,
+        page_request: super::utils::PageRequest {
+            offset: 0,
+            node_offset: None,
+            requested: false,
+            workspace_generation: 0,
+            index_epoch: 0,
+            query_fingerprint: String::new(),
+        },
         mode_and: false,
         count_only: false,
         search_start: Instant::now(),
@@ -31,6 +39,7 @@ fn make_params<'a>(
         requested_mode: "token",
         files_only: false,
         invert_cap: 0,
+        invert: false,
     }
 }
 
