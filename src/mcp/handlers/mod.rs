@@ -567,7 +567,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "ambiguityPolicy": {
                         "type": "string",
                         "enum": ["report", "legacy"],
-                        "description": "C# ambiguity mode: report (default) or unsafe legacy fan-out."
+                        "description": "C#/TypeScript root ambiguity: report (default) or unsafe legacy fan-out."
                     },
 
                     "includeGrepReferences": {

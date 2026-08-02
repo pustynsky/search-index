@@ -823,7 +823,7 @@ fn test_ts_local_arrow_call_does_not_resolve_to_other_module_function() {
         &caller_file,
         r#"import { importedFn } from './other';
 function work(): void {}
-export function sameFile(): void {}
+export function sameFile(): void { work(); }
 export function shadowed(): void {}
 function outer(): void {
     function sameFile(): void {}
@@ -863,7 +863,7 @@ class ArrowOwner {
     .unwrap();
     std::fs::write(
         &other_file,
-        "const shadowed = () => {};\nexport function callback(): void {}\nexport function sameFile(): void {}\nexport function importedFn(): void {}\nconst privateHelper = () => {};\nexport function useOtherPrivateHelper(): void { privateHelper(); }\n",
+        "const shadowed = () => {};\nexport function callback(): void {}\nexport function sameFile(): void { callback(); }\nexport function importedFn(): void {}\nconst privateHelper = () => {};\nexport function useOtherPrivateHelper(): void { privateHelper(); }\n",
     )
     .unwrap();
 
@@ -1102,6 +1102,179 @@ class ArrowOwner {
             .len(),
         2,
         "{ambiguous_output}"
+    );
+
+    let legacy_same_file_up = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["sameFile"],
+            "direction": "up",
+            "depth": 1,
+            "includeBody": true,
+            "ambiguityPolicy": "legacy"
+        }),
+    );
+    assert!(
+        !legacy_same_file_up.is_error,
+        "{}",
+        legacy_same_file_up.content[0].text
+    );
+    let legacy_up_output: Value =
+        serde_json::from_str(&legacy_same_file_up.content[0].text).unwrap();
+    let legacy_up_methods: std::collections::HashSet<_> = legacy_up_output["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node["method"].as_str())
+        .collect();
+    assert_eq!(
+        legacy_up_methods,
+        std::collections::HashSet::from(["outer", "run"]),
+        "{legacy_up_output}"
+    );
+    assert!(legacy_up_output.get("rootResolution").is_none());
+    assert!(legacy_up_output.get("rootMethod").is_none());
+    assert_eq!(legacy_up_output["resultStatus"]["status"], "partial");
+    assert_eq!(legacy_up_output["resultStatus"]["complete"], false);
+    assert_eq!(
+        legacy_up_output["resultStatus"]["safeForExactSemantics"],
+        false
+    );
+    assert!(
+        legacy_up_output["resultStatus"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "legacy_ambiguous_fanout"),
+        "{legacy_up_output}"
+    );
+    assert!(
+        legacy_up_output["warning"]
+            .as_str()
+            .unwrap()
+            .contains("TypeScript"),
+        "{legacy_up_output}"
+    );
+
+    let legacy_same_file_down = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["sameFile"],
+            "direction": "down",
+            "depth": 1,
+            "includeBody": true,
+            "ambiguityPolicy": "legacy"
+        }),
+    );
+    assert!(
+        !legacy_same_file_down.is_error,
+        "{}",
+        legacy_same_file_down.content[0].text
+    );
+    let legacy_down_output: Value =
+        serde_json::from_str(&legacy_same_file_down.content[0].text).unwrap();
+    let legacy_down_methods: std::collections::HashSet<_> = legacy_down_output["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node["method"].as_str())
+        .collect();
+    assert_eq!(
+        legacy_down_methods,
+        std::collections::HashSet::from(["callback", "work"]),
+        "{legacy_down_output}"
+    );
+    assert!(legacy_down_output.get("rootResolution").is_none());
+    assert!(legacy_down_output.get("rootMethod").is_none());
+    assert_eq!(legacy_down_output["resultStatus"]["status"], "partial");
+    assert!(
+        legacy_down_output["resultStatus"]["reasons"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason == "legacy_ambiguous_fanout"),
+        "{legacy_down_output}"
+    );
+
+    for direction in ["up", "down"] {
+        let legacy_batch = dispatch_tool(
+            &ctx,
+            "xray_callers",
+            &json!({
+                "method": ["sameFile", "shadowed"],
+                "direction": direction,
+                "depth": 1,
+                "includeBody": true,
+                "ambiguityPolicy": "legacy"
+            }),
+        );
+        assert!(!legacy_batch.is_error, "{}", legacy_batch.content[0].text);
+        let legacy_batch_output: Value =
+            serde_json::from_str(&legacy_batch.content[0].text).unwrap();
+        let same_file_result = legacy_batch_output["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|result| result["method"] == "sameFile")
+            .unwrap();
+        let methods: std::collections::HashSet<_> = same_file_result["callTree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|node| node["method"].as_str())
+            .collect();
+        let expected = if direction == "up" {
+            std::collections::HashSet::from(["outer", "run"])
+        } else {
+            std::collections::HashSet::from(["callback", "work"])
+        };
+        assert_eq!(methods, expected, "{direction}: {legacy_batch_output}");
+        assert!(same_file_result.get("rootResolution").is_none());
+        assert!(same_file_result.get("rootMethod").is_none());
+        assert!(
+            same_file_result["warning"]
+                .as_str()
+                .unwrap()
+                .contains("TypeScript"),
+            "{legacy_batch_output}"
+        );
+        assert!(
+            legacy_batch_output["warning"]
+                .as_str()
+                .unwrap()
+                .contains("TypeScript"),
+            "{legacy_batch_output}"
+        );
+        assert_eq!(legacy_batch_output["resultStatus"]["status"], "partial");
+        assert_eq!(
+            legacy_batch_output["resultStatus"]["safeForExactSemantics"],
+            false
+        );
+        assert!(
+            legacy_batch_output["resultStatus"]["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "legacy_ambiguous_fanout"),
+            "{legacy_batch_output}"
+        );
+    }
+
+    let invalid_batch_policy = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["sameFile", "shadowed"],
+            "ambiguityPolicy": "unsafe"
+        }),
+    );
+    assert!(invalid_batch_policy.is_error);
+    assert!(
+        invalid_batch_policy.content[0].text.contains("ambiguityPolicy"),
+        "{}",
+        invalid_batch_policy.content[0].text
     );
 
     let batch_up = dispatch_tool(

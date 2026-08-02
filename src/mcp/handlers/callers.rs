@@ -981,7 +981,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             production_only,
         );
     }
-    let legacy_ambiguous_root = ambiguity_policy == "legacy"
+    let legacy_csharp_ambiguous_root = ambiguity_policy == "legacy"
         && ambiguous_root_candidates.definitions.len() > 1;
 
     let limits = CallerLimits { max_callers_per_level, max_total_nodes };
@@ -1127,7 +1127,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         TypeScriptRootCandidates::default()
     };
     let selected_typescript_roots = typescript_roots.selected(direction);
-    if selected_typescript_roots.len() > 1 {
+    let legacy_typescript_ambiguous_root = ambiguity_policy == "legacy"
+        && selected_typescript_roots.len() > 1;
+    if selected_typescript_roots.len() > 1 && !legacy_typescript_ambiguous_root {
         return build_ambiguous_root_result(
             &def_idx,
             &method_name,
@@ -1138,11 +1140,20 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             production_only,
         );
     }
-    let traversal_root_definition = exact_root_definition
-        .or_else(|| selected_typescript_roots.first().copied());
-    let root_body_definition = exact_root_definition.or_else(|| {
-        typescript_roots.root_body_definition(selected_typescript_roots)
-    });
+    let traversal_root_definition = if legacy_typescript_ambiguous_root {
+        None
+    } else {
+        exact_root_definition.or_else(|| selected_typescript_roots.first().copied())
+    };
+    let root_body_definition = if legacy_typescript_ambiguous_root {
+        None
+    } else {
+        exact_root_definition.or_else(|| {
+            typescript_roots.root_body_definition(selected_typescript_roots)
+        })
+    };
+    let legacy_ambiguous_root =
+        legacy_csharp_ambiguous_root || legacy_typescript_ambiguous_root;
     let suppress_root_body = exact_root_definition.is_none()
         && root_body_definition.is_none()
         && typescript_roots.has_typescript();
@@ -1392,7 +1403,14 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
 
         if legacy_ambiguous_root {
             mark_legacy_ambiguous_fanout(&mut result_status);
-            output["warning"] = json!("ambiguityPolicy=legacy traverses ambiguous C# roots and is deprecated for exact analysis.");
+            let root_language = if legacy_typescript_ambiguous_root {
+                "TypeScript"
+            } else {
+                "C#"
+            };
+            output["warning"] = json!(format!(
+                "ambiguityPolicy=legacy traverses ambiguous {root_language} roots and is deprecated for exact analysis."
+            ));
         }
         attach_traversal_page_status(
             &mut result_status,
@@ -1560,7 +1578,14 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         }
         if legacy_ambiguous_root {
             mark_legacy_ambiguous_fanout(&mut result_status);
-            output["warning"] = json!("ambiguityPolicy=legacy traverses ambiguous C# roots and is deprecated for exact analysis.");
+            let root_language = if legacy_typescript_ambiguous_root {
+                "TypeScript"
+            } else {
+                "C#"
+            };
+            output["warning"] = json!(format!(
+                "ambiguityPolicy=legacy traverses ambiguous {root_language} roots and is deprecated for exact analysis."
+            ));
         }
         attach_traversal_page_status(
             &mut result_status,
@@ -1635,6 +1660,15 @@ fn handle_multi_method_callers(
     let body_line_end = args.get("bodyLineEnd").and_then(|v| v.as_u64()).map(|v| v as u32);
     let impact_analysis = args.get("impactAnalysis").and_then(|v| v.as_bool()).unwrap_or(false);
     let production_only = args.get("productionOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+    let ambiguity_policy = match read_enum_string_with_default(
+        args,
+        "ambiguityPolicy",
+        &["report", "legacy"],
+        "report",
+    ) {
+        Ok(value) => value.to_lowercase(),
+        Err(error) => return ToolCallResult::error(error),
+    };
     if impact_analysis && direction != "up" {
         return ToolCallResult::error(
             "impactAnalysis only works with direction='up'.".to_string()
@@ -1663,6 +1697,7 @@ fn handle_multi_method_callers(
     let mut total_per_level_dropped: usize = 0;
     let mut unresolved_call_reasons_all = std::collections::BTreeMap::new();
     let mut ambiguous_typescript_roots = 0usize;
+    let mut legacy_typescript_roots = 0usize;
 
     let total_methods = methods.len();
     let offset = page_request.offset.min(total_methods);
@@ -1723,9 +1758,18 @@ fn handle_multi_method_callers(
             &ext_filter_list,
         );
         let selected_typescript_roots = typescript_roots.selected(&direction);
-        let selected_root = selected_typescript_roots.first().copied();
-        let root_body_definition =
-            typescript_roots.root_body_definition(selected_typescript_roots);
+        let legacy_typescript_ambiguous_root = ambiguity_policy == "legacy"
+            && selected_typescript_roots.len() > 1;
+        let selected_root = if legacy_typescript_ambiguous_root {
+            None
+        } else {
+            selected_typescript_roots.first().copied()
+        };
+        let root_body_definition = if legacy_typescript_ambiguous_root {
+            None
+        } else {
+            typescript_roots.root_body_definition(selected_typescript_roots)
+        };
         let suppress_root_body =
             root_body_definition.is_none() && typescript_roots.has_typescript();
 
@@ -1771,7 +1815,9 @@ fn handle_multi_method_callers(
                 interface_lookup_cache: HashMap::new(),
                 unresolved_call_reasons: std::collections::BTreeMap::new(),
             };
-            let tree = if selected_typescript_roots.len() > 1 {
+            let tree = if selected_typescript_roots.len() > 1
+                && !legacy_typescript_ambiguous_root
+            {
                 ambiguous_typescript_roots += 1;
                 method_result["rootResolution"] = ambiguous_root_resolution_value(
                     &def_idx,
@@ -1779,6 +1825,14 @@ fn handle_multi_method_callers(
                     "ambiguous_typescript_root",
                 );
                 Vec::new()
+            } else if legacy_typescript_ambiguous_root {
+                legacy_typescript_roots += 1;
+                builder.build(
+                    method_name,
+                    class_filter,
+                    0,
+                    &initial_chain,
+                )
             } else if let Some(root_definition) = selected_root {
                 builder.build_exact_root(
                     method_name,
@@ -1889,7 +1943,9 @@ fn handle_multi_method_callers(
                 root_total_candidates: 0,
                 unresolved_call_reasons: std::collections::BTreeMap::new(),
             };
-            let tree = if selected_typescript_roots.len() > 1 {
+            let tree = if selected_typescript_roots.len() > 1
+                && !legacy_typescript_ambiguous_root
+            {
                 ambiguous_typescript_roots += 1;
                 method_result["rootResolution"] = ambiguous_root_resolution_value(
                     &def_idx,
@@ -1897,6 +1953,9 @@ fn handle_multi_method_callers(
                     "ambiguous_typescript_root",
                 );
                 Vec::new()
+            } else if legacy_typescript_ambiguous_root {
+                legacy_typescript_roots += 1;
+                builder.build(method_name, class_filter, 0)
             } else if let Some(root_definition) = selected_root {
                 builder.build_exact_root(
                     method_name,
@@ -1955,6 +2014,11 @@ fn handle_multi_method_callers(
         // Add per-method ambiguity warning
         if let Some(ref warning) = method_warning {
             method_result["warning"] = json!(warning);
+        }
+        if legacy_typescript_ambiguous_root {
+            method_result["warning"] = json!(
+                "ambiguityPolicy=legacy traverses ambiguous TypeScript roots and is deprecated for exact analysis."
+            );
         }
 
         results.push(method_result);
@@ -2072,6 +2136,12 @@ fn handle_multi_method_callers(
             "allCallsResolved": false,
             "allStaticTargetsUnique": false,
         });
+    }
+    if legacy_typescript_roots > 0 {
+        mark_legacy_ambiguous_fanout(&mut result_status);
+        output["warning"] = json!(
+            "ambiguityPolicy=legacy traverses ambiguous TypeScript roots and is deprecated for exact analysis."
+        );
     }
     attach_traversal_page_status(
         &mut result_status,
