@@ -278,14 +278,18 @@ fn test_existing_directory_file_filter_rejects_sibling_prefix() {
         ..Default::default()
     };
 
-    let mut directory_terms = vec![
+    let directory_terms = vec![
         "ModuleRoot".to_string(),
         "./ModuleRoot".to_string(),
         "ModuleRoot/.".to_string(),
         module.to_string_lossy().into_owned(),
     ];
     #[cfg(windows)]
-    directory_terms.push("ModuleRoot\\".to_string());
+    let directory_terms = {
+        let mut terms = directory_terms;
+        terms.push("ModuleRoot\\".to_string());
+        terms
+    };
 
     for directory_term in directory_terms {
         let directory_result = handle_xray_definitions(
