@@ -9,13 +9,16 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 use tracing::{info, warn};
 
-use crate::{canonicalize_or_warn, clean_path, is_inside_git_dir, read_file_lossy};
-use super::{index_file_defs_with_semantics, types::*};
+use crate::{canonicalize_or_warn, clean_path, is_inside_git_dir};
+use super::{
+    definition_input_key, index_file_defs_with_semantics,
+    index_parsed_angular_components, read_definition_source_snapshot, types::*,
+};
 use super::csharp_semantics::CSharpFileContribution;
 #[cfg(feature = "lang-csharp")]
 use super::parser_csharp::parse_csharp_definitions_with_semantics;
 #[cfg(feature = "lang-typescript")]
-use super::parser_typescript::parse_typescript_definitions;
+use super::parser_typescript::parse_typescript_definitions_with_components;
 use super::parser_sql::parse_sql_definitions;
 #[cfg(feature = "lang-rust")]
 use super::parser_rust::parse_rust_definitions;
@@ -25,8 +28,16 @@ use super::parser_rust::parse_rust_definitions;
 /// Returns a `ParsedFileResult` containing all parsed data ready to be applied.
 /// The `temp_file_id` is a placeholder — it will be remapped during `apply_parsed_result()`.
 /// This function is safe to call without any lock.
+#[cfg(test)]
 pub fn parse_file_standalone(path: &Path, temp_file_id: u32) -> Option<ParsedFileResult> {
-    let (content, was_lossy) = read_file_lossy(path).ok()?;
+    try_parse_file_standalone(path, temp_file_id).ok().flatten()
+}
+
+pub(crate) fn try_parse_file_standalone(
+    path: &Path,
+    temp_file_id: u32,
+) -> std::io::Result<Option<ParsedFileResult>> {
+    let (content, was_lossy, fingerprint) = read_definition_source_snapshot(path)?;
     if was_lossy {
         warn!("File contains non-UTF8 bytes (lossy conversion applied): {}", path.display());
     }
@@ -41,6 +52,8 @@ pub fn parse_file_standalone(path: &Path, temp_file_id: u32) -> Option<ParsedFil
     let mut extension_methods = HashMap::new();
     #[cfg_attr(not(feature = "lang-csharp"), allow(unused_mut))]
     let mut csharp_semantics = CSharpFileContribution::default();
+    #[cfg_attr(not(feature = "lang-typescript"), allow(unused_mut))]
+    let mut angular_components = Vec::new();
 
     let (defs, calls, stats) = match ext_lower.as_str() {
         #[cfg(feature = "lang-csharp")]
@@ -62,7 +75,13 @@ pub fn parse_file_standalone(path: &Path, temp_file_id: u32) -> Option<ParsedFil
                 tree_sitter_typescript::LANGUAGE_TYPESCRIPT
             };
             ts_parser.set_language(&ts_lang.into()).ok();
-            parse_typescript_definitions(&mut ts_parser, &content, temp_file_id)
+            let (parsed, components) = parse_typescript_definitions_with_components(
+                &mut ts_parser,
+                &content,
+                temp_file_id,
+            );
+            angular_components = components;
+            parsed
         }
         "sql" => {
             parse_sql_definitions(&content, temp_file_id)
@@ -73,18 +92,30 @@ pub fn parse_file_standalone(path: &Path, temp_file_id: u32) -> Option<ParsedFil
             rs_parser.set_language(&tree_sitter_rust::LANGUAGE.into()).ok();
             parse_rust_definitions(&mut rs_parser, &content, temp_file_id)
         }
-        _ => return None,
+        _ => return Ok(None),
     };
 
-    Some(ParsedFileResult {
+    Ok(Some(ParsedFileResult {
         path: path.to_path_buf(),
         definitions: defs,
         call_sites: calls,
         code_stats: stats,
         extension_methods,
         csharp_semantics,
-    })
+        angular_components,
+        fingerprint,
+    }))
 }
+
+pub(crate) fn is_transient_definition_input_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::Interrupted
+    )
+}
+
 
 /// Parse a file using pre-created parsers (for parallel parsing).
 /// Unlike `parse_file_standalone()` which creates a new parser per call,
@@ -96,8 +127,8 @@ fn parse_file_with_parsers(
     #[cfg(feature = "lang-typescript")] ts_parser: &mut Option<tree_sitter::Parser>,
     #[cfg(feature = "lang-typescript")] tsx_parser: &mut Option<tree_sitter::Parser>,
     #[cfg(feature = "lang-rust")] rs_parser: &mut Option<tree_sitter::Parser>,
-) -> Option<ParsedFileResult> {
-    let (content, was_lossy) = read_file_lossy(path).ok()?;
+) -> std::io::Result<Option<ParsedFileResult>> {
+    let (content, was_lossy, fingerprint) = read_definition_source_snapshot(path)?;
     if was_lossy {
         warn!("File contains non-UTF8 bytes (lossy conversion applied): {}", path.display());
     }
@@ -111,6 +142,8 @@ fn parse_file_with_parsers(
     let mut extension_methods = HashMap::new();
     #[cfg_attr(not(feature = "lang-csharp"), allow(unused_mut))]
     let mut csharp_semantics = CSharpFileContribution::default();
+    #[cfg_attr(not(feature = "lang-typescript"), allow(unused_mut))]
+    let mut angular_components = Vec::new();
 
     let (defs, calls, stats) = match ext_lower.as_str() {
         #[cfg(feature = "lang-csharp")]
@@ -128,7 +161,10 @@ fn parse_file_with_parsers(
                 p.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).ok();
                 p
             });
-            parse_typescript_definitions(parser, &content, temp_file_id)
+            let (parsed, components) =
+                parse_typescript_definitions_with_components(parser, &content, temp_file_id);
+            angular_components = components;
+            parsed
         }
         #[cfg(feature = "lang-typescript")]
         "tsx" => {
@@ -137,7 +173,10 @@ fn parse_file_with_parsers(
                 p.set_language(&tree_sitter_typescript::LANGUAGE_TSX.into()).ok();
                 p
             });
-            parse_typescript_definitions(parser, &content, temp_file_id)
+            let (parsed, components) =
+                parse_typescript_definitions_with_components(parser, &content, temp_file_id);
+            angular_components = components;
+            parsed
         }
         "sql" => {
             parse_sql_definitions(&content, temp_file_id)
@@ -151,17 +190,19 @@ fn parse_file_with_parsers(
             });
             parse_rust_definitions(parser, &content, temp_file_id)
         }
-        _ => return None,
+        _ => return Ok(None),
     };
 
-    Some(ParsedFileResult {
+    Ok(Some(ParsedFileResult {
         path: path.to_path_buf(),
         definitions: defs,
         call_sites: calls,
         code_stats: stats,
         extension_methods,
         csharp_semantics,
-    })
+        angular_components,
+        fingerprint,
+    }))
 }
 
 /// Apply pre-parsed file results to the index.
@@ -173,6 +214,7 @@ pub fn apply_parsed_result(
 ) {
     let path = &result.path;
     let path_str = path.to_string_lossy().to_string();
+    let input_key = definition_input_key(path);
 
     // Get or assign file_id
     let file_id = if let Some(&id) = index.path_to_id.get(&crate::path_identity_key(path)) {
@@ -193,6 +235,10 @@ pub fn apply_parsed_result(
         def.file_id = file_id;
     }
 
+    let base_def_idx = index.definitions.len() as u32;
+    let definition_count = defs.len();
+    let angular_components = result.angular_components;
+
     let mut csharp_semantics = result.csharp_semantics;
     if csharp_semantics.extension_methods.is_empty() {
         csharp_semantics.extension_methods = result.extension_methods.clone();
@@ -208,8 +254,15 @@ pub fn apply_parsed_result(
         result.code_stats,
         csharp_semantics,
     );
+    index_parsed_angular_components(
+        index,
+        base_def_idx,
+        definition_count,
+        angular_components,
+    );
 
     index.extension_methods = index.csharp_semantics.merged_extension_methods();
+    index.input_fingerprints.insert(input_key, result.fingerprint);
 }
 
 /// Update definitions for a single file (incremental).
@@ -291,10 +344,24 @@ pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
         v.retain(|idx| !indices_set.contains(idx));
         !v.is_empty()
     });
+    let affected_template_paths: Vec<String> = index
+        .template_owners
+        .iter()
+        .filter(|(_, owners)| owners.iter().any(|idx| indices_set.contains(idx)))
+        .map(|(path, _)| path.clone())
+        .collect();
     index.template_owners.retain(|_, v| {
         v.retain(|idx| !indices_set.contains(idx));
         !v.is_empty()
     });
+    for path in affected_template_paths {
+        if !index.template_owners.contains_key(&path) {
+            index.input_fingerprints.remove(&path);
+            index
+                .pending_definition_inputs
+                .remove(&crate::path_identity_key(Path::new(&path)));
+        }
+    }
     index.template_parents.retain(|_, v| {
         v.retain(|idx| !indices_set.contains(idx));
         !v.is_empty()
@@ -355,7 +422,8 @@ pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
 
 /// Remove a file entirely from the definition index
 pub fn remove_file_from_def_index(index: &mut DefinitionIndex, path: &Path) {
-    if let Some(&file_id) = index.path_to_id.get(&crate::path_identity_key(path)) {
+    let path_key = crate::path_identity_key(path);
+    if let Some(&file_id) = index.path_to_id.get(&path_key) {
         remove_file_definitions(index, file_id);
         // Tombstone the files[] slot. file_id is never reused, so the entry
         // stays in the Vec as an empty string — no longer counted as a live
@@ -363,7 +431,69 @@ pub fn remove_file_from_def_index(index: &mut DefinitionIndex, path: &Path) {
         if (file_id as usize) < index.files.len() {
             index.files[file_id as usize].clear();
         }
-        index.path_to_id.remove(&crate::path_identity_key(path));
+        index.path_to_id.remove(&path_key);
+        index.input_fingerprints.remove(&definition_input_key(path));
+    }
+    index.pending_definition_inputs.remove(&path_key);
+}
+
+pub(crate) const MAX_TRANSIENT_DEFINITION_ATTEMPTS: u8 = 3;
+
+pub(crate) struct TransientDefinitionResolution {
+    pub retry_paths: Vec<PathBuf>,
+    pub exhausted_paths: Vec<PathBuf>,
+}
+
+pub(crate) fn resolve_transient_definition_inputs(
+    index: &mut DefinitionIndex,
+    transient_paths: &HashMap<PathBuf, Option<DefinitionInputRevision>>,
+    resolved_paths: impl IntoIterator<Item = PathBuf>,
+) -> TransientDefinitionResolution {
+    for path in resolved_paths {
+        index
+            .pending_definition_inputs
+            .remove(&crate::path_identity_key(&path));
+    }
+
+    let mut retry_paths = Vec::new();
+    let mut exhausted_paths = Vec::new();
+    let mut paths: Vec<_> = transient_paths.iter().collect();
+    paths.sort_unstable_by(|left, right| left.0.cmp(right.0));
+    for (path, observed_revision) in paths {
+        let key = crate::path_identity_key(path);
+        let attempts = index
+            .pending_definition_inputs
+            .get(&key)
+            .map_or(0, |pending| pending.attempts)
+            .saturating_add(1);
+        if attempts >= MAX_TRANSIENT_DEFINITION_ATTEMPTS {
+            let was_indexed = index.path_to_id.contains_key(&key);
+            remove_file_from_def_index(index, path);
+            index.pending_definition_inputs.insert(
+                key,
+                PendingDefinitionInput {
+                    attempts: MAX_TRANSIENT_DEFINITION_ATTEMPTS,
+                    observed_revision: *observed_revision,
+                },
+            );
+            if was_indexed {
+                exhausted_paths.push(path.clone());
+            }
+        } else {
+            index.pending_definition_inputs.insert(
+                key,
+                PendingDefinitionInput {
+                    attempts,
+                    observed_revision: *observed_revision,
+                },
+            );
+            retry_paths.push(path.clone());
+        }
+    }
+
+    TransientDefinitionResolution {
+        retry_paths,
+        exhausted_paths,
     }
 }
 
@@ -582,11 +712,128 @@ pub fn reconcile_definition_index(
 /// - Phase 4: Write lock to apply results (<500ms)
 ///
 /// During Phase 3, MCP requests work normally on the old index data.
+#[derive(Default)]
+struct ParsedDefinitionFiles {
+    parsed_results: Vec<ParsedFileResult>,
+    transient_paths: Vec<PathBuf>,
+}
+
+fn collect_definition_parse_result(
+    batch: &mut ParsedDefinitionFiles,
+    path: &Path,
+    result: std::io::Result<Option<ParsedFileResult>>,
+) {
+    match result {
+        Ok(Some(parsed)) => batch.parsed_results.push(parsed),
+        Ok(None) => {}
+        Err(error) if is_transient_definition_input_error(&error) => {
+            batch.transient_paths.push(path.to_path_buf());
+        }
+        Err(error) => {
+            tracing::debug!(
+                file = %path.display(),
+                %error,
+                "Definition input could not be parsed during reconciliation"
+            );
+        }
+    }
+}
+
+fn parse_definition_files(paths: &[PathBuf]) -> ParsedDefinitionFiles {
+    if paths.len() <= 1 {
+        let mut batch = ParsedDefinitionFiles::default();
+        for (index, path) in paths.iter().enumerate() {
+            collect_definition_parse_result(
+                &mut batch,
+                path,
+                try_parse_file_standalone(path, index as u32),
+            );
+        }
+        return batch;
+    }
+
+    let num_threads = std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(4);
+    let chunk_size = paths.len().div_ceil(num_threads).max(1);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = paths
+            .chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_index, chunk)| {
+                scope.spawn(move || {
+                    #[cfg(feature = "lang-csharp")]
+                    let mut cs_parser = {
+                        let mut parser = tree_sitter::Parser::new();
+                        parser
+                            .set_language(&tree_sitter_c_sharp::LANGUAGE.into())
+                            .ok();
+                        parser
+                    };
+                    #[cfg(feature = "lang-typescript")]
+                    let mut ts_parser: Option<tree_sitter::Parser> = None;
+                    #[cfg(feature = "lang-typescript")]
+                    let mut tsx_parser: Option<tree_sitter::Parser> = None;
+                    #[cfg(feature = "lang-rust")]
+                    let mut rs_parser: Option<tree_sitter::Parser> = None;
+                    let mut batch = ParsedDefinitionFiles::default();
+
+                    for (index, path) in chunk.iter().enumerate() {
+                        let temp_id = (chunk_index * chunk_size + index) as u32;
+                        let result = parse_file_with_parsers(
+                            path,
+                            temp_id,
+                            #[cfg(feature = "lang-csharp")]
+                            &mut cs_parser,
+                            #[cfg(feature = "lang-typescript")]
+                            &mut ts_parser,
+                            #[cfg(feature = "lang-typescript")]
+                            &mut tsx_parser,
+                            #[cfg(feature = "lang-rust")]
+                            &mut rs_parser,
+                        );
+                        collect_definition_parse_result(&mut batch, path, result);
+                    }
+                    batch
+                })
+            })
+            .collect();
+
+        let mut merged = ParsedDefinitionFiles::default();
+        for batch in handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok())
+        {
+            merged.parsed_results.extend(batch.parsed_results);
+            merged.transient_paths.extend(batch.transient_paths);
+        }
+        merged.transient_paths.sort_unstable();
+        merged.transient_paths.dedup();
+        merged
+    })
+}
+
 pub fn reconcile_definition_index_nonblocking(
     def_index: &Arc<RwLock<DefinitionIndex>>,
     dir: &str,
     extensions: &[String],
     respect_git_exclude: bool,
+) -> (usize, usize, usize) {
+    reconcile_definition_index_nonblocking_with_angular_paths(
+        def_index,
+        dir,
+        extensions,
+        respect_git_exclude,
+        None,
+    )
+}
+
+pub(crate) fn reconcile_definition_index_nonblocking_with_angular_paths(
+    def_index: &Arc<RwLock<DefinitionIndex>>,
+    dir: &str,
+    extensions: &[String],
+    respect_git_exclude: bool,
+    precomputed_angular_paths: Option<&[PathBuf]>,
 ) -> (usize, usize, usize) {
     let start = std::time::Instant::now();
     // Capture walk start time for created_at update (not now() at end — avoids race condition
@@ -600,6 +847,8 @@ pub fn reconcile_definition_index_nonblocking(
 
     // ── Phase 1: Walk filesystem (NO lock needed) ──
     let mut disk_files: HashMap<PathBuf, SystemTime> = HashMap::new();
+    let mut disk_paths_by_key: HashMap<PathBuf, PathBuf> = HashMap::new();
+    let mut disk_revisions: HashMap<PathBuf, DefinitionInputRevision> = HashMap::new();
 
     let mut walker = WalkBuilder::new(&dir_path);
     walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(respect_git_exclude);
@@ -622,21 +871,35 @@ pub fn reconcile_definition_index_nonblocking(
         if !ext_match {
             continue;
         }
-        let mtime = entry.metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
+        let metadata = entry.metadata().ok();
+        let mtime = metadata
+            .as_ref()
+            .and_then(|metadata| metadata.modified().ok())
             .unwrap_or(UNIX_EPOCH);
         let clean = PathBuf::from(clean_path(&path.to_string_lossy()));
+        let path_key = crate::path_identity_key(&clean);
+        if let Some(metadata) = metadata.as_ref() {
+            disk_revisions.insert(
+                path_key.clone(),
+                super::definition_input_revision_from_metadata(metadata),
+            );
+        }
+        disk_paths_by_key.insert(path_key, clean.clone());
         disk_files.insert(clean, mtime);
     }
 
     let scanned = disk_files.len();
-    let disk_file_keys: HashSet<PathBuf> = disk_files.keys()
-        .map(|path| crate::path_identity_key(path))
-        .collect();
 
     // ── Phase 2: Determine changed files (READ lock — instant) ──
-    let (_threshold, to_update, to_remove, added, modified) = {
+    let (
+        _threshold,
+        to_update,
+        to_remove,
+        added,
+        modified,
+        added_keys,
+        template_inputs,
+    ) = {
         let idx = match def_index.read() {
             Ok(idx) => idx,
             Err(e) => {
@@ -650,30 +913,108 @@ pub fn reconcile_definition_index_nonblocking(
         let mut to_remove: Vec<PathBuf> = Vec::new();
         let mut added = 0usize;
         let mut modified = 0usize;
+        let mut added_keys = HashSet::new();
 
         for (path, mtime) in &disk_files {
-            if !idx.path_to_id.contains_key(&crate::path_identity_key(path)) {
+            let path_key = crate::path_identity_key(path);
+            let current_revision = disk_revisions.get(&path_key).copied();
+            let quarantined = idx
+                .pending_definition_inputs
+                .get(&path_key)
+                .is_some_and(|pending| {
+                    pending.attempts >= MAX_TRANSIENT_DEFINITION_ATTEMPTS
+                        && pending.observed_revision == current_revision
+                });
+            if !idx.path_to_id.contains_key(&path_key) && !quarantined {
                 to_update.push(path.clone());
+                added_keys.insert(path_key);
                 added += 1;
-            } else if *mtime > threshold {
+            } else if idx.path_to_id.contains_key(&path_key) && *mtime > threshold {
                 to_update.push(path.clone());
                 modified += 1;
             }
         }
 
         for path in idx.path_to_id.keys() {
-            if !disk_file_keys.contains(path) {
+            if !disk_paths_by_key.contains_key(path) {
                 to_remove.push(path.clone());
             }
         }
 
-        (threshold, to_update, to_remove, added, modified)
+        let mut update_keys: HashSet<PathBuf> = to_update
+            .iter()
+            .map(|path| crate::path_identity_key(path))
+            .collect();
+        for (pending_key, pending) in &idx.pending_definition_inputs {
+            if pending.attempts < MAX_TRANSIENT_DEFINITION_ATTEMPTS
+                && update_keys.insert(pending_key.clone())
+                && let Some(path) = disk_paths_by_key.get(pending_key)
+            {
+                to_update.push(path.clone());
+                modified += 1;
+            }
+        }
+
+        let template_inputs = if precomputed_angular_paths.is_none() {
+            idx.template_owners
+                .iter()
+                .map(|(owner_key, owners)| {
+                    let unavailable_reason = owners.iter().find_map(|definition_index| {
+                        match idx.angular_components.get(definition_index) {
+                            Some(AngularComponentRecord {
+                                template: AngularTemplateSource::UnavailableExternal {
+                                    reason,
+                                    ..
+                                },
+                                ..
+                            }) => Some(reason.clone()),
+                            _ => None,
+                        }
+                    });
+                    (
+                        PathBuf::from(owner_key),
+                        idx.input_fingerprints.get(owner_key).cloned(),
+                        unavailable_reason,
+                        idx.pending_definition_inputs
+                            .contains_key(&crate::path_identity_key(Path::new(owner_key))),
+                    )
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+
+        (
+            threshold,
+            to_update,
+            to_remove,
+            added,
+            modified,
+            added_keys,
+            template_inputs,
+        )
     };
     // READ lock released here
 
+    let angular_to_update: Vec<PathBuf> = match precomputed_angular_paths {
+        Some(paths) => paths.to_vec(),
+        None => template_inputs
+            .into_iter()
+            .filter_map(|(path, fingerprint, unavailable_reason, pending)| {
+                (pending
+                    || !super::angular_template_snapshot_matches(
+                        &path,
+                        fingerprint.as_ref(),
+                        unavailable_reason.as_deref(),
+                    ))
+                .then_some(path)
+            })
+            .collect(),
+    };
+    let modified = modified + angular_to_update.len();
     let removed = to_remove.len();
 
-    if to_update.is_empty() && to_remove.is_empty() {
+    if to_update.is_empty() && to_remove.is_empty() && angular_to_update.is_empty() {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         info!(
             scanned,
@@ -684,69 +1025,135 @@ pub fn reconcile_definition_index_nonblocking(
     }
 
     // ── Phase 3: Parse ALL files in parallel (NO lock needed) ──
-    // During this phase, MCP requests work normally on the old index data!
-    // Collect to_update paths as a HashSet for post-parse cleanup.
-    let to_update_set: HashSet<PathBuf> = to_update.iter().cloned().collect();
-    let num_threads = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let chunk_size = to_update.len().div_ceil(num_threads).max(1);
-
-    let parsed_results: Vec<ParsedFileResult> = if to_update.len() <= 1 {
-        // Single file — no need for thread overhead
-        to_update.iter()
-            .enumerate()
-            .filter_map(|(i, path)| parse_file_standalone(path, i as u32))
-            .collect()
-    } else {
-        std::thread::scope(|s| {
-            let handles: Vec<_> = to_update.chunks(chunk_size)
-                .enumerate()
-                .map(|(chunk_idx, chunk)| {
-                    s.spawn(move || {
-                        // Create parsers ONCE per thread (like build_definition_index)
-                        #[cfg(feature = "lang-csharp")]
-                        let mut cs_parser = {
-                            let mut p = tree_sitter::Parser::new();
-                            p.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).ok();
-                            p
-                        };
-                        #[cfg(feature = "lang-typescript")]
-                        let mut ts_parser: Option<tree_sitter::Parser> = None;
-                        #[cfg(feature = "lang-typescript")]
-                        let mut tsx_parser: Option<tree_sitter::Parser> = None;
-                        #[cfg(feature = "lang-rust")]
-                        let mut rs_parser: Option<tree_sitter::Parser> = None;
-
-                        chunk.iter()
-                            .enumerate()
-                            .filter_map(|(i, path)| {
-                                let temp_id = (chunk_idx * chunk_size + i) as u32;
-                                parse_file_with_parsers(
-                                    path, temp_id,
-                                    #[cfg(feature = "lang-csharp")]
-                                    &mut cs_parser,
-                                    #[cfg(feature = "lang-typescript")]
-                                    &mut ts_parser,
-                                    #[cfg(feature = "lang-typescript")]
-                                    &mut tsx_parser,
-                                    #[cfg(feature = "lang-rust")]
-                                    &mut rs_parser,
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                    })
-                })
-                .collect();
-
-            handles.into_iter()
-                .flat_map(|h| h.join().unwrap_or_default())
-                .collect()
-        })
+    // During this phase, MCP requests work normally on the old index data.
+    let mut parsed_batch = parse_definition_files(&to_update);
+    if !parsed_batch.transient_paths.is_empty() {
+        let retry_batch = parse_definition_files(&parsed_batch.transient_paths);
+        parsed_batch
+            .parsed_results
+            .extend(retry_batch.parsed_results);
+        parsed_batch.transient_paths = retry_batch.transient_paths;
+    }
+    let transient_paths: HashMap<PathBuf, Option<DefinitionInputRevision>> = parsed_batch
+        .transient_paths
+        .iter()
+        .map(|path| (path.clone(), super::definition_input_revision(path)))
+        .collect();
+    let mut stable_updates: Vec<PathBuf> = to_update
+        .iter()
+        .filter(|path| !transient_paths.contains_key(*path))
+        .cloned()
+        .collect();
+    let mut stable_removals = to_remove.clone();
+    let mut stable_angular_updates = angular_to_update.clone();
+    let mut deferred_updates = HashSet::new();
+    let mut deferred_removals = HashSet::new();
+    let mut deferred_angular_updates = HashSet::new();
+    let mut changed_paths = stable_removals.clone();
+    changed_paths.extend(stable_updates.iter().cloned());
+    changed_paths.extend(stable_angular_updates.iter().cloned());
+    let mut parsed_results = parsed_batch.parsed_results;
+    let (workspace_root, owner_keys) = {
+        let index = match def_index.read() {
+            Ok(index) => index,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "Failed to acquire def index read lock for Angular reconciliation"
+                );
+                return (0, 0, 0);
+            }
+        };
+        let owner_keys = changed_paths
+            .iter()
+            .map(|path| definition_input_key(path))
+            .filter(|key| index.template_owners.contains_key(key))
+            .collect();
+        (index.root.clone(), owner_keys)
     };
+    let mut angular_updates = super::prepare_angular_template_updates(
+        &workspace_root,
+        &mut parsed_results,
+        &changed_paths,
+        &owner_keys,
+    );
+    let unstable = super::validate_prepared_definition_inputs(
+        &parsed_results,
+        &angular_updates,
+    );
+    if !unstable.is_empty() {
+        let rejected_keys = unstable
+            .iter()
+            .map(|path| definition_input_key(path))
+            .collect();
+        let rejected_keys = super::retain_stable_prepared_definition_inputs(
+            &mut parsed_results,
+            &mut angular_updates,
+            rejected_keys,
+        );
+        super::defer_rejected_definition_paths(
+            &mut stable_updates,
+            &rejected_keys,
+            &mut deferred_updates,
+        );
+        super::defer_rejected_definition_paths(
+            &mut stable_removals,
+            &rejected_keys,
+            &mut deferred_removals,
+        );
+        super::defer_rejected_definition_paths(
+            &mut stable_angular_updates,
+            &rejected_keys,
+            &mut deferred_angular_updates,
+        );
+        changed_paths.clear();
+        changed_paths.extend(stable_removals.iter().cloned());
+        changed_paths.extend(stable_updates.iter().cloned());
+        changed_paths.extend(stable_angular_updates.iter().cloned());
+        warn!(
+            unstable = unstable.len(),
+            deferred = deferred_updates.len()
+                + deferred_removals.len()
+                + deferred_angular_updates.len(),
+            "Definition reconcile snapshot changed before validation; applying stable paths"
+        );
+    }
 
+    let mut input_keys: HashSet<String> = changed_paths
+        .iter()
+        .map(|path| definition_input_key(path))
+        .collect();
+    input_keys.extend(
+        parsed_results
+            .iter()
+            .map(|result| definition_input_key(&result.path)),
+    );
+    input_keys.extend(
+        angular_updates
+            .iter()
+            .map(|update| update.owner_key.clone()),
+    );
+    let expected_fingerprints = {
+        let index = match def_index.read() {
+            Ok(index) => index,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    "Failed to acquire def index read lock for fingerprint reconciliation"
+                );
+                return (0, 0, 0);
+            }
+        };
+        input_keys
+            .into_iter()
+            .map(|key| {
+                let fingerprint = index.input_fingerprints.get(&key).cloned();
+                (key, fingerprint)
+            })
+            .collect::<HashMap<_, _>>()
+    };
     // ── Phase 4: Apply results (WRITE lock — brief, <500ms) ──
-    {
+    let (applied_added, applied_modified, applied_removed) = {
         let mut idx = match def_index.write() {
             Ok(idx) => idx,
             Err(e) => {
@@ -755,59 +1162,130 @@ pub fn reconcile_definition_index_nonblocking(
             }
         };
 
+        let conflicts = super::definition_fingerprint_conflicts(&idx, &expected_fingerprints);
+        if !conflicts.is_empty() {
+            let rejected_keys = super::retain_stable_prepared_definition_inputs(
+                &mut parsed_results,
+                &mut angular_updates,
+                conflicts,
+            );
+            super::defer_rejected_definition_paths(
+                &mut stable_updates,
+                &rejected_keys,
+                &mut deferred_updates,
+            );
+            super::defer_rejected_definition_paths(
+                &mut stable_removals,
+                &rejected_keys,
+                &mut deferred_removals,
+            );
+            super::defer_rejected_definition_paths(
+                &mut stable_angular_updates,
+                &rejected_keys,
+                &mut deferred_angular_updates,
+            );
+            changed_paths.clear();
+            changed_paths.extend(stable_removals.iter().cloned());
+            changed_paths.extend(stable_updates.iter().cloned());
+            changed_paths.extend(stable_angular_updates.iter().cloned());
+            warn!(
+                sources = deferred_updates.len(),
+                templates = deferred_angular_updates.len(),
+                removed = deferred_removals.len(),
+                "Definition reconcile baseline changed before apply; applying stable paths"
+            );
+        }
+
+        let applied_paths: HashSet<PathBuf> = parsed_results
+            .iter()
+            .map(|result| result.path.clone())
+            .collect();
+        let stable_update_set: HashSet<PathBuf> = stable_updates.iter().cloned().collect();
+        let stale_cleanup_paths: Vec<PathBuf> = stable_update_set
+            .iter()
+            .filter(|path| !applied_paths.contains(*path))
+            .cloned()
+            .collect();
+
+        let resolved_paths = changed_paths
+            .iter()
+            .chain(angular_updates.iter().map(|update| &update.path))
+            .cloned()
+            .collect::<Vec<_>>();
+        let transient_resolution = resolve_transient_definition_inputs(
+            &mut idx,
+            &transient_paths,
+            resolved_paths,
+        );
+        super::mark_pending_definition_conflicts(&mut idx, &deferred_updates);
+        super::mark_pending_definition_conflicts(&mut idx, &deferred_angular_updates);
+        let applied_added = stable_updates
+            .iter()
+            .filter(|path| added_keys.contains(&crate::path_identity_key(path)))
+            .count();
+        let applied_modified = stable_updates.len().saturating_sub(applied_added)
+            + stable_angular_updates.len();
+        let applied_removed = stable_removals.len()
+            + transient_resolution.exhausted_paths.len();
+        let graph_changed = !applied_paths.is_empty()
+            || !stale_cleanup_paths.is_empty()
+            || !stable_removals.is_empty()
+            || !angular_updates.is_empty()
+            || !transient_resolution.exhausted_paths.is_empty();
+
+
         // Remove deleted files: drop secondary indexes, tombstone the
         // files[] slot. We never reuse file_id, so the slot stays in the
         // Vec as an empty string — it's no longer counted as a live file
         // (see DefinitionIndex::live_file_count) but file_id assignments
         // remain stable.
-        for path in &to_remove {
-            if let Some(&file_id) = idx.path_to_id.get(&crate::path_identity_key(path)) {
-                remove_file_definitions(&mut idx, file_id);
-                if (file_id as usize) < idx.files.len() {
-                    idx.files[file_id as usize].clear();
-                }
-                idx.path_to_id.remove(&crate::path_identity_key(path));
-            }
+        for path in &stable_removals {
+            remove_file_from_def_index(&mut idx, path);
         }
 
         // Apply parsed results
-        let mut applied_paths: HashSet<PathBuf> = HashSet::with_capacity(parsed_results.len());
         for result in parsed_results {
-            applied_paths.insert(result.path.clone());
             apply_parsed_result(&mut idx, result);
         }
 
         // Clean up files that were in to_update but didn't produce a ParsedFileResult
         // (e.g., read error). Without this, stale definitions remain for unreadable files.
-        for path in &to_update_set {
-            if !applied_paths.contains(path)
-                && let Some(&file_id) = idx.path_to_id.get(&crate::path_identity_key(path)) {
-                    remove_file_definitions(&mut idx, file_id);
-                }
+        for path in &stale_cleanup_paths {
+            if let Some(&file_id) = idx.path_to_id.get(&crate::path_identity_key(path)) {
+                remove_file_definitions(&mut idx, file_id);
+            }
+            idx.input_fingerprints.remove(&definition_input_key(path));
+            idx.pending_definition_inputs
+                .remove(&crate::path_identity_key(path));
         }
+        super::apply_prepared_angular_template_updates(&mut idx, angular_updates);
 
         // Update created_at if anything changed (use walk_start, not now(), to avoid race condition)
         if added > 0 || modified > 0 || removed > 0 {
             idx.created_at = walk_start;
         }
-    }
+        if graph_changed {
+            idx.definition_generation = idx.definition_generation.saturating_add(1);
+        }
+        (applied_added, applied_modified, applied_removed)
+    };
     // WRITE lock released here
 
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     info!(
         scanned,
-        added,
-        modified,
-        removed,
+        added = applied_added,
+        modified = applied_modified,
+        removed = applied_removed,
         elapsed_ms = format_args!("{:.1}", elapsed_ms),
         "Definition index reconciliation complete (non-blocking)"
     );
 
     crate::index::log_memory(&format!(
         "watcher: def reconciliation non-blocking (scanned={}, added={}, modified={}, removed={}, {:.0}ms)",
-        scanned, added, modified, removed, elapsed_ms
+        scanned, applied_added, applied_modified, applied_removed, elapsed_ms
     ));
 
-    (added, modified, removed)
+    (applied_added, applied_modified, applied_removed)
 }

@@ -259,6 +259,10 @@ struct DefinitionIndex {
     template_children: HashMap<u32, Vec<String>>,       // Angular component def_idx → child selectors
     extension_methods: HashMap<String, Vec<String>>,    // C# extension method → host static classes
     respect_git_exclude: bool,
+    definition_generation: u64,                         // Complete definition-delta generation
+    input_fingerprints: HashMap<String, DefinitionInputFingerprint>, // normalized input path → snapshot
+    #[serde(skip)]
+    pending_definition_inputs: HashMap<PathBuf, PendingDefinitionInput>, // retry state + observed revision; never persisted
     // ...plus diagnostic counters: parse_errors, lossy_file_count, empty_file_ids, worker_panics
 }
 
@@ -376,7 +380,9 @@ This scan reads and deserializes each `.word-search` file header — slow if man
 
 The `method_calls` entries for removed definitions are also cleaned up during `remove_file_definitions`.
 
-Path removal uses the path-aware definition cleanup, which also tombstones the `files[file_id]` slot and removes `path_to_id`. The same cleanup is applied when a dirty file disappears between watcher scope filtering and parsing.
+Path removal uses the path-aware definition cleanup, which also tombstones the `files[file_id]` slot, removes `path_to_id`, and drops orphaned source/template fingerprints. In watcher and synchronous-edit updates, transient `WouldBlock`, `PermissionDenied`, or `Interrupted` source reads preserve the existing graph and requeue the dirty path. The runtime-only `pending_definition_inputs` registry forces retries independently of mtime for transient reads and optimistic snapshot conflicts; a third transient-read failure performs path-aware tombstoning and leaves a runtime quarantine marker with the observed `(size, mtime_ns)` revision. Periodic scans skip that marker while the disk revision is unchanged; a changed revision or a new filesystem/`xray_edit` event reactivates the path. The marker is not persisted, so a process restart/cold rebuild evaluates the file again. A genuine disappearance or other non-transient parse failure tombstones immediately. Periodic reconciliation removes stale definitions after a non-transient parse failure but preserves the path mapping so the next filesystem scan can retry it.
+
+Definition index v11 stores a monotonic `definition_generation` and `DefinitionInputFingerprint { size, modified_nanos, content_hash }` for every definition-indexed source and each available external Angular template. Source hashes cover the decoded parser input after BOM handling or lossy UTF-8 conversion; external-template hashes cover the validated raw UTF-8 bytes. Incremental updates compare the prepared baseline under the write lock before mutating any index, then publish definitions, Angular records/edges, source states, and fingerprints together. A format-version mismatch triggers the normal automatic rebuild.
 
 ### GitHistoryCache
 

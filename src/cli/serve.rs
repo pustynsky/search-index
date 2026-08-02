@@ -1472,6 +1472,9 @@ fn load_or_build_definition_index(
             angular_components: HashMap::new(),
             template_children: HashMap::new(),
             respect_git_exclude,
+            definition_generation: 0,
+            input_fingerprints: HashMap::new(),
+            pending_definition_inputs: HashMap::new(),
         };
         let def_arc = Arc::new(RwLock::new(empty_def));
 

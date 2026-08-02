@@ -592,7 +592,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
         },
         ToolDefinition {
             name: "xray_edit".to_string(),
-            description: "ALWAYS USE THIS instead of apply_diff, search_and_replace, or insert_content for ANY file edit. Edit a file by line-range operations or text-match replacements. Auto-creates new files when they don't exist (treats as empty — use Mode A: operations [{startLine:1, endLine:0, content:'...'}] for new file content). Mode A (operations): Replace/insert/delete lines by line number. Applied bottom-up to avoid offset cascade. Mode B (edits): Find and replace text or regex patterns, or insert content after/before anchor text. Applied sequentially. Returns unified diff. Use dryRun=true to preview without writing — pure preview, no parent directories or temp files are created on disk. Works on any text file (not limited to --dir). Accepts absolute or relative paths. UTF-8 only: files with invalid UTF-8 sequences (Windows-1251, Shift-JIS, GB2312, Latin-1) are rejected with an error rather than silently corrupted via lossy decode. Supports multi-file editing via 'paths' parameter (best-effort transactional: Phase 3a stages all temps + verifies I/O before touching originals; Phase 3b commits renames sequentially — a mid-batch rename failure cannot be rolled back and is surfaced as an error with `committed` / `pending` counts). PREFERRED over apply_diff for all file edits — atomic write per file (temp + fsync + rename), per-call unique temp names so concurrent edits do not collide, no whitespace issues, minimal token cost. FLEX-WHITESPACE FALLBACK: Mode B search/replace and insertAfter/insertBefore try exact match first, then strip-trailing-WS, then trim-blank-lines; the 4th step (regex-based whitespace-collapsing match) is opt-in and only runs when the edit carries an `expectedContext` — without `expectedContext` a failed match returns `Text not found` with a hint (no silent cross-block misfires). FIELD-NAME ALIASES: edits[] items accept common cross-tool aliases (oldText/newText, oldString/newString, old_str/new_str, find/with, pattern/replacement, after/before/text → search/replace/insertAfter/insertBefore/content) and silently rewrite them to canonical names before validation; a conflict (both alias AND canonical present in the same item) is still rejected. IDEMPOTENCY: insertAfter/insertBefore detect if the would-be-inserted content already exists adjacent to the anchor and skip the edit (response: skippedDetails[].reason = \"alreadyApplied: ...\"). Safe to retry after partial/unknown success. APPLIED: excludes skipIfNotFound/idempotent skips; counts in-memory applications, not writes. Thus applied>0 may pair with writeStatus=\"unchanged\". EDIT RESULTS: every successful response carries `editResults: [{idx, matchCount}]` — one entry per input edit in input order. matchCount reports actual replacements (Mode B) or 1-per-applied-op / 0-per-skipped-op (Mode A), letting callers detect over-matches without re-running the batch. RESULT FIDELITY: >2,000-line files return bounded, non-patchable hunks; rendered diffs >256 KB are truncated. Mixed LF/CRLF files are rejected before dryRun/write. Response lineEnding is \"LF\" or \"CRLF\"; pure CRLF stays CRLF on disk. BYTE NO-OP: exact final/source equality skips staging, replacement, and reindex. POST-WRITE VERIFICATION: committed files are re-read and byte-compared; mismatch is an error. SYNC REINDEX: committed files refresh content/definition indexes before response, so follow-up Xray queries see changes without watcher delay. Non-dryRun response fields: writeStatus (\"committed\" | \"unchanged\" — unchanged means final bytes matched the existing file and no write occurred), reindexStatus (\"completed\" | \"skipped\" — explicit index-update outcome, decoupled from writeStatus), reindexSkipReason (when skipped: \"contentUnchanged\", \"outsideServerDir\", \"extensionNotIndexed\", \"insideGitDir\", or \"ignoredByIndexRules\"), contentIndexUpdated (bool), defIndexUpdated (bool — true only when server has --definitions and parse succeeded), fileListInvalidated (bool — true when a new file is created → xray_fast cache will rebuild on next call), reindexElapsedMs (string, e.g. \"0.42\"), skippedReason (DEPRECATED alias of reindexSkipReason — emitted alongside it for backward compat). dryRun: true OMITS all reindex fields. Multi-file responses report per-file reindex outcome and a single summary.reindexElapsedMs. If an index lock is poisoned during reindex, the response includes reindexWarning explaining that the FS watcher will reconcile within 500ms — the write itself always succeeds.".to_string(),
+            description: "ALWAYS USE THIS instead of apply_diff, search_and_replace, or insert_content for ANY file edit. Edit a file by line-range operations or text-match replacements. Auto-creates new files when they don't exist (treats as empty — use Mode A: operations [{startLine:1, endLine:0, content:'...'}] for new file content). Mode A (operations): Replace/insert/delete lines by line number. Applied bottom-up to avoid offset cascade. Mode B (edits): Find and replace text or regex patterns, or insert content after/before anchor text. Applied sequentially. Returns unified diff. Use dryRun=true to preview without writing — pure preview, no parent directories or temp files are created on disk. Works on any text file (not limited to --dir). Accepts absolute or relative paths. UTF-8 only: files with invalid UTF-8 sequences (Windows-1251, Shift-JIS, GB2312, Latin-1) are rejected with an error rather than silently corrupted via lossy decode. Supports multi-file editing via 'paths' parameter (best-effort transactional: Phase 3a stages all temps + verifies I/O before touching originals; Phase 3b commits renames sequentially — a mid-batch rename failure cannot be rolled back and is surfaced as an error with `committed` / `pending` counts). PREFERRED over apply_diff for all file edits — atomic write per file (temp + fsync + rename), per-call unique temp names so concurrent edits do not collide, no whitespace issues, minimal token cost. FLEX-WHITESPACE FALLBACK: Mode B search/replace and insertAfter/insertBefore try exact match first, then strip-trailing-WS, then trim-blank-lines; the 4th step (regex-based whitespace-collapsing match) is opt-in and only runs when the edit carries an `expectedContext` — without `expectedContext` a failed match returns `Text not found` with a hint (no silent cross-block misfires). FIELD-NAME ALIASES: edits[] items accept common cross-tool aliases (oldText/newText, oldString/newString, old_str/new_str, find/with, pattern/replacement, after/before/text → search/replace/insertAfter/insertBefore/content) and silently rewrite them to canonical names before validation; a conflict (both alias AND canonical present in the same item) is still rejected. IDEMPOTENCY: insertAfter/insertBefore detect if the would-be-inserted content already exists adjacent to the anchor and skip the edit (response: skippedDetails[].reason = \"alreadyApplied: ...\"). Safe to retry after partial/unknown success. APPLIED: excludes skipIfNotFound/idempotent skips; counts in-memory applications, not writes. Thus applied>0 may pair with writeStatus=\"unchanged\". EDIT RESULTS: every successful response carries `editResults: [{idx, matchCount}]` — one entry per input edit in input order. matchCount reports actual replacements (Mode B) or 1-per-applied-op / 0-per-skipped-op (Mode A), letting callers detect over-matches without re-running the batch. RESULT FIDELITY: >2,000-line files return bounded, non-patchable hunks; rendered diffs >256 KB are truncated. Mixed LF/CRLF files are rejected before dryRun/write. Response lineEnding is \"LF\" or \"CRLF\"; pure CRLF stays CRLF on disk. BYTE NO-OP: exact final/source equality skips staging, replacement, and reindex. POST-WRITE VERIFICATION: committed files are re-read and byte-compared; mismatch is an error. SYNC REINDEX: committed files refresh content/definition indexes before response, so follow-up Xray queries see changes without watcher delay. Non-dryRun response fields: writeStatus (\"committed\" | \"unchanged\" — unchanged means final bytes matched the existing file and no write occurred), reindexStatus (\"completed\" | \"pending\" | \"skipped\"), reindexSkipReason (when skipped: \"contentUnchanged\", \"outsideServerDir\", \"extensionNotIndexed\", \"insideGitDir\", or \"ignoredByIndexRules\"), contentIndexUpdated (bool), defIndexUpdated (bool — true only after a complete definition delta apply), definitionGeneration (u64), fileListInvalidated (bool — true when a new file is created → xray_fast cache will rebuild on next call), reindexElapsedMs (string, e.g. \"0.42\"), skippedReason (DEPRECATED alias of reindexSkipReason — emitted alongside it for backward compat). dryRun: true OMITS all reindex fields. Multi-file responses report per-file reindex outcome and a single summary.reindexElapsedMs. If an index lock is poisoned during reindex, the response includes reindexWarning explaining that the FS watcher will reconcile within 500ms — the write itself always succeeds.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -2230,6 +2230,17 @@ fn effective_definition_build_extensions(ctx: &HandlerContext) -> Vec<String> {
 }
 
 
+fn replace_live_definition_index(
+    current: &mut crate::definitions::DefinitionIndex,
+    mut replacement: crate::definitions::DefinitionIndex,
+) {
+    replacement.definition_generation = current
+        .definition_generation
+        .max(replacement.definition_generation)
+        .saturating_add(1);
+    *current = replacement;
+}
+
 /// Cross-load definition index on workspace switch.
 /// Returns the action taken: "loaded_cache", "background_build", or None.
 fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'static str> {
@@ -2243,7 +2254,10 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
 
     if let Some(mut idx) = def_loaded {
         idx.shrink_maps();
-        *def_arc.write().unwrap_or_else(|e| e.into_inner()) = idx;
+        replace_live_definition_index(
+            &mut def_arc.write().unwrap_or_else(|e| e.into_inner()),
+            idx,
+        );
         ctx.def_ready.store(true, Ordering::Release);
         info!(dir = %dir, "Definition index cross-loaded from cache on workspace switch");
         return Some("loaded_cache");
@@ -2296,7 +2310,10 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
                     })
                 })
         };
-        *bg_def.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
+        replace_live_definition_index(
+            &mut bg_def.write().unwrap_or_else(|e| e.into_inner()),
+            new_idx,
+        );
         bg_building.store(false, Ordering::Release);
         bg_ready.store(true, Ordering::Release);
         crate::index::log_memory("reindex: def cross-build complete");
@@ -2910,7 +2927,7 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
     // Update in-memory cache
     match def_index_arc.write() {
         Ok(mut idx) => {
-            *idx = new_index;
+            replace_live_definition_index(&mut idx, new_index);
         }
         Err(e) => {
             // Rollback workspace state to avoid getting stuck in Reindexing

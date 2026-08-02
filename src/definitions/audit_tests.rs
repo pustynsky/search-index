@@ -17,7 +17,7 @@
 
 use super::*;
 use super::parser_csharp::parse_csharp_definitions;
-use super::parser_typescript::parse_typescript_definitions;
+use super::parser_typescript::parse_typescript_definitions_with_components;
 
 // ═══════════════════════════════════════════════════════════════════════
 // PART 1: C# Code Stats Audit — Golden Fixtures
@@ -35,7 +35,7 @@ fn parse_cs(source: &str) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>,
 fn parse_ts(source: &str) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>) {
     let mut parser = tree_sitter::Parser::new();
     parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
-    parse_typescript_definitions(&mut parser, source, 0)
+    parse_typescript_definitions_with_components(&mut parser, source, 0).0
 }
 
 /// Helper: find CodeStats for a method by name

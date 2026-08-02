@@ -1165,6 +1165,9 @@ fn test_definition_index_field_count_guard() {
         extension_methods: HashMap::new(),
         csharp_semantics: Default::default(),
         respect_git_exclude: false,
+        definition_generation: 0,
+        input_fingerprints: HashMap::new(),
+        pending_definition_inputs: HashMap::new(),
     };
     drop(_guard);
 }
@@ -1261,6 +1264,134 @@ public static class StringExtensions
 // ─── Tests for apply_parsed_result ──────────────────────────────────
 
 #[test]
+fn test_definition_source_snapshot_fingerprint_detects_same_size_change() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("input.ts");
+    std::fs::write(&path, "alpha").unwrap();
+    let (_, _, first) = super::read_definition_source_snapshot(&path).unwrap();
+
+    std::fs::write(&path, "omega").unwrap();
+    let (_, _, second) = super::read_definition_source_snapshot(&path).unwrap();
+
+    assert_eq!(first.size, second.size);
+    assert_ne!(first.content_hash, second.content_hash);
+}
+
+#[test]
+fn test_definition_fingerprint_compare_rejects_stale_baseline() {
+    let key = "q:/repo/input.ts".to_string();
+    let mut index = DefinitionIndex::default();
+    let fingerprint = DefinitionInputFingerprint {
+        size: 5,
+        modified_nanos: 7,
+        content_hash: [3; 32],
+    };
+    let mut expected = HashMap::from([(key.clone(), None)]);
+    assert!(super::definition_fingerprints_match(&index, &expected));
+
+    index
+        .input_fingerprints
+        .insert(key.clone(), fingerprint.clone());
+    assert!(!super::definition_fingerprints_match(&index, &expected));
+
+    expected.insert(key, Some(fingerprint));
+    assert!(super::definition_fingerprints_match(&index, &expected));
+}
+
+#[test]
+fn test_angular_template_update_drops_fingerprint_without_owners() {
+    let owner_key = "q:/repo/orphan.html".to_string();
+    let mut index = DefinitionIndex::default();
+    index.input_fingerprints.insert(
+        owner_key.clone(),
+        DefinitionInputFingerprint {
+            size: 3,
+            modified_nanos: 5,
+            content_hash: [7; 32],
+        },
+    );
+
+    super::apply_prepared_angular_template_updates(
+        &mut index,
+        vec![PreparedAngularTemplateUpdate {
+            path: std::path::PathBuf::from(&owner_key),
+            owner_key: owner_key.clone(),
+            dependent_source_paths: Vec::new(),
+            template_children: vec!["app-child".to_string()],
+            unavailable_reason: None,
+            triggered_by_change: true,
+            fingerprint: Some(DefinitionInputFingerprint {
+                size: 11,
+                modified_nanos: 13,
+                content_hash: [17; 32],
+            }),
+        }],
+    );
+
+    assert!(!index.input_fingerprints.contains_key(&owner_key));
+}
+
+#[test]
+fn test_retain_stable_prepared_inputs_propagates_template_conflict_to_source() {
+    let busy_source = std::path::PathBuf::from("q:/repo/busy.ts");
+    let stable_source = std::path::PathBuf::from("q:/repo/stable.ts");
+    let busy_template = std::path::PathBuf::from("q:/repo/busy.html");
+    let stable_template = std::path::PathBuf::from("q:/repo/stable.html");
+    let fingerprint = DefinitionInputFingerprint {
+        size: 1,
+        modified_nanos: 2,
+        content_hash: [3; 32],
+    };
+    let parsed_result = |path: std::path::PathBuf| ParsedFileResult {
+        path,
+        definitions: Vec::new(),
+        call_sites: Vec::new(),
+        code_stats: Vec::new(),
+        extension_methods: HashMap::new(),
+        csharp_semantics: CSharpFileContribution::default(),
+        angular_components: Vec::new(),
+        fingerprint: fingerprint.clone(),
+    };
+    let mut parsed_results = vec![
+        parsed_result(busy_source.clone()),
+        parsed_result(stable_source.clone()),
+    ];
+    let mut template_updates = vec![
+        PreparedAngularTemplateUpdate {
+            path: busy_template.clone(),
+            owner_key: super::definition_input_key(&busy_template),
+            dependent_source_paths: vec![busy_source.clone()],
+            template_children: Vec::new(),
+            unavailable_reason: None,
+            triggered_by_change: false,
+            fingerprint: Some(fingerprint.clone()),
+        },
+        PreparedAngularTemplateUpdate {
+            path: stable_template.clone(),
+            owner_key: super::definition_input_key(&stable_template),
+            dependent_source_paths: vec![stable_source.clone()],
+            template_children: Vec::new(),
+            unavailable_reason: None,
+            triggered_by_change: false,
+            fingerprint: Some(fingerprint),
+        },
+    ];
+
+    let rejected = super::retain_stable_prepared_definition_inputs(
+        &mut parsed_results,
+        &mut template_updates,
+        std::collections::HashSet::from([super::definition_input_key(&busy_template)]),
+    );
+
+    assert!(rejected.contains(&super::definition_input_key(&busy_source)));
+    assert_eq!(parsed_results.len(), 1);
+    assert_eq!(parsed_results[0].path, stable_source);
+    assert_eq!(template_updates.len(), 1);
+    assert_eq!(template_updates[0].path, stable_template);
+}
+
+
+#[test]
 fn test_apply_parsed_result_new_file() {
     use std::path::PathBuf;
     use super::types::*;
@@ -1284,6 +1415,8 @@ fn test_apply_parsed_result_new_file() {
         code_stats: vec![],
         extension_methods: HashMap::new(),
         csharp_semantics: Default::default(),
+        angular_components: Vec::new(),
+        fingerprint: DefinitionInputFingerprint::default(),
 
     };
 
@@ -1325,6 +1458,8 @@ fn test_apply_parsed_result_existing_file_replaces_defs() {
         call_sites: vec![], code_stats: vec![],
         extension_methods: HashMap::new(),
         csharp_semantics: Default::default(),
+        angular_components: Vec::new(),
+        fingerprint: DefinitionInputFingerprint::default(),
     };
     super::incremental::apply_parsed_result(&mut index, result1);
     assert!(index.name_index.contains_key("classa"));
@@ -1342,6 +1477,8 @@ fn test_apply_parsed_result_existing_file_replaces_defs() {
         call_sites: vec![], code_stats: vec![],
         extension_methods: HashMap::new(),
         csharp_semantics: Default::default(),
+        angular_components: Vec::new(),
+        fingerprint: DefinitionInputFingerprint::default(),
     };
     super::incremental::apply_parsed_result(&mut index, result2);
 
@@ -1375,6 +1512,8 @@ fn test_apply_parsed_result_merges_extension_methods() {
         call_sites: vec![], code_stats: vec![],
         extension_methods: ext_methods,
         csharp_semantics: Default::default(),
+        angular_components: Vec::new(),
+        fingerprint: DefinitionInputFingerprint::default(),
 
     };
 
@@ -1414,6 +1553,8 @@ fn test_apply_parsed_result_replaces_file_owned_extension_methods() {
         code_stats: vec![],
         extension_methods,
         csharp_semantics: Default::default(),
+        angular_components: Vec::new(),
+        fingerprint: DefinitionInputFingerprint::default(),
     });
     assert!(index.extension_methods.contains_key("Capitalize"));
 
@@ -1424,6 +1565,8 @@ fn test_apply_parsed_result_replaces_file_owned_extension_methods() {
         code_stats: vec![],
         extension_methods: HashMap::new(),
         csharp_semantics: Default::default(),
+        angular_components: Vec::new(),
+        fingerprint: DefinitionInputFingerprint::default(),
     });
     assert!(!index.extension_methods.contains_key("Capitalize"));
 }
@@ -1458,6 +1601,8 @@ fn test_apply_parsed_result_remaps_file_id_in_all_defs() {
         call_sites: vec![], code_stats: vec![],
         extension_methods: HashMap::new(),
         csharp_semantics: Default::default(),
+        angular_components: Vec::new(),
+        fingerprint: DefinitionInputFingerprint::default(),
     };
 
     super::incremental::apply_parsed_result(&mut index, result);
@@ -1512,6 +1657,8 @@ fn test_apply_parsed_result_with_call_sites_and_code_stats() {
         ],
         extension_methods: HashMap::new(),
         csharp_semantics: Default::default(),
+        angular_components: Vec::new(),
+        fingerprint: DefinitionInputFingerprint::default(),
 
     };
 
