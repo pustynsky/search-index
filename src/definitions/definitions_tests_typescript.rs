@@ -1654,67 +1654,251 @@ fn test_ts_multiline_arrow_function_calls_captured() {
 }
 // ─── Angular Template Metadata Tests ─────────────────────────────────
 
-// B1: extract_component_metadata tests
+// B1: structured Angular component metadata tests
 
 #[test]
-fn test_extract_component_metadata_standard() {
-    use super::parser_typescript::extract_component_metadata;
-    let text = "Component({\n    selector: 'dashboard-embed',\n    templateUrl: './dashboard-embed.component.html',\n})";
-    let result = extract_component_metadata(text);
-    assert!(result.is_some());
-    let (selector, tpl) = result.unwrap();
-    assert_eq!(selector, "dashboard-embed");
-    assert_eq!(tpl, Some("./dashboard-embed.component.html".to_string()));
+fn test_ts_angular_component_records_are_ast_structured() {
+    use super::parser_typescript::parse_typescript_definitions_with_components;
+    use super::{AngularTemplateSource, StaticValue};
+
+    let source = r#"const selectorName = 'dynamic-selector';
+@Component({
+    resolvedTemplateUrl: './wrong.html',
+    selector: 'app-inline',
+    template: `<app-child>{{value}}</app-child>`,
+})
+export class InlineComponent {}
+
+@Component({ 'selector': "app-external", "templateUrl": '../external.html' })
+class ExternalComponent {}
+
+@Component({ selector: selectorName, template: `<app-${kind}></app-${kind}>` })
+class DynamicComponent {}
+
+// selector: 'commented', templateUrl: './commented.html'
+@Component({ selector: 'app-missing' })
+class MissingComponent {}
+
+@Component(componentMetadata)
+class OpaqueComponent {}
+
+@Component({ ...componentMetadata, selector: 'app-spread' })
+class SpreadComponent {}
+
+@Component()
+class EmptyComponent {}
+
+@Component({ selector: 'app-\u0072oot', template: '<app-\x63hild></app-\x63hild>' })
+class EscapedComponent {}
+
+@Component({ selector: 'app-first-same-line' }) class SameLineComponent {} @Component({ selector: 'app-second-same-line' }) class SameLineComponent {}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .unwrap();
+    let ((definitions, _, _), components) =
+        parse_typescript_definitions_with_components(&mut parser, source, 0);
+    let component = |name: &str| {
+        components
+            .iter()
+            .find(|record| definitions[record.local_def_index].name == name)
+            .unwrap_or_else(|| panic!("missing component record for {name}"))
+    };
+
+    assert_eq!(
+        component("InlineComponent").component.selector,
+        StaticValue::Static("app-inline".to_string())
+    );
+    assert_eq!(
+        component("InlineComponent").component.template,
+        AngularTemplateSource::Inline {
+            content: "<app-child>{{value}}</app-child>".to_string(),
+        }
+    );
+    assert_eq!(
+        component("ExternalComponent").component,
+        super::AngularComponentRecord {
+            selector: StaticValue::Static("app-external".to_string()),
+            template: AngularTemplateSource::External {
+                relative_path: "../external.html".to_string(),
+            },
+        }
+    );
+    assert!(matches!(
+        component("DynamicComponent").component.selector,
+        StaticValue::Dynamic { .. }
+    ));
+    assert!(matches!(
+        component("DynamicComponent").component.template,
+        AngularTemplateSource::Dynamic { .. }
+    ));
+    assert_eq!(
+        component("MissingComponent").component.template,
+        AngularTemplateSource::Missing
+    );
+    for name in ["OpaqueComponent", "SpreadComponent"] {
+        assert!(matches!(
+            component(name).component.selector,
+            StaticValue::Dynamic { .. }
+        ));
+        assert!(matches!(
+            component(name).component.template,
+            AngularTemplateSource::Dynamic { .. }
+        ));
+    }
+    assert_eq!(
+        component("EmptyComponent").component,
+        super::AngularComponentRecord {
+            selector: StaticValue::Missing,
+            template: AngularTemplateSource::Missing,
+        }
+    );
+    assert_eq!(
+        component("EscapedComponent").component,
+        super::AngularComponentRecord {
+            selector: StaticValue::Static("app-root".to_string()),
+            template: AngularTemplateSource::Inline {
+                content: "<app-child></app-child>".to_string(),
+            },
+        }
+    );
+    let same_line_records: Vec<_> = components
+        .iter()
+        .filter(|record| definitions[record.local_def_index].name == "SameLineComponent")
+        .collect();
+    assert_eq!(same_line_records.len(), 2);
+    assert_ne!(
+        same_line_records[0].local_def_index,
+        same_line_records[1].local_def_index
+    );
+    assert_eq!(
+        same_line_records
+            .iter()
+            .map(|record| &record.component.selector)
+            .collect::<Vec<_>>(),
+        vec![
+            &StaticValue::Static("app-first-same-line".to_string()),
+            &StaticValue::Static("app-second-same-line".to_string()),
+        ]
+    );
 }
 
-#[test]
-fn test_extract_component_metadata_double_quotes() {
-    use super::parser_typescript::extract_component_metadata;
-    let text = r#"Component({selector: "my-widget", templateUrl: "./my-widget.html"})"#;
-    let result = extract_component_metadata(text);
-    assert!(result.is_some());
-    let (selector, tpl) = result.unwrap();
-    assert_eq!(selector, "my-widget");
-    assert_eq!(tpl, Some("./my-widget.html".to_string()));
-}
 
 #[test]
-fn test_extract_component_metadata_no_template_url() {
-    use super::parser_typescript::extract_component_metadata;
-    let text = "Component({\n    selector: 'simple-comp',\n    template: '<div>hello</div>',\n})";
-    let result = extract_component_metadata(text);
-    assert!(result.is_some());
-    let (selector, tpl) = result.unwrap();
-    assert_eq!(selector, "simple-comp");
-    assert_eq!(tpl, None);
+fn test_ts_angular_string_decoder_is_exact_and_panic_safe() {
+    use super::parser_typescript::decode_ts_string_literal;
+
+    assert_eq!(decode_ts_string_literal("'"), None);
+    assert_eq!(
+        decode_ts_string_literal(r#"'app-\u0072oot-\x31-\u{1f642}'"#),
+        Some("app-root-1-🙂".to_string())
+    );
+    assert_eq!(decode_ts_string_literal(r#"'\uD800'"#), None);
+    assert_eq!(decode_ts_string_literal(r#"'\8'"#), None);
+    assert_eq!(decode_ts_string_literal(r#"'\01'"#), None);
 }
 
-#[test]
-fn test_extract_component_metadata_no_selector() {
-    use super::parser_typescript::extract_component_metadata;
-    let text = "Component({\n    templateUrl: './file.html',\n})";
-    let result = extract_component_metadata(text);
-    assert!(result.is_none());
-}
 
 #[test]
-fn test_extract_component_metadata_not_component() {
-    use super::parser_typescript::extract_component_metadata;
-    let text = "Injectable({ providedIn: 'root' })";
-    let result = extract_component_metadata(text);
-    assert!(result.is_none());
+fn test_angular_template_path_normalization_stays_inside_workspace() {
+    let temp = tempfile::tempdir().unwrap();
+    let workspace = temp.path().join("workspace");
+    let nested = workspace.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let files = vec![nested.join("component.ts").to_string_lossy().to_string()];
+
+    let (_, inside_key) = super::resolve_angular_template_path(
+        &workspace.to_string_lossy(),
+        &files,
+        0,
+        "../shared.html",
+    )
+    .expect("in-workspace parent path should resolve");
+    let expected = crate::clean_path(
+        &crate::path_identity_key(&workspace.join("shared.html")).to_string_lossy(),
+    );
+    assert_eq!(inside_key, expected);
+    assert!(super::resolve_angular_template_path(
+        &workspace.to_string_lossy(),
+        &files,
+        0,
+        "../../outside.html",
+    )
+    .is_none());
 }
 
+
 #[test]
-fn test_extract_component_metadata_multiline() {
-    use super::parser_typescript::extract_component_metadata;
-    let text = "Component({\n    selector:\n        'multi-line-comp',\n    templateUrl:\n        './multi-line.html',\n})";
-    let result = extract_component_metadata(text);
-    assert!(result.is_some());
-    let (selector, tpl) = result.unwrap();
-    assert_eq!(selector, "multi-line-comp");
-    assert_eq!(tpl, Some("./multi-line.html".to_string()));
+fn test_definition_index_builds_angular_records_and_derived_indexes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    std::fs::write(
+        root.join("components.ts"),
+        r#"@Component({ selector: 'app-leaf' })
+export class LeafComponent {}
+@Component({ selector: 'app-inline', template: '<app-leaf></app-leaf><!-- <app-hidden></app-hidden> -->' })
+export class InlineComponent {}
+@Component({ selector: 'app-external', templateUrl: './external.html' })
+export class ExternalComponent {}
+@Component({ selector: dynamicSelector, template: makeTemplate() })
+export class DynamicComponent {}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        root.join("external.html"),
+        "<app-leaf></app-leaf><app-inline />",
+    )
+    .unwrap();
+
+    let index = build_definition_index(&DefIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "ts".to_string(),
+        threads: 1,
+        respect_git_exclude: false,
+    });
+    let definition_index = |name: &str| {
+        index
+            .definitions
+            .iter()
+            .position(|definition| definition.name == name)
+            .unwrap() as u32
+    };
+    let leaf = definition_index("LeafComponent");
+    let inline = definition_index("InlineComponent");
+    let external = definition_index("ExternalComponent");
+    let dynamic = definition_index("DynamicComponent");
+
+    assert_eq!(index.angular_components.len(), 4);
+    assert!(matches!(
+        index.angular_components[&dynamic].selector,
+        StaticValue::Dynamic { .. }
+    ));
+    assert!(matches!(
+        index.angular_components[&dynamic].template,
+        AngularTemplateSource::Dynamic { .. }
+    ));
+    assert_eq!(index.selector_index["app-leaf"], vec![leaf]);
+    assert_eq!(index.selector_index["app-inline"], vec![inline]);
+    assert_eq!(index.selector_index["app-external"], vec![external]);
+    assert_eq!(index.template_children[&inline], vec!["app-leaf"]);
+    assert_eq!(
+        index.template_children[&external],
+        vec!["app-inline".to_string(), "app-leaf".to_string()]
+    );
+    assert_eq!(
+        index.template_parents["app-leaf"],
+        vec![inline, external]
+    );
+    assert_eq!(index.template_parents["app-inline"], vec![external]);
+    assert!(!index.template_parents.contains_key("app-hidden"));
+
+    let owner_key = crate::clean_path(
+        &crate::path_identity_key(&root.join("external.html")).to_string_lossy(),
+    );
+    assert_eq!(index.template_owners[&owner_key], vec![external]);
 }
+
+
 
 // B2: extract_custom_elements tests
 

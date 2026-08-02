@@ -256,7 +256,39 @@ pub struct CallSite {
 
 /// Format version for DefinitionIndex. Bump when changing the struct layout.
 /// Loading an index with a different version triggers a rebuild.
-pub const DEFINITION_INDEX_VERSION: u32 = 9;
+pub const DEFINITION_INDEX_VERSION: u32 = 10;
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum StaticValue<T> {
+    Static(T),
+    Dynamic { reason: String },
+    Missing,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub enum AngularTemplateSource {
+    External { relative_path: String },
+    UnavailableExternal { relative_path: String, reason: String },
+    Inline { content: String },
+    Dynamic { reason: String },
+    Missing,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct AngularComponentRecord {
+    pub selector: StaticValue<String>,
+    pub template: AngularTemplateSource,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedAngularComponentRecord {
+    pub local_def_index: usize,
+    pub component: AngularComponentRecord,
+}
+
+#[cfg(feature = "lang-typescript")]
+pub(crate) type TypeScriptParseResult = (ParseResult, Vec<ParsedAngularComponentRecord>);
+
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(Default)]
@@ -293,6 +325,12 @@ pub struct DefinitionIndex {
     /// Angular component selector → Vec<def_idx> of @Component classes.
     #[serde(default)]
     pub selector_index: HashMap<String, Vec<u32>>,
+    /// Normalized external template path → owning component def_idx values.
+    #[serde(default)]
+    pub template_owners: HashMap<String, Vec<u32>>,
+    /// Child selector → parent component def_idx values.
+    #[serde(default)]
+    pub template_parents: HashMap<String, Vec<u32>>,
 
     // ── CATEGORY B: Indexes with def_idx as KEYS (HashMap<u32, _>) ──
     // These store data keyed by def_idx.
@@ -307,6 +345,9 @@ pub struct DefinitionIndex {
     /// def_idx -> CodeStats for methods/constructors/functions.
     #[serde(default)]
     pub code_stats: HashMap<u32, CodeStats>,
+    /// Parser-emitted Angular component records keyed by global component def_idx.
+    #[serde(default)]
+    pub angular_components: HashMap<u32, AngularComponentRecord>,
     /// def_idx of component → child selectors from HTML template.
     #[serde(default)]
     pub template_children: HashMap<u32, Vec<String>>,
@@ -371,11 +412,17 @@ pub struct DefinitionIndexHead {
     #[serde(default)]
     pub selector_index: HashMap<String, Vec<u32>>,
     #[serde(default)]
+    pub template_owners: HashMap<String, Vec<u32>>,
+    #[serde(default)]
+    pub template_parents: HashMap<String, Vec<u32>>,
+    #[serde(default)]
     pub method_calls: HashMap<u32, Vec<CallSite>>,
     #[serde(default)]
     pub csharp_semantics: CSharpSemanticIndex,
     #[serde(default)]
     pub code_stats: HashMap<u32, CodeStats>,
+    #[serde(default)]
+    pub angular_components: HashMap<u32, AngularComponentRecord>,
     #[serde(default)]
     pub template_children: HashMap<u32, Vec<String>>,
     pub path_to_id: HashMap<PathBuf, u32>,
@@ -413,9 +460,12 @@ impl DefinitionIndex {
             base_type_index: self.base_type_index.clone(),
             file_index: self.file_index.clone(),
             selector_index: self.selector_index.clone(),
+            template_owners: self.template_owners.clone(),
+            template_parents: self.template_parents.clone(),
             method_calls: self.method_calls.clone(),
             csharp_semantics: self.csharp_semantics.clone(),
             code_stats: self.code_stats.clone(),
+            angular_components: self.angular_components.clone(),
             template_children: self.template_children.clone(),
             path_to_id: self.path_to_id.clone(),
             parse_errors: self.parse_errors,
@@ -450,9 +500,12 @@ impl DefinitionIndex {
             base_type_index: head.base_type_index,
             file_index: head.file_index,
             selector_index: head.selector_index,
+            template_owners: head.template_owners,
+            template_parents: head.template_parents,
             method_calls: head.method_calls,
             csharp_semantics: head.csharp_semantics,
             code_stats: head.code_stats,
+            angular_components: head.angular_components,
             template_children: head.template_children,
             path_to_id: head.path_to_id,
             parse_errors: head.parse_errors,
@@ -490,8 +543,11 @@ impl DefinitionIndex {
         self.base_type_index.shrink_to_fit();
         self.file_index.shrink_to_fit();
         self.selector_index.shrink_to_fit();
+        self.template_owners.shrink_to_fit();
+        self.template_parents.shrink_to_fit();
         self.method_calls.shrink_to_fit();
         self.code_stats.shrink_to_fit();
+        self.angular_components.shrink_to_fit();
         self.template_children.shrink_to_fit();
         self.path_to_id.shrink_to_fit();
         self.extension_methods.shrink_to_fit();
@@ -502,6 +558,8 @@ impl DefinitionIndex {
         for v in self.base_type_index.values_mut() { v.shrink_to_fit(); }
         for v in self.file_index.values_mut() { v.shrink_to_fit(); }
         for v in self.selector_index.values_mut() { v.shrink_to_fit(); }
+        for v in self.template_owners.values_mut() { v.shrink_to_fit(); }
+        for v in self.template_parents.values_mut() { v.shrink_to_fit(); }
         for v in self.method_calls.values_mut() { v.shrink_to_fit(); }
     }
 }
@@ -521,7 +579,14 @@ pub type CsharpParseResult = (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>,
 pub type CsharpSemanticParseResult = (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>, HashMap<String, Vec<String>>, CSharpFileContribution);
 
 /// Chunk type used during parallel definition index building.
-pub(crate) type DefChunk = (u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>, CSharpFileContribution);
+pub(crate) type DefChunk = (
+    u32,
+    Vec<DefinitionEntry>,
+    Vec<(usize, Vec<CallSite>)>,
+    Vec<(usize, CodeStats)>,
+    CSharpFileContribution,
+    Vec<ParsedAngularComponentRecord>,
+);
 
 
 /// Parsed results for a single file — ready to be applied to the index.

@@ -620,6 +620,14 @@ fn test_compact_remaps_selector_index_and_template_children() {
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m.insert(1, vec![1]); m },
         path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("comp-a.ts"), 0); m.insert(PathBuf::from("comp-b.ts"), 1); m },
         selector_index: { let mut m = HashMap::new(); m.insert("app-comp-a".to_string(), vec![0]); m.insert("app-comp-b".to_string(), vec![1]); m },
+        template_owners: { let mut m = HashMap::new(); m.insert("a.html".to_string(), vec![0]); m.insert("b.html".to_string(), vec![1]); m },
+        template_parents: { let mut m = HashMap::new(); m.insert("app-child".to_string(), vec![0]); m.insert("app-other".to_string(), vec![1]); m },
+        angular_components: {
+            let mut m = HashMap::new();
+            m.insert(0, AngularComponentRecord { selector: StaticValue::Static("app-comp-a".to_string()), template: AngularTemplateSource::External { relative_path: "a.html".to_string() } });
+            m.insert(1, AngularComponentRecord { selector: StaticValue::Static("app-comp-b".to_string()), template: AngularTemplateSource::External { relative_path: "b.html".to_string() } });
+            m
+        },
         template_children: { let mut m = HashMap::new(); m.insert(0, vec!["app-child".to_string()]); m.insert(1, vec!["app-other".to_string()]); m },
         ..Default::default()
     };
@@ -630,8 +638,14 @@ fn test_compact_remaps_selector_index_and_template_children() {
     // Verify selector_index and template_children are cleaned (Fix 3)
     assert!(!index.selector_index.contains_key("app-comp-a"), "CompA selector should be removed");
     assert!(index.selector_index.contains_key("app-comp-b"), "CompB selector should remain");
+    assert!(!index.angular_components.contains_key(&0));
+    assert!(index.angular_components.contains_key(&1));
     assert!(!index.template_children.contains_key(&0), "CompA template_children should be removed");
     assert!(index.template_children.contains_key(&1), "CompB template_children should remain");
+    assert!(!index.template_owners.contains_key("a.html"));
+    assert_eq!(index.template_owners["b.html"], vec![1]);
+    assert!(!index.template_parents.contains_key("app-child"));
+    assert_eq!(index.template_parents["app-other"], vec![1]);
 
     // Compact
     compact_definitions(&mut index);
@@ -644,8 +658,11 @@ fn test_compact_remaps_selector_index_and_template_children() {
     assert_eq!(compb_selector, &vec![0u32], "CompB selector should point to 0 after compact");
 
     // template_children should be remapped: old key 1 → new key 0
+    assert!(index.angular_components.contains_key(&0));
     assert!(index.template_children.contains_key(&0), "CompB children should be at key 0 after compact");
     assert_eq!(index.template_children.get(&0).unwrap(), &vec!["app-other".to_string()]);
+    assert_eq!(index.template_owners["b.html"], vec![0]);
+    assert_eq!(index.template_parents["app-other"], vec![0]);
 }
 
 // ─── collect_source_files() Tests ───────────────────────────────────
@@ -1124,6 +1141,8 @@ fn test_definition_index_field_count_guard() {
         base_type_index: HashMap::new(),
         file_index: HashMap::new(),
         selector_index: HashMap::new(),
+        template_owners: HashMap::new(),
+        template_parents: HashMap::new(),
 
         // ══════════════════════════════════════════════════════════════
         // CATEGORY B: def_idx as KEYS — HashMap<u32, _>
@@ -1132,6 +1151,7 @@ fn test_definition_index_field_count_guard() {
         // ══════════════════════════════════════════════════════════════
         method_calls: HashMap::new(),
         code_stats: HashMap::new(),
+        angular_components: HashMap::new(),
         template_children: HashMap::new(),
 
         // ══════════════════════════════════════════════════════════════

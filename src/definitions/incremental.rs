@@ -291,7 +291,16 @@ pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
         v.retain(|idx| !indices_set.contains(idx));
         !v.is_empty()
     });
+    index.template_owners.retain(|_, v| {
+        v.retain(|idx| !indices_set.contains(idx));
+        !v.is_empty()
+    });
+    index.template_parents.retain(|_, v| {
+        v.retain(|idx| !indices_set.contains(idx));
+        !v.is_empty()
+    });
 
+    index.angular_components.retain(|k, _| !indices_set.contains(k));
     index.template_children.retain(|k, _| !indices_set.contains(k));
 
     // Conditionally shrink secondary index vecs after retain() to release excess capacity.
@@ -395,12 +404,17 @@ pub fn compact_definitions(index: &mut DefinitionIndex) {
     remap_index_values(&mut index.base_type_index, &remap);
     remap_index_values(&mut index.file_index, &remap);
     remap_index_values(&mut index.selector_index, &remap);
+    remap_index_values(&mut index.template_owners, &remap);
+    remap_index_values(&mut index.template_parents, &remap);
 
     // Remap HashMap<u32, _> keyed indexes
     index.method_calls = index.method_calls.drain()
         .filter_map(|(k, v)| remap.get(&k).map(|&new_k| (new_k, v)))
         .collect();
     index.code_stats = index.code_stats.drain()
+        .filter_map(|(k, v)| remap.get(&k).map(|&new_k| (new_k, v)))
+        .collect();
+    index.angular_components = index.angular_components.drain()
         .filter_map(|(k, v)| remap.get(&k).map(|&new_k| (new_k, v)))
         .collect();
     index.template_children = index.template_children.drain()

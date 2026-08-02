@@ -38,8 +38,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 
 use crate::{clean_path, is_inside_git_dir, read_file_lossy};
-#[cfg(feature = "lang-typescript")]
-use parser_typescript::extract_component_metadata;
 
 /// File extensions that have definition parser support (tree-sitter or regex).
 /// Used to dynamically generate MCP instructions about which files can be read
@@ -255,73 +253,204 @@ fn read_angular_template(path: &Path) -> std::io::Result<AngularTemplateRead> {
     Ok(AngularTemplateRead::Content(content))
 }
 
+#[cfg(feature = "lang-typescript")]
+fn lexical_normalize_path(path: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut normalized = std::path::PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            std::path::Component::RootDir => normalized.push(component.as_os_str()),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return None;
+                }
+            }
+            std::path::Component::Normal(segment) => normalized.push(segment),
+        }
+    }
+    Some(normalized)
+}
+
+#[cfg(feature = "lang-typescript")]
+fn resolve_angular_template_path(
+    workspace_root: &str,
+    files: &[String],
+    file_id: u32,
+    relative_path: &str,
+) -> Option<(std::path::PathBuf, String)> {
+    let source_path = std::path::Path::new(files.get(file_id as usize)?);
+    let template_path = lexical_normalize_path(&source_path.parent()?.join(relative_path))?;
+    let workspace_path = lexical_normalize_path(std::path::Path::new(workspace_root))?;
+    let template_key = crate::path_identity_key(&template_path);
+    let workspace_key = crate::path_identity_key(&workspace_path);
+    if !template_key.starts_with(&workspace_key) {
+        return None;
+    }
+    let owner_key = crate::clean_path(&template_key.to_string_lossy());
+    Some((template_path, owner_key))
+}
+
+
+#[cfg(feature = "lang-typescript")]
+fn mark_angular_template_unavailable(
+    index: &mut DefinitionIndex,
+    definition_index: u32,
+    relative_path: String,
+    reason: &str,
+) {
+    if let Some(component) = index.angular_components.get_mut(&definition_index) {
+        component.template = AngularTemplateSource::UnavailableExternal {
+            relative_path,
+            reason: reason.to_string(),
+        };
+    }
+}
+
+
 /// Scan Angular @Component definitions for selectors and template children.
 /// Populates selector_index and template_children from HTML templates.
 #[cfg(feature = "lang-typescript")]
-pub(crate) fn enrich_angular_templates(
-    definitions: &[DefinitionEntry],
-    files: &[String],
-    name_index: &mut HashMap<String, Vec<u32>>,
-    selector_index: &mut HashMap<String, Vec<u32>>,
-    template_children: &mut HashMap<u32, Vec<String>>,
-) {
+pub(crate) fn enrich_angular_templates(index: &mut DefinitionIndex) {
     let template_start = Instant::now();
     let mut templates_processed = 0usize;
     let mut templates_oversized = 0usize;
     let mut templates_failed = 0usize;
 
-    for (def_idx, def) in definitions.iter().enumerate() {
-        if def.kind != DefinitionKind::Class { continue; }
-        let component_attr = match def.attributes.iter().find(|a| a.starts_with("Component(")) {
-            Some(a) => a,
-            None => continue,
-        };
-        let (selector, template_url) = match extract_component_metadata(component_attr) {
-            Some(meta) => meta,
-            None => continue,
-        };
-        // Add selector to name_index for discoverability
-        let sel_lower = selector.to_lowercase();
-        name_index.entry(sel_lower).or_default().push(def_idx as u32);
+    index.selector_index.clear();
+    index.template_children.clear();
+    index.template_owners.clear();
+    index.template_parents.clear();
 
-        selector_index.entry(selector).or_default().push(def_idx as u32);
+    let mut components: Vec<_> = index
+        .angular_components
+        .iter()
+        .map(|(&definition_index, component)| (definition_index, component.clone()))
+        .collect();
+    components.sort_unstable_by_key(|(definition_index, _)| *definition_index);
 
-        if let Some(ref tpl_url) = template_url {
-            let ts_file_path = match files.get(def.file_id as usize) {
-                Some(p) => p,
-                None => continue,
-            };
-            let html_path = match std::path::Path::new(ts_file_path).parent() {
-                Some(dir) => dir.join(tpl_url.strip_prefix("./").unwrap_or(tpl_url)),
-                None => std::path::PathBuf::from(tpl_url),
-            };
-            match read_angular_template(&html_path) {
-                Ok(AngularTemplateRead::Content(html_content)) => {
-                    let children = extract_custom_elements(&html_content);
-                    if !children.is_empty() {
-                        template_children.insert(def_idx as u32, children);
-                        templates_processed += 1;
+    for (definition_index, component) in components {
+        let Some(definition) = index.definitions.get(definition_index as usize) else {
+            continue;
+        };
+        let active = index
+            .file_index
+            .get(&definition.file_id)
+            .is_some_and(|definitions| definitions.binary_search(&definition_index).is_ok());
+        if !active || definition.kind != DefinitionKind::Class {
+            continue;
+        }
+        let file_id = definition.file_id;
+
+        if let StaticValue::Static(selector) = &component.selector {
+            let selector = selector.to_lowercase();
+            let definitions = index.name_index.entry(selector.clone()).or_default();
+            if !definitions.contains(&definition_index) {
+                definitions.push(definition_index);
+            }
+            index
+                .selector_index
+                .entry(selector)
+                .or_default()
+                .push(definition_index);
+        }
+
+        let template_content = match component.template {
+            AngularTemplateSource::Inline { content } => Some(content),
+            AngularTemplateSource::External { relative_path } => {
+                let Some((template_path, owner_key)) = resolve_angular_template_path(
+                    &index.root,
+                    &index.files,
+                    file_id,
+                    &relative_path,
+                ) else {
+                    templates_failed += 1;
+                    mark_angular_template_unavailable(
+                        index,
+                        definition_index,
+                        relative_path,
+                        "external template path is outside the workspace",
+                    );
+                    continue;
+                };
+                index
+                    .template_owners
+                    .entry(owner_key)
+                    .or_default()
+                    .push(definition_index);
+                match read_angular_template(&template_path) {
+                    Ok(AngularTemplateRead::Content(content)) => Some(content),
+                    Ok(AngularTemplateRead::TooLarge { observed_size }) => {
+                        templates_oversized += 1;
+                        tracing::warn!(
+                            target: "xray::parse",
+                            file = %template_path.display(),
+                            size = observed_size,
+                            limit = MAX_PARSE_SOURCE_BYTES,
+                            "skipping oversized Angular template"
+                        );
+                        mark_angular_template_unavailable(
+                            index,
+                            definition_index,
+                            relative_path,
+                            "external template exceeds the source size limit",
+                        );
+                        None
+                    }
+                    Err(_) => {
+                        templates_failed += 1;
+                        mark_angular_template_unavailable(
+                            index,
+                            definition_index,
+                            relative_path,
+                            "external template could not be read",
+                        );
+                        None
                     }
                 }
-                Ok(AngularTemplateRead::TooLarge { observed_size }) => {
-                    templates_oversized += 1;
-                    tracing::warn!(
-                        target: "xray::parse",
-                        file = %html_path.display(),
-                        size = observed_size,
-                        limit = MAX_PARSE_SOURCE_BYTES,
-                        "skipping oversized Angular template"
-                    );
-                }
-                Err(_) => { templates_failed += 1; }
             }
+            AngularTemplateSource::UnavailableExternal { .. }
+            | AngularTemplateSource::Dynamic { .. }
+            | AngularTemplateSource::Missing => None,
+        };
+
+        if let Some(content) = template_content {
+            let children = extract_custom_elements(&content);
+            for child in &children {
+                index
+                    .template_parents
+                    .entry(child.clone())
+                    .or_default()
+                    .push(definition_index);
+            }
+            if !children.is_empty() {
+                index.template_children.insert(definition_index, children);
+            }
+            templates_processed += 1;
         }
     }
 
+    for values in index.selector_index.values_mut() {
+        values.sort_unstable();
+        values.dedup();
+    }
+    for values in index.template_owners.values_mut() {
+        values.sort_unstable();
+        values.dedup();
+    }
+    for values in index.template_parents.values_mut() {
+        values.sort_unstable();
+        values.dedup();
+    }
+
     if templates_processed > 0 || templates_oversized > 0 || templates_failed > 0 {
-        eprintln!("[def-index] Angular templates: {} enriched, {} oversized, {} read errors ({:.1}ms)",
-            templates_processed, templates_oversized, templates_failed,
-            template_start.elapsed().as_secs_f64() * 1000.0);
+        eprintln!(
+            "[def-index] Angular templates: {} enriched, {} oversized, {} unavailable ({:.1}ms)",
+            templates_processed,
+            templates_oversized,
+            templates_failed,
+            template_start.elapsed().as_secs_f64() * 1000.0
+        );
     }
 }
 
@@ -347,7 +476,17 @@ fn merge_chunk_result(
     index.empty_file_ids.extend(empty_files);
 
     let mut call_sites = 0usize;
-    for (file_id, file_defs, file_calls, file_stats, file_csharp_semantics) in chunk_defs {
+    for (
+        file_id,
+        file_defs,
+        file_calls,
+        file_stats,
+        file_csharp_semantics,
+        file_angular_components,
+    ) in chunk_defs
+    {
+        let base_def_idx = index.definitions.len() as u32;
+        let definition_count = file_defs.len();
         call_sites += index_file_defs_with_semantics(
             index,
             file_id,
@@ -356,6 +495,22 @@ fn merge_chunk_result(
             file_stats,
             file_csharp_semantics,
         );
+        for record in file_angular_components {
+            if record.local_def_index >= definition_count {
+                tracing::warn!(
+                    target: "xray::definitions",
+                    file_id,
+                    local_definition_index = record.local_def_index,
+                    definition_count,
+                    "dropping Angular component record with invalid local definition index"
+                );
+                continue;
+            }
+            index.angular_components.insert(
+                base_def_idx + record.local_def_index as u32,
+                record.component,
+            );
+        }
     }
 
     index.extension_methods = index.csharp_semantics.merged_extension_methods();
@@ -505,6 +660,8 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                         let parse_start = Instant::now();
                         #[cfg_attr(not(feature = "lang-csharp"), allow(unused_mut))]
                         let mut file_csharp_semantics = CSharpFileContribution::default();
+                        #[cfg_attr(not(feature = "lang-typescript"), allow(unused_mut))]
+                        let mut file_angular_components = Vec::new();
                         let (file_defs, file_calls, file_stats) = match ext.to_lowercase().as_str() {
                             #[cfg(feature = "lang-csharp")]
                             "cs" => {
@@ -520,7 +677,14 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                                         .expect("Error loading TypeScript grammar");
                                     p
                                 });
-                                parser_typescript::parse_typescript_definitions(parser, &content, *file_id)
+                                let (parsed, components) =
+                                    parser_typescript::parse_typescript_definitions_with_components(
+                                        parser,
+                                        &content,
+                                        *file_id,
+                                    );
+                                file_angular_components = components;
+                                parsed
                             }
                             #[cfg(feature = "lang-typescript")]
                             "tsx" if need_tsx => {
@@ -530,7 +694,14 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                                         .expect("Error loading TSX grammar");
                                     p
                                 });
-                                parser_typescript::parse_typescript_definitions(parser, &content, *file_id)
+                                let (parsed, components) =
+                                    parser_typescript::parse_typescript_definitions_with_components(
+                                        parser,
+                                        &content,
+                                        *file_id,
+                                    );
+                                file_angular_components = components;
+                                parsed
                             }
                             "sql" => {
                                 let (defs, calls, stats) = parser_sql::parse_sql_definitions(&content, *file_id);
@@ -557,6 +728,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                                 file_calls,
                                 file_stats,
                                 file_csharp_semantics,
+                                file_angular_components,
                             ));
                         } else {
                             empty_files.push((*file_id, content_len));
@@ -603,10 +775,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     // ─── Angular template enrichment ──────────────────────────
     let enrich_start = Instant::now();
     #[cfg(feature = "lang-typescript")]
-    enrich_angular_templates(
-        &index.definitions, &index.files,
-        &mut index.name_index, &mut index.selector_index, &mut index.template_children,
-    );
+    enrich_angular_templates(&mut index);
     let enrich_elapsed = enrich_start.elapsed();
 
     // ─── Report and finalize ──────────────────────────────────
@@ -675,7 +844,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 /// Comments, declarations, CDATA, quoted attributes, and script/style raw text are skipped.
 /// Malformed inactive contexts consume the remaining input, and templates above the parser
 /// source-size limit are ignored rather than producing a partial graph.
-/// Returns deduplicated lowercase names in stable sort order, excluding Angular `ng-*` tags.
+/// Returns deduplicated lowercase names in lexicographic order, excluding Angular `ng-*` tags.
 pub(crate) fn extract_custom_elements(html_content: &str) -> Vec<String> {
     if html_content.len() > MAX_PARSE_SOURCE_BYTES {
         tracing::warn!(

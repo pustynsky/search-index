@@ -248,10 +248,14 @@ struct DefinitionIndex {
     attribute_index: HashMap<String, Vec<u32>>,         // attribute → def indices
     base_type_index: HashMap<String, Vec<u32>>,         // base type → def indices
     file_index: HashMap<u32, Vec<u32>>,                 // file_id → def indices (source of truth)
-    selector_index: HashMap<String, Vec<u32>>,          // Angular @Component selector → def indices
+    selector_index: HashMap<String, Vec<u32>>,          // Angular selector → component def indices
+    template_owners: HashMap<String, Vec<u32>>,         // normalized external template path → owners
+    template_parents: HashMap<String, Vec<u32>>,        // child selector → parent component def indices
     path_to_id: HashMap<PathBuf, u32>,                  // path → file_id
     method_calls: HashMap<u32, Vec<CallSite>>,          // def_idx → call sites (xray_callers "down")
     code_stats: HashMap<u32, CodeStats>,                // def_idx → complexity metrics
+    // def_idx → AST metadata source
+    angular_components: HashMap<u32, AngularComponentRecord>,
     template_children: HashMap<u32, Vec<String>>,       // Angular component def_idx → child selectors
     extension_methods: HashMap<String, Vec<String>>,    // C# extension method → host static classes
     respect_git_exclude: bool,

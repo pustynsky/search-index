@@ -390,6 +390,8 @@ Module-private roots are excluded from upward exact root election because the sa
 
 Common ambient globals such as `setTimeout`, test-runner functions, and `require` are intentionally reported as `unknown_global` until a later resolver can prove their targets. Code that invokes them therefore produces an honest partial/non-exhaustive status in either direction rather than a guessed edge.
 
+Angular `@Component` metadata is parsed from the TypeScript AST. Static inline and in-workspace external templates share one tokenizer and one component graph; persisted `template_owners` records external ownership for lifecycle work, while `template_parents` powers direct reverse lookup. Duplicate child selectors return `ambiguous_template_selector` candidates without choosing a class. Dynamic or missing selector/template states, unavailable external templates, plus temporarily unavailable records during incremental reconciliation, appear in `summary.templateResolutionReasons` and make `resultStatus` partial and unsafe for exhaustive claims.
+
 ```json
 // Find all callers of ExecuteQueryAsync, 5 levels deep, excluding tests
 {

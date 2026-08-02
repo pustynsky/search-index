@@ -132,11 +132,14 @@ graph LR
             BTI["base_type_index: HashMap&lt;String, Vec&lt;u32&gt;&gt;"]
             FII["file_index: HashMap&lt;u32, Vec&lt;u32&gt;&gt;"]
             SI["selector_index: HashMap&lt;String, Vec&lt;u32&gt;&gt;"]
+            TO["template_owners: HashMap&lt;String, Vec&lt;u32&gt;&gt;"]
+            TP["template_parents: HashMap&lt;String, Vec&lt;u32&gt;&gt;"]
         end
 
         subgraph CatB["Category B: def_idx as keys"]
             MC["method_calls: HashMap&lt;u32, Vec&lt;CallSite&gt;&gt;"]
             CS["code_stats: HashMap&lt;u32, CodeStats&gt;"]
+            AC["angular_components: HashMap&lt;u32, AngularComponentRecord&gt;"]
             TC["template_children: HashMap&lt;u32, Vec&lt;String&gt;&gt;"]
         end
 
@@ -169,7 +172,9 @@ Each `CallSite` contains: `method_name`, `receiver_type` (resolved via field/con
 | `attribute_index` | lowercased attribute | C# attribute lookup (e.g., `[Test]`, `[ServiceProvider]`) |
 | `base_type_index` | lowercased base type | Find implementations of an interface or base class |
 | `file_index` | file_id | All definitions in a file; source of truth for active definitions |
-| `selector_index` | Angular component selector | Map `<app-user-list>` to the `@Component` class |
+| `selector_index` | Angular component selector | Map `<app-user-list>` to all matching `@Component` classes |
+| `template_owners` | normalized template path | External template → owning component definitions |
+| `template_parents` | child selector | Direct parent components using that selector |
 
 **Data indexes (Category B)** store data keyed by def_idx:
 
@@ -177,7 +182,8 @@ Each `CallSite` contains: `method_name`, `receiver_type` (resolved via field/con
 |-------|-------|---------|
 | `method_calls` | `Vec<CallSite>` | Pre-computed call sites for instant callee lookups (direction "down") |
 | `code_stats` | `CodeStats` | Cyclomatic/cognitive complexity, nesting, params, returns, calls, lambdas |
-| `template_children` | `Vec<String>` | Angular HTML template → child component selectors |
+| `angular_components` | `AngularComponentRecord` | AST-derived selector and explicit inline/external/unavailable/dynamic/missing template state |
+| `template_children` | `Vec<String>` | Angular template → child component selectors |
 
 **Auxiliary fields (Category C):**
 
@@ -559,7 +565,7 @@ Direction "up" combines the content index (where does this token appear?) with t
 
 Direction "down" uses the pre-computed call graph. Zero runtime file I/O. Call sites are extracted during `def-index` build with field type resolution (DI constructor parameter types → field types → receiver types).
 
-TypeScript bare calls are resolved against lexical module/function/block/catch scopes. Local and same-file callable bindings carry exact file/line identities, including synthetic local functions whose parent remains the owning class for `this`/DI receiver resolution and direction-up attribution. Parameters, reassigned/non-callable locals, imports pending module resolution, and unknown globals produce typed unresolved reasons in `resultStatus` and never fall back to repository-wide name matching. Definition index format v9 stores this lexical call-site metadata, so older indexes are rebuilt.
+TypeScript bare calls are resolved against lexical module/function/block/catch scopes. Local and same-file callable bindings carry exact file/line identities, including synthetic local functions whose parent remains the owning class for `this`/DI receiver resolution and direction-up attribution. Parameters, reassigned/non-callable locals, imports pending module resolution, and unknown globals produce typed unresolved reasons in `resultStatus` and never fall back to repository-wide name matching. Definition index format v10 stores this lexical and Angular component metadata, so older indexes are rebuilt.
 
 Synthetic TypeScript callable definitions are part of the public definition index rather than a hidden side table. Nested and module-private entries use `DefinitionKind::Function` plus the `local` modifier; exported callable variables and class arrow properties retain `Variable`/`Field` plus a `callable` modifier. All retain AST-derived signatures, making the same identity available to `xray_definitions` and both call-graph directions. Upward exact root election considers exported or class-owned TypeScript roots only, is disabled when an in-scope non-TypeScript callable shares the name, and reports `ambiguous_typescript_root` for multiple candidates. `ambiguityPolicy="legacy"` bypasses TypeScript root election and traverses the historical name-based fan-out in single and batch UP/DOWN paths, with partial/unsafe result status. Private-name upward queries aggregate parser-resolved same-file edges without electing a global root; downward queries elect one private root or report ambiguity when several match.
 
@@ -590,16 +596,19 @@ For the full canonical matrix of which DI patterns and which .NET DI containers 
 
 #### Angular template metadata
 
-Angular `@Component` class definitions are automatically enriched with template metadata during definition indexing:
+Angular `@Component` class definitions produce structured AST records during TypeScript parsing:
 
-- **What it does:** extracts `selector` and `templateUrl` from the `@Component()` decorator, reads the paired `.html` file, and scans for custom elements (tags with hyphens) used in the template.
-- **`xray_definitions`:** Angular components include `selector` (e.g., `"app-user-profile"`) and `templateChildren` (list of child component selectors found in the HTML).
-- **Component tree navigation via `xray_callers`:**
-  - `direction='down'` with a component class name → shows child components from the HTML template (recursive with `depth`).
-  - `direction='up'` with a selector (e.g., `"app-footer"`) → finds parent components that use it in their templates.
-- **HTML content search:** add `html` to `--ext` / `ext` parameter for `xray_grep` to search HTML template content.
+- **Metadata source:** exact `selector`, `templateUrl`, and `template` object properties are read from the decorator AST. Static single/double-quoted strings and no-substitution template literals are accepted; dynamic metadata is retained as an explicit state rather than guessed.
+- **Template parity:** static inline and in-workspace external templates pass through the same active-context tokenizer and produce the same lexicographically ordered `template_children` graph.
+- **Persisted indexes:** `angular_components` is the source of truth. `selector_index`, normalized `template_owners`, `template_children`, and reverse `template_parents` are derived during full index build and remapped during compaction.
 
-**Limitations.** Only external templates (`templateUrl`), not inline `template:`. Only active-context tags with hyphens (custom elements per HTML spec) are indexed; comments, declarations, CDATA, quoted attributes, and `script`/`style` raw text are skipped. `ng-*` tags are excluded (Angular built-ins). Templates larger than the shared 4 MiB source-parser limit are skipped with a diagnostic. Template metadata updates on full `def-index` rebuild, not incrementally on `.html` changes.
+- **`xray_definitions` fields:** static selectors retain `selector`; all component records add `selectorState` and optional `selectorStateReason`, plus `templateSource`, `templateState`, optional `templatePath`, optional `templateStateReason`, and the backward-compatible `templateChildren`.
+- **Component tree navigation via `xray_callers`:** `direction='down'` with a component class shows child selectors; `direction='up'` uses `template_parents` to find owners without scanning every component. Duplicate selectors return ambiguity metadata instead of selecting the first class. Dynamic or missing selector/template states, unavailable external templates, and unresolved child selectors make `resultStatus` partial and non-exhaustive.
+
+  `summary.templateResolutionReasons` / `resultStatus.reasons` use: `ambiguous_template_selector`, `unresolved_template_selector`, `stale_template_selector_index`, `stale_template_definition`, `dynamic_template_index_blind_spot`, `component_record_unavailable`, `dynamic_component_selector`, `missing_component_selector`, `dynamic_template`, `missing_template`, and `unavailable_external_template`.
+- **HTML content search:** add `html` to `--ext` / `ext` for `xray_grep` to search external template content.
+
+**Limitations.** Only active-context custom tags with hyphens are indexed; comments, declarations, CDATA, quoted attributes, and `script`/`style` raw text are skipped, and `ng-*` tags are excluded. Templates larger than the shared 4 MiB parser limit are skipped. Component records and derived maps are rebuilt only on full `def-index`. Incremental TypeScript/HTML edits do not yet repopulate them; atomic incremental lifecycle support is deferred to the next task.
 
 ## Indexing triggers — when does indexing happen?
 
