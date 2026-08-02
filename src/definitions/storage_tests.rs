@@ -312,7 +312,7 @@ fn test_typescript_lexical_call_kinds_survive_storage_roundtrip() {
 }
 
 #[test]
-fn test_angular_component_records_survive_storage_roundtrip() {
+fn test_angular_template_source_variants_survive_storage_roundtrip() {
     use crate::definitions::{
         AngularComponentRecord, AngularTemplateSource, DefinitionInputFingerprint,
         StaticValue, DEFINITION_INDEX_VERSION,
@@ -324,27 +324,76 @@ fn test_angular_component_records_survive_storage_roundtrip() {
     index.format_version = DEFINITION_INDEX_VERSION;
     index.root = root.clone();
     index.extensions = vec!["ts".to_string()];
-    index.angular_components.insert(
-        7,
-        AngularComponentRecord {
-            selector: StaticValue::Static("app-shell".to_string()),
-            template: AngularTemplateSource::UnavailableExternal {
-                relative_path: "./shell.html".to_string(),
-                reason: "external template could not be read".to_string(),
+    index.angular_components.extend([
+        (
+            7,
+            AngularComponentRecord {
+                selector: StaticValue::Static("app-a".to_string()),
+                template: AngularTemplateSource::UnavailableExternal {
+                    relative_path: "./template-a.html".to_string(),
+                    reason: "external template could not be read".to_string(),
+                },
             },
-        },
-    );
-    index.selector_index.insert("app-shell".to_string(), vec![7]);
-    index.template_children.insert(7, vec!["app-child".to_string()]);
+        ),
+        (
+            8,
+            AngularComponentRecord {
+                selector: StaticValue::Static("app-b".to_string()),
+                template: AngularTemplateSource::External {
+                    relative_path: "./template-b.html".to_string(),
+                },
+            },
+        ),
+        (
+            9,
+            AngularComponentRecord {
+                selector: StaticValue::Static("app-c".to_string()),
+                template: AngularTemplateSource::Inline {
+                    content: "<app-a></app-a>".to_string(),
+                },
+            },
+        ),
+        (
+            10,
+            AngularComponentRecord {
+                selector: StaticValue::Static("app-d".to_string()),
+                template: AngularTemplateSource::Dynamic {
+                    reason: "template expression is not static".to_string(),
+                },
+            },
+        ),
+        (
+            11,
+            AngularComponentRecord {
+                selector: StaticValue::Static("app-e".to_string()),
+                template: AngularTemplateSource::Missing,
+            },
+        ),
+    ]);
+    index.selector_index.extend([
+        ("app-a".to_string(), vec![7]),
+        ("app-b".to_string(), vec![8]),
+        ("app-c".to_string(), vec![9]),
+        ("app-d".to_string(), vec![10]),
+        ("app-e".to_string(), vec![11]),
+    ]);
+    index.template_children.insert(8, vec!["app-c".to_string()]);
+    index.template_children.insert(9, vec!["app-a".to_string()]);
     index
         .template_owners
-        .insert("q:/repo/shell.html".to_string(), vec![7]);
+        .insert("q:/repo/template-a.html".to_string(), vec![7]);
+    index
+        .template_owners
+        .insert("q:/repo/template-b.html".to_string(), vec![8]);
     index
         .template_parents
-        .insert("app-child".to_string(), vec![7]);
+        .insert("app-a".to_string(), vec![9]);
+    index
+        .template_parents
+        .insert("app-c".to_string(), vec![8]);
     index.definition_generation = 7;
     index.input_fingerprints.insert(
-        "q:/repo/shell.html".to_string(),
+        "q:/repo/template-b.html".to_string(),
         DefinitionInputFingerprint {
             size: 42,
             modified_nanos: 123,
@@ -374,6 +423,8 @@ fn test_angular_component_records_survive_storage_roundtrip() {
 
     let rebuilt = DefinitionIndex::from_head_and_entries(index.build_head(), Vec::new());
     assert_eq!(rebuilt.angular_components, index.angular_components);
+    assert_eq!(rebuilt.selector_index, index.selector_index);
+    assert_eq!(rebuilt.template_children, index.template_children);
     assert_eq!(rebuilt.template_owners, index.template_owners);
     assert_eq!(rebuilt.template_parents, index.template_parents);
     assert_eq!(rebuilt.definition_generation, index.definition_generation);

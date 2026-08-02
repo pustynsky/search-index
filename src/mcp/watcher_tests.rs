@@ -4026,6 +4026,120 @@ export class ParentComponent {}"#,
 
 #[cfg(feature = "lang-typescript")]
 #[test]
+fn sync_reindex_html_rename_waits_for_ts_metadata_before_rebinding() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let component_path = root.join("component-a.ts");
+    let old_template_path = root.join("template-a.html");
+    let new_template_path = root.join("template-b.html");
+    std::fs::write(
+        &component_path,
+        r#"@Component({ selector: 'app-a', templateUrl: './template-a.html' })
+export class ComponentA {}"#,
+    )
+    .unwrap();
+    std::fs::write(&old_template_path, "<app-child-a></app-child-a>").unwrap();
+
+    let definition_index = crate::definitions::build_definition_index(
+        &crate::definitions::DefIndexArgs {
+            dir: root.to_string_lossy().to_string(),
+            ext: "ts".to_string(),
+            threads: 1,
+            respect_git_exclude: false,
+        },
+    );
+    let component = definition_index
+        .definitions
+        .iter()
+        .position(|definition| definition.name == "ComponentA")
+        .unwrap() as u32;
+    let generation = definition_index.definition_generation;
+    let old_owner_key = crate::definitions::definition_input_key(&old_template_path);
+    let new_owner_key = crate::definitions::definition_input_key(&new_template_path);
+    let definition_index = Arc::new(RwLock::new(definition_index));
+    let content_index = Arc::new(RwLock::new(ContentIndex::default()));
+
+    std::fs::rename(&old_template_path, &new_template_path).unwrap();
+    let updated = super::reindex_paths_sync_scoped(
+        &content_index,
+        &Some(Arc::clone(&definition_index)),
+        &[],
+        std::slice::from_ref(&new_template_path),
+        std::slice::from_ref(&old_template_path),
+        &["ts".to_string()],
+    );
+    assert_eq!(updated.def_updated, 1);
+
+    {
+        let definition_index = definition_index.read().unwrap();
+        assert_eq!(definition_index.definition_generation, generation + 1);
+        assert_eq!(definition_index.definitions[component as usize].name, "ComponentA");
+        assert_eq!(definition_index.template_owners[&old_owner_key], vec![component]);
+        assert!(!definition_index.template_owners.contains_key(&new_owner_key));
+        assert!(!definition_index.template_children.contains_key(&component));
+        assert!(!definition_index.template_parents.contains_key("app-child-a"));
+        assert!(!definition_index.input_fingerprints.contains_key(&old_owner_key));
+        assert!(!definition_index.input_fingerprints.contains_key(&new_owner_key));
+        assert!(matches!(
+            definition_index.angular_components[&component].template,
+            crate::definitions::AngularTemplateSource::UnavailableExternal { .. }
+        ));
+    }
+
+    std::fs::write(
+        &component_path,
+        r#"@Component({ selector: 'app-a', templateUrl: './template-b.html' })
+export class ComponentA {}"#,
+    )
+    .unwrap();
+    let rebound = super::reindex_paths_sync_scoped(
+        &content_index,
+        &Some(Arc::clone(&definition_index)),
+        &[],
+        std::slice::from_ref(&component_path),
+        &[],
+        &["ts".to_string()],
+    );
+    assert_eq!(rebound.def_updated, 1);
+
+    let definition_index = definition_index.read().unwrap();
+    let rebound_component = definition_index
+        .definitions
+        .iter()
+        .enumerate()
+        .find(|(index, definition)| {
+            definition.name == "ComponentA"
+                && definition_index
+                    .file_index
+                    .get(&definition.file_id)
+                    .is_some_and(|definitions| definitions.contains(&(*index as u32)))
+        })
+        .map(|(index, _)| index as u32)
+        .unwrap();
+    assert_eq!(definition_index.definition_generation, generation + 2);
+    assert!(!definition_index.template_owners.contains_key(&old_owner_key));
+    assert_eq!(
+        definition_index.template_owners[&new_owner_key],
+        vec![rebound_component]
+    );
+    assert_eq!(
+        definition_index.template_children[&rebound_component],
+        vec!["app-child-a"]
+    );
+    assert_eq!(
+        definition_index.template_parents["app-child-a"],
+        vec![rebound_component]
+    );
+    assert!(!definition_index.input_fingerprints.contains_key(&old_owner_key));
+    assert!(definition_index.input_fingerprints.contains_key(&new_owner_key));
+    assert!(matches!(
+        definition_index.angular_components[&rebound_component].template,
+        crate::definitions::AngularTemplateSource::External { .. }
+    ));
+}
+
+#[cfg(feature = "lang-typescript")]
+#[test]
 fn sync_reindex_applies_template_and_metadata_rename_in_one_generation() {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::canonicalize_test_root(temp.path());

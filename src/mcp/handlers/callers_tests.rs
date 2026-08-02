@@ -3073,7 +3073,7 @@ fn test_sql_function_definition_is_not_reported_as_unscoped_self_caller() {
 
 
 #[test]
-fn test_sql_routine_result_status_is_truthfully_non_exhaustive() {
+fn test_sql_routine_without_call_edges_is_non_exhaustive_with_sql_only_reasons() {
     let definitions = vec![
         sp_def(0, "usp_WR_Root", Some("dbo"), 1, 10),
         sqlfn_def(0, "ufn_WR_Value", Some("dbo"), 12, 20),
@@ -3133,13 +3133,25 @@ fn test_sql_routine_result_status_is_truthfully_non_exhaustive() {
         assert_eq!(status["complete"], false, "{output:#}");
         assert_eq!(status["safeForExhaustiveClaims"], false, "{output:#}");
         assert_eq!(status["totalKnown"], false, "{output:#}");
+        let reasons = status["reasons"].as_array().unwrap();
         assert!(
-            status["reasons"]
-                .as_array()
-                .unwrap()
+            reasons
+                .iter()
+                .any(|reason| reason == "no_call_graph_matches"),
+            "{output:#}"
+        );
+        assert!(
+            reasons
                 .iter()
                 .any(|reason| reason == "sql_routine_call_graph_best_effort"),
             "{output:#}"
+        );
+        assert!(
+            reasons.iter().all(|reason| matches!(
+                reason.as_str(),
+                Some("no_call_graph_matches" | "sql_routine_call_graph_best_effort")
+            )),
+            "non-SQL reason leaked into SQL status: {output:#}"
         );
     }
 }

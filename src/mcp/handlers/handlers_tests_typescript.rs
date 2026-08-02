@@ -1052,6 +1052,93 @@ export class UnavailableComponent {}"#,
 }
 
 #[test]
+fn test_angular_exact_edge_is_navigable_both_directions_through_public_handler() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    std::fs::write(
+        root.join("component-a.ts"),
+        r#"@Component({ selector: 'app-a', template: '<app-b></app-b>' })
+export class ComponentA {}
+@Component({ selector: 'app-b', template: '<span></span>' })
+export class ComponentB {}"#,
+    )
+    .unwrap();
+
+    let def_index = crate::definitions::build_definition_index(&DefIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "ts".to_string(),
+        threads: 1,
+        respect_git_exclude: false,
+    });
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "ts".to_string(),
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let context = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(
+            root.to_string_lossy().to_string(),
+        ))),
+        server_ext: "ts".to_string(),
+        ..Default::default()
+    };
+
+    let down = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["ComponentA"],
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!down.is_error, "{}", down.content[0].text);
+    let down_output: Value = serde_json::from_str(&down.content[0].text).unwrap();
+    let down_tree = down_output["callTree"].as_array().unwrap();
+    assert_eq!(down_tree.len(), 1, "{down_output}");
+    assert_eq!(down_tree[0]["class"], "ComponentB");
+    assert_eq!(down_tree[0]["selector"], "app-b");
+    assert_eq!(down_output["resultStatus"]["status"], "complete", "{down_output}");
+    assert_eq!(down_output["resultStatus"]["complete"], true, "{down_output}");
+    assert!(
+        down_output["resultStatus"]["reasons"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{down_output}"
+    );
+
+    let up = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["app-b"],
+            "direction": "up",
+            "depth": 1
+        }),
+    );
+    assert!(!up.is_error, "{}", up.content[0].text);
+    let up_output: Value = serde_json::from_str(&up.content[0].text).unwrap();
+    let up_tree = up_output["callTree"].as_array().unwrap();
+    assert_eq!(up_tree.len(), 1, "{up_output}");
+    assert_eq!(up_tree[0]["class"], "ComponentA");
+    assert_eq!(up_tree[0]["selector"], "app-a");
+    assert_eq!(up_output["resultStatus"]["status"], "complete", "{up_output}");
+    assert_eq!(up_output["resultStatus"]["complete"], true, "{up_output}");
+    assert!(
+        up_output["resultStatus"]["reasons"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{up_output}"
+    );
+}
+
+#[test]
 fn test_ts_local_arrow_call_does_not_resolve_to_other_module_function() {
     static COUNTER: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);

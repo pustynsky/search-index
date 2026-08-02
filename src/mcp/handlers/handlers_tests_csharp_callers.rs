@@ -35,6 +35,52 @@ fn test_xray_callers_finds_callers() {
 }
 
 #[test]
+fn test_xray_callers_clean_csharp_result_has_expected_graph_without_foreign_reasons() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let context = d20_callers_context(
+        &root,
+        "type-a.cs",
+        r#"
+class TypeA {
+    void methodA() {
+        methodB();
+    }
+
+    void methodB() {}
+}
+"#,
+    );
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["methodA"],
+            "class": "TypeA",
+            "direction": "down",
+            "depth": 1,
+            "ext": ["cs"]
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    assert_eq!(tree.len(), 1, "{}", output);
+    assert_eq!(tree[0]["class"], "TypeA", "{}", output);
+    assert_eq!(tree[0]["method"], "methodB", "{}", output);
+    // Compatibility pin for a clean direct call, not proof of C# exhaustiveness.
+    assert!(
+        output["resultStatus"]["reasons"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{}",
+        output
+    );
+}
+
+#[test]
 fn test_xray_callers_nonexistent_method() {
     let ctx = make_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_callers", &json!({
