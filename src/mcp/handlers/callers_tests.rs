@@ -1160,6 +1160,61 @@ fn test_build_template_callee_tree_one_level() {
 }
 
 #[test]
+fn test_template_navigation_ignores_commented_custom_elements_symmetrically() {
+    let html = "<!-- <comment-child></comment-child> --><active-child></active-child>";
+    let template_children = crate::definitions::extract_custom_elements(html);
+    assert_eq!(template_children, vec!["active-child"]);
+
+    let definitions = vec![
+        class_def(0, "ParentComponent", vec![]),
+        class_def(0, "ActiveChild", vec![]),
+        class_def(0, "CommentChild", vec![]),
+    ];
+    let def_idx = {
+        let mut idx = make_def_index(definitions, HashMap::new());
+        idx.template_children.insert(0, template_children);
+        idx.selector_index.insert("parent-component".to_string(), vec![0]);
+        idx.selector_index.insert("active-child".to_string(), vec![1]);
+        idx.selector_index.insert("comment-child".to_string(), vec![2]);
+        idx
+    };
+
+    let mut down_visited = HashSet::new();
+    let down = build_template_callee_tree(
+        "ParentComponent",
+        2,
+        0,
+        &def_idx,
+        &mut down_visited,
+    );
+    assert_eq!(down.len(), 1);
+    assert_eq!(down[0]["selector"], "active-child");
+    assert_eq!(down[0]["templateUsage"], true);
+
+    let mut active_up_visited = HashSet::new();
+    let active_up = find_template_parents(
+        "active-child",
+        2,
+        0,
+        &def_idx,
+        &mut active_up_visited,
+    );
+    assert_eq!(active_up.len(), 1);
+    assert_eq!(active_up[0]["class"], "ParentComponent");
+    assert_eq!(active_up[0]["templateUsage"], true);
+
+    let mut commented_up_visited = HashSet::new();
+    let commented_up = find_template_parents(
+        "comment-child",
+        2,
+        0,
+        &def_idx,
+        &mut commented_up_visited,
+    );
+    assert!(commented_up.is_empty());
+}
+
+#[test]
 fn test_build_template_callee_tree_recursive_depth2() {
     // Parent → child → grandchild
     let definitions = vec![

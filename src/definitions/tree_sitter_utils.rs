@@ -121,11 +121,8 @@ pub(crate) fn saturate_count_to_u8(value: u32, context: &str) -> u8 {
 /// on an MCP stdio server.
 pub(crate) const MAX_AST_RECURSION_DEPTH: usize = 1024;
 
-/// PARSE-002: hard cap on input size before invoking tree-sitter. Tree-sitter
-/// allocates ~5–10× source size for the parse tree and token table; a 100 MB
-/// generated/vendored file (or a checked-in bundle) would transiently consume
-/// ~1 GB per worker. Matches `ripgrep`'s default `--max-filesize` of 4 MB.
-pub(crate) const MAX_PARSE_SOURCE_BYTES: usize = 4 * 1024 * 1024;
+// PARSE-002: keep parser imports stable while the shared cap lives in the ungated module.
+pub(crate) use super::MAX_PARSE_SOURCE_BYTES;
 
 /// PARSE-001: per-parse wall-clock ceiling for tree-sitter.
 ///

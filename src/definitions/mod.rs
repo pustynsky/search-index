@@ -1,5 +1,10 @@
 //! Definition index: AST-based code structure extraction using tree-sitter.
 
+/// PARSE-002: hard cap shared by source parsers and Angular template extraction.
+/// Tree-sitter parsers use it to bound parse-tree memory; template enrichment uses the
+/// same 4 MiB limit for consistent source coverage and to bound file reads per worker.
+pub(crate) const MAX_PARSE_SOURCE_BYTES: usize = 4 * 1024 * 1024;
+
 mod types;
 mod csharp_semantics;
 #[cfg(any(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-rust", feature = "lang-xml"))]
@@ -206,6 +211,34 @@ pub(crate) fn index_file_defs_with_semantics(
     call_sites_added
 }
 
+#[cfg(feature = "lang-typescript")]
+enum AngularTemplateRead {
+    Content(String),
+    TooLarge { observed_size: u64 },
+}
+
+#[cfg(feature = "lang-typescript")]
+fn read_angular_template(path: &Path) -> std::io::Result<AngularTemplateRead> {
+    use std::io::Read as _;
+
+    let metadata = std::fs::metadata(path)?;
+    if metadata.len() > MAX_PARSE_SOURCE_BYTES as u64 {
+        return Ok(AngularTemplateRead::TooLarge { observed_size: metadata.len() });
+    }
+
+    let file = std::fs::File::open(path)?;
+    let mut reader = file.take((MAX_PARSE_SOURCE_BYTES + 1) as u64);
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    reader.read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_PARSE_SOURCE_BYTES {
+        return Ok(AngularTemplateRead::TooLarge { observed_size: bytes.len() as u64 });
+    }
+
+    let content = String::from_utf8(bytes)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(AngularTemplateRead::Content(content))
+}
+
 /// Scan Angular @Component definitions for selectors and template children.
 /// Populates selector_index and template_children from HTML templates.
 #[cfg(feature = "lang-typescript")]
@@ -218,6 +251,7 @@ pub(crate) fn enrich_angular_templates(
 ) {
     let template_start = Instant::now();
     let mut templates_processed = 0usize;
+    let mut templates_oversized = 0usize;
     let mut templates_failed = 0usize;
 
     for (def_idx, def) in definitions.iter().enumerate() {
@@ -245,22 +279,33 @@ pub(crate) fn enrich_angular_templates(
                 Some(dir) => dir.join(tpl_url.strip_prefix("./").unwrap_or(tpl_url)),
                 None => std::path::PathBuf::from(tpl_url),
             };
-            match std::fs::read_to_string(&html_path) {
-                Ok(html_content) => {
+            match read_angular_template(&html_path) {
+                Ok(AngularTemplateRead::Content(html_content)) => {
                     let children = extract_custom_elements(&html_content);
                     if !children.is_empty() {
                         template_children.insert(def_idx as u32, children);
                         templates_processed += 1;
                     }
                 }
+                Ok(AngularTemplateRead::TooLarge { observed_size }) => {
+                    templates_oversized += 1;
+                    tracing::warn!(
+                        target: "xray::parse",
+                        file = %html_path.display(),
+                        size = observed_size,
+                        limit = MAX_PARSE_SOURCE_BYTES,
+                        "skipping oversized Angular template"
+                    );
+                }
                 Err(_) => { templates_failed += 1; }
             }
         }
     }
 
-    if templates_processed > 0 || templates_failed > 0 {
-        eprintln!("[def-index] Angular templates: {} enriched, {} read errors ({:.1}ms)",
-            templates_processed, templates_failed, template_start.elapsed().as_secs_f64() * 1000.0);
+    if templates_processed > 0 || templates_oversized > 0 || templates_failed > 0 {
+        eprintln!("[def-index] Angular templates: {} enriched, {} oversized, {} read errors ({:.1}ms)",
+            templates_processed, templates_oversized, templates_failed,
+            template_start.elapsed().as_secs_f64() * 1000.0);
     }
 }
 
@@ -610,34 +655,270 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 
 /// Extract custom element tag names from HTML content.
 #[cfg_attr(not(feature = "lang-typescript"), allow(dead_code))]
-/// Custom elements are identified by a hyphen in the tag name (HTML spec, web components).
-/// Excludes Angular built-ins: ng-container, ng-content, ng-template.
-/// Returns a deduplicated, sorted list in lowercase.
+/// Extracts complete custom-element start tags from active HTML data context.
+/// Comments, declarations, CDATA, quoted attributes, and script/style raw text are skipped.
+/// Malformed inactive contexts consume the remaining input, and templates above the parser
+/// source-size limit are ignored rather than producing a partial graph.
+/// Returns deduplicated lowercase names in stable sort order, excluding Angular `ng-*` tags.
 pub(crate) fn extract_custom_elements(html_content: &str) -> Vec<String> {
+    if html_content.len() > MAX_PARSE_SOURCE_BYTES {
+        tracing::warn!(
+            target: "xray::parse",
+            size = html_content.len(),
+            limit = MAX_PARSE_SOURCE_BYTES,
+            "skipping oversized Angular template content"
+        );
+        return Vec::new();
+    }
+
+    #[derive(Clone, Copy)]
+    enum RawTextElement {
+        Script,
+        Style,
+    }
+
+    #[derive(Clone, Copy)]
+    enum HtmlState {
+        Data,
+        TagOpen {
+            closing: bool,
+        },
+        TagName {
+            start: usize,
+            closing: bool,
+        },
+        TagBody {
+            custom_tag: Option<(usize, usize)>,
+            raw_text: Option<RawTextElement>,
+            last_non_whitespace: Option<u8>,
+        },
+        SingleQuotedAttribute {
+            custom_tag: Option<(usize, usize)>,
+            raw_text: Option<RawTextElement>,
+            last_non_whitespace: Option<u8>,
+        },
+        DoubleQuotedAttribute {
+            custom_tag: Option<(usize, usize)>,
+            raw_text: Option<RawTextElement>,
+            last_non_whitespace: Option<u8>,
+        },
+        Comment,
+        Declaration {
+            quote: Option<u8>,
+        },
+        Cdata,
+        RawText(RawTextElement),
+    }
+
+    fn raw_text_name(element: RawTextElement) -> &'static [u8] {
+        match element {
+            RawTextElement::Script => b"script",
+            RawTextElement::Style => b"style",
+        }
+    }
+
     let mut elements: Vec<String> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     let bytes = html_content.as_bytes();
     let len = bytes.len();
+    let mut state = HtmlState::Data;
     let mut i = 0;
+
     while i < len {
-        if bytes[i] == b'<' && i + 1 < len && bytes[i + 1].is_ascii_alphabetic() {
-            let start = i + 1;
-            let mut end = start;
-            while end < len && (bytes[end].is_ascii_alphanumeric() || bytes[end] == b'-') {
-                end += 1;
+        match state {
+            HtmlState::Data => {
+                if bytes[i] == b'<' {
+                    state = HtmlState::TagOpen { closing: false };
+                }
+                i += 1;
             }
-            let tag_name = &html_content[start..end];
-            if tag_name.contains('-') {
-                let tag_lower = tag_name.to_lowercase();
-                if !tag_lower.starts_with("ng-") && seen.insert(tag_lower.clone()) {
-                    elements.push(tag_lower);
+            HtmlState::TagOpen { closing } => {
+                if bytes[i..].starts_with(b"!--") {
+                    state = HtmlState::Comment;
+                    i += 3;
+                } else if bytes[i..].starts_with(b"![CDATA[") {
+                    state = HtmlState::Cdata;
+                    i += 8;
+                } else if bytes[i] == b'!' || bytes[i] == b'?' {
+                    state = HtmlState::Declaration { quote: None };
+                    i += 1;
+                } else if !closing && bytes[i] == b'/' {
+                    state = HtmlState::TagOpen { closing: true };
+                    i += 1;
+                } else if bytes[i].is_ascii_alphabetic() {
+                    state = HtmlState::TagName { start: i, closing };
+                } else {
+                    state = HtmlState::Data;
                 }
             }
-            i = end;
-        } else {
-            i += 1;
+            HtmlState::TagName { start, closing } => {
+                while i < len && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'-') {
+                    i += 1;
+                }
+
+                let tag_name = &bytes[start..i];
+                let custom_tag = (!closing
+                    && tag_name.contains(&b'-')
+                    && !tag_name
+                        .get(..3)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"ng-")))
+                .then_some((start, i));
+                let raw_text = if !closing && tag_name.eq_ignore_ascii_case(b"script") {
+                    Some(RawTextElement::Script)
+                } else if !closing && tag_name.eq_ignore_ascii_case(b"style") {
+                    Some(RawTextElement::Style)
+                } else {
+                    None
+                };
+
+                state = HtmlState::TagBody {
+                    custom_tag,
+                    raw_text,
+                    last_non_whitespace: tag_name.last().copied(),
+                };
+            }
+            HtmlState::TagBody {
+                custom_tag,
+                raw_text,
+                last_non_whitespace,
+            } => match bytes[i] {
+                b'<' => {
+                    state = HtmlState::TagOpen { closing: false };
+                    i += 1;
+                }
+                b'\'' => {
+                    state = HtmlState::SingleQuotedAttribute {
+                        custom_tag,
+                        raw_text,
+                        last_non_whitespace,
+                    };
+                    i += 1;
+                }
+                b'"' => {
+                    state = HtmlState::DoubleQuotedAttribute {
+                        custom_tag,
+                        raw_text,
+                        last_non_whitespace,
+                    };
+                    i += 1;
+                }
+                b'>' => {
+                    if let Some((start, end)) = custom_tag {
+                        let tag_lower = html_content[start..end].to_ascii_lowercase();
+                        if seen.insert(tag_lower.clone()) {
+                            elements.push(tag_lower);
+                        }
+                    }
+                    state = match raw_text {
+                        Some(element) if last_non_whitespace != Some(b'/') => {
+                            HtmlState::RawText(element)
+                        }
+                        _ => HtmlState::Data,
+                    };
+                    i += 1;
+                }
+                byte if !byte.is_ascii_whitespace() => {
+                    state = HtmlState::TagBody {
+                        custom_tag,
+                        raw_text,
+                        last_non_whitespace: Some(byte),
+                    };
+                    i += 1;
+                }
+                _ => i += 1,
+            },
+            HtmlState::SingleQuotedAttribute {
+                custom_tag,
+                raw_text,
+                last_non_whitespace,
+            } => {
+                if bytes[i] == b'\'' {
+                    state = HtmlState::TagBody {
+                        custom_tag,
+                        raw_text,
+                        last_non_whitespace,
+                    };
+                }
+                i += 1;
+            }
+            HtmlState::DoubleQuotedAttribute {
+                custom_tag,
+                raw_text,
+                last_non_whitespace,
+            } => {
+                if bytes[i] == b'"' {
+                    state = HtmlState::TagBody {
+                        custom_tag,
+                        raw_text,
+                        last_non_whitespace,
+                    };
+                }
+                i += 1;
+            }
+            HtmlState::Comment => {
+                if bytes[i..].starts_with(b"-->") {
+                    state = HtmlState::Data;
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+            HtmlState::Declaration { quote } => match quote {
+                Some(delimiter) => {
+                    if bytes[i] == delimiter {
+                        state = HtmlState::Declaration { quote: None };
+                    }
+                    i += 1;
+                }
+                None => match bytes[i] {
+                    b'\'' | b'"' => {
+                        state = HtmlState::Declaration {
+                            quote: Some(bytes[i]),
+                        };
+                        i += 1;
+                    }
+                    b'>' => {
+                        state = HtmlState::Data;
+                        i += 1;
+                    }
+                    _ => i += 1,
+                },
+            },
+            HtmlState::Cdata => {
+                if bytes[i..].starts_with(b"]]>") {
+                    state = HtmlState::Data;
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+            HtmlState::RawText(element) => {
+                let name = raw_text_name(element);
+                let name_start = i + 2;
+                let name_end = name_start + name.len();
+                let closes_raw_text = bytes[i] == b'<'
+                    && bytes.get(i + 1) == Some(&b'/')
+                    && bytes
+                        .get(name_start..name_end)
+                        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+                    && bytes.get(name_end).is_some_and(|boundary| {
+                        boundary.is_ascii_whitespace() || *boundary == b'>' || *boundary == b'/'
+                    });
+
+                if closes_raw_text {
+                    state = HtmlState::TagBody {
+                        custom_tag: None,
+                        raw_text: None,
+                        last_non_whitespace: name.last().copied(),
+                    };
+                    i = name_end;
+                } else {
+                    i += 1;
+                }
+            }
         }
     }
+
     elements.sort();
     elements
 }

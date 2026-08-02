@@ -1182,6 +1182,13 @@ fn test_extract_custom_elements_self_closing() {
 }
 
 #[test]
+fn test_extract_custom_elements_ignores_orphan_closing_custom_tag() {
+    let html = "</app-orphan><app-active></app-active>";
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-active"]);
+}
+
+#[test]
 fn test_extract_custom_elements_with_attributes() {
     let html = r#"<my-comp [input]="value" (output)="handler($event)"></my-comp>"#;
     let result = super::extract_custom_elements(html);
@@ -1213,6 +1220,195 @@ fn test_extract_custom_elements_dedup_and_case_insensitive() {
 fn test_extract_custom_elements_empty_html() {
     let result = super::extract_custom_elements("");
     assert!(result.is_empty());
+}
+
+#[test]
+fn test_extract_custom_elements_ignores_html_comments() {
+    let html = "<!-- <app-ghost></app-ghost> -->";
+    let result = super::extract_custom_elements(html);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_extract_custom_elements_keeps_active_tags_around_comments() {
+    let html = "<app-before></app-before><!-- <app-hidden> --><app-after></app-after>";
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-after", "app-before"]);
+}
+
+#[test]
+fn test_extract_custom_elements_recovers_from_less_than_in_angular_expression() {
+    let html = "@if (a<b) { <app-child></app-child> }";
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-child"]);
+}
+
+#[test]
+fn test_extract_custom_elements_ignores_multiple_multiline_comments() {
+    let html = r#"
+        <!--
+            <app-first-hidden></app-first-hidden>
+        -->
+        <app-active></app-active>
+        <!--
+            <app-second-hidden></app-second-hidden>
+        -->
+    "#;
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-active"]);
+}
+
+#[test]
+fn test_extract_custom_elements_ignores_unclosed_comment_to_eof() {
+    let html = "<app-active></app-active><!-- <app-hidden></app-hidden>";
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-active"]);
+}
+
+#[test]
+fn test_extract_custom_elements_ignores_declarations_and_cdata() {
+    let html = r#"<!DOCTYPE html PUBLIC "<app-doctype>" "about:legacy-compat">
+        <![CDATA[<app-cdata></app-cdata>]]>
+        <app-active></app-active>
+    "#;
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-active"]);
+}
+
+#[test]
+fn test_extract_custom_elements_keeps_cdata_inactive_after_greater_than() {
+    let html = "<![CDATA[x > <app-hidden></app-hidden>]]><app-active></app-active>";
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-active"]);
+}
+
+#[test]
+fn test_extract_custom_elements_keeps_quoted_declaration_text_inactive() {
+    let html = r#"<!DOCTYPE html PUBLIC "x > <app-hidden>"><app-active></app-active>"#;
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-active"]);
+}
+
+#[test]
+fn test_extract_custom_elements_ignores_processing_instructions() {
+    let html = r#"<?php echo "<app-hidden>"; ?><app-active></app-active>"#;
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-active"]);
+}
+
+#[test]
+fn test_extract_custom_elements_ignores_tags_in_quoted_attributes() {
+    let html = r#"<div data-example="<app-hidden></app-hidden>"></div>
+        <app-active label='<app-also-hidden>'></app-active>
+    "#;
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-active"]);
+}
+
+#[test]
+fn test_extract_custom_elements_does_not_end_tag_inside_quoted_attribute() {
+    let html = r#"<app-a title="><app-b"></app-a>"#;
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-a"]);
+}
+
+#[test]
+fn test_extract_custom_elements_ignores_script_and_style_raw_text() {
+    let html = r#"<script>const example = "<app-script></app-script>";</script>
+        <style>.example::before { content: "<app-style>"; }</style>
+        <app-active></app-active>
+    "#;
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-active"]);
+}
+
+#[test]
+fn test_extract_custom_elements_requires_raw_text_close_tag_boundary() {
+    let html = "<script></scriptx><app-hidden></app-hidden></script><app-active></app-active>";
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-active"]);
+}
+
+#[test]
+fn test_extract_custom_elements_keeps_self_closing_raw_text_tag_in_data_state() {
+    let html = "<script/><style /><app-active></app-active>";
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-active"]);
+}
+
+#[test]
+fn test_extract_custom_elements_keeps_unmatched_raw_text_closers_in_data_state() {
+    let html = "</script><app-script-child></app-script-child></style><app-style-child></app-style-child>";
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-script-child", "app-style-child"]);
+}
+
+#[test]
+fn test_extract_custom_elements_redispatches_repeated_tag_open() {
+    let html = "<<app-active></app-active>";
+    let result = super::extract_custom_elements(html);
+    assert_eq!(result, vec!["app-active"]);
+}
+
+#[test]
+fn test_extract_custom_elements_ignores_unclosed_inactive_contexts() {
+    let cases = [
+        "<![CDATA[<app-hidden>",
+        r#"<div title="<app-hidden>"#,
+        r#"<!DOCTYPE html PUBLIC "<app-hidden>""#,
+        "<script><app-hidden>",
+        "<style><app-hidden>",
+        r#"<app-unclosed title="value"#,
+    ];
+
+    for html in cases {
+        let result = super::extract_custom_elements(html);
+        assert!(result.is_empty(), "unexpected elements for {html:?}: {result:?}");
+    }
+}
+
+#[test]
+fn test_extract_custom_elements_skips_templates_above_source_parse_limit() {
+    let limit = super::MAX_PARSE_SOURCE_BYTES;
+    let html = format!("<app-hidden>{}", "x".repeat(limit));
+    assert!(html.len() > limit);
+
+    let result = super::extract_custom_elements(&html);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_extract_custom_elements_accepts_template_at_source_parse_limit() {
+    let limit = super::MAX_PARSE_SOURCE_BYTES;
+    let tag = "<app-at-limit></app-at-limit>";
+    let html = format!("{tag}{}", "x".repeat(limit - tag.len()));
+    assert_eq!(html.len(), limit);
+
+    let result = super::extract_custom_elements(&html);
+    assert_eq!(result, vec!["app-at-limit"]);
+}
+
+#[test]
+fn test_read_angular_template_enforces_source_parse_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let template = temp.path().join("component.html");
+    let limit = super::MAX_PARSE_SOURCE_BYTES;
+
+    std::fs::write(&template, vec![b'x'; limit]).unwrap();
+    match super::read_angular_template(&template).unwrap() {
+        super::AngularTemplateRead::Content(content) => assert_eq!(content.len(), limit),
+        super::AngularTemplateRead::TooLarge { observed_size } => {
+            panic!("exact-limit template was rejected at {observed_size} bytes")
+        }
+    }
+
+    std::fs::write(&template, vec![b'x'; limit + 1]).unwrap();
+    match super::read_angular_template(&template).unwrap() {
+        super::AngularTemplateRead::TooLarge { observed_size } => {
+            assert_eq!(observed_size, (limit + 1) as u64)
+        }
+        super::AngularTemplateRead::Content(_) => panic!("oversized template was read"),
+    }
 }
 
 #[test]
