@@ -847,6 +847,11 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
     if target_symbol_id.is_some() && class_filter.is_some() {
         return ToolCallResult::error("class cannot be combined with targets".to_string());
     }
+    if methods.len() > 1 && page_request.node_offset.is_some() {
+        return ToolCallResult::error(
+            "call-tree node continuationToken is not supported for method batches".to_string(),
+        );
+    }
     if methods.len() > 1 {
         return handle_multi_method_callers(
             ctx,
@@ -860,6 +865,11 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
     }
 
     let mut method_name = methods.into_iter().next().unwrap_or_default();
+    let max_results = if page_request.node_offset.is_some() {
+        1
+    } else {
+        max_results
+    };
 
     let max_depth = {
         let raw = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3);

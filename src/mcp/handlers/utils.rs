@@ -250,6 +250,7 @@ pub(crate) fn add_collection_accounting(result_status: &mut Value, shown: Value,
 #[derive(Debug, Clone)]
 pub(crate) struct PageRequest {
     pub offset: usize,
+    pub node_offset: Option<usize>,
     pub requested: bool,
     pub workspace_generation: u64,
     pub index_epoch: u64,
@@ -353,17 +354,30 @@ pub(crate) fn parse_page_request(
         .generation;
     let index_epoch = ctx.index_epoch.load(std::sync::atomic::Ordering::Acquire);
     let query_fingerprint = pagination_query_fingerprint(tool_name, args);
-    let offset = if let Some(token) = token {
-        let mut parts = token.split('.');
-        let version = parts.next();
-        let generation = parts.next().and_then(|value| value.parse::<u64>().ok());
-        let offset = parts.next().and_then(|value| value.parse::<usize>().ok());
-        let fingerprint = parts.next();
-        if version != Some("xrp1")
-            || generation.is_none()
+    let (offset, node_offset) = if let Some(token) = token {
+        let parts: Vec<&str> = token.splitn(6, '.').collect();
+        if parts.first() == Some(&"xrt1") && tool_name != "xray_callers" {
+            return Err("call-tree continuationToken is only valid for xray_callers".to_string());
+        }
+        let (generation, offset, node_offset, fingerprint) = match parts.as_slice() {
+            ["xrp1", generation, offset, fingerprint] => (
+                generation.parse::<u64>().ok(),
+                offset.parse::<usize>().ok(),
+                None,
+                Some(*fingerprint),
+            ),
+            ["xrt1", generation, root_offset, node_offset, fingerprint] => (
+                generation.parse::<u64>().ok(),
+                root_offset.parse::<usize>().ok(),
+                node_offset.parse::<usize>().ok(),
+                Some(*fingerprint),
+            ),
+            _ => (None, None, None, None),
+        };
+        if generation.is_none()
             || offset.is_none()
             || fingerprint.is_none()
-            || parts.next().is_some()
+            || (parts.first() == Some(&"xrt1") && node_offset.is_none())
         {
             return Err("continuationToken is malformed".to_string());
         }
@@ -377,13 +391,14 @@ pub(crate) fn parse_page_request(
         if fingerprint != Some(query_fingerprint.as_str()) {
             return Err("continuationToken does not match this query".to_string());
         }
-        offset.unwrap_or_default()
+        (offset.unwrap_or_default(), node_offset)
     } else {
-        explicit_offset.unwrap_or(0)
+        (explicit_offset.unwrap_or(0), None)
     };
 
     Ok(PageRequest {
         offset,
+        node_offset,
         requested: explicit_offset.is_some() || token.is_some(),
         workspace_generation,
         index_epoch,
@@ -413,6 +428,9 @@ pub(crate) fn attach_page_status(
         "queryFingerprint": page_request.query_fingerprint,
         "totalKnown": total_known,
     });
+    if let Some(node_offset) = page_request.node_offset {
+        page["nodeOffset"] = json!(node_offset);
+    }
     if returned > 0 && next_offset < total {
         page["nextOffset"] = json!(next_offset);
         page["continuationToken"] = json!(continuation_token(
@@ -526,12 +544,13 @@ pub(crate) fn mark_result_status_response_truncated(output: &mut Value, reasons:
     if !reasons.is_empty() {
         status["truncationDetails"] = json!(reasons);
     }
-    let page_accounting_is_lower_bound = status
+    let page_owns_accounting = status
         .get("page")
-        .and_then(|page| page.get("totalKnown"))
-        .and_then(Value::as_bool)
-        == Some(false);
-    if !page_accounting_is_lower_bound {
+        .is_some_and(|page| {
+            page.get("unit").and_then(Value::as_str) == Some("callTreeNodes")
+                || page.get("totalKnown").and_then(Value::as_bool) == Some(false)
+        });
+    if !page_owns_accounting {
         add_generic_accounting_from_output(&mut status, output);
     }
     set_result_status(output, status);
@@ -2163,7 +2182,317 @@ fn phase_remove_line_content(output: &mut Value, reasons: &mut Vec<String>) {
     }
 }
 
-/// Phase 5c: Generic fallback — truncate the largest top-level array (not "files"/"summary").
+/// Child relations preserved by the reconstructable caller-tree page format.
+const CALL_TREE_CHILD_KEYS: [&str; 4] = ["callers", "callees", "children", "parents"];
+
+fn call_tree_node_continuation_token(
+    index_epoch: u64,
+    root_offset: usize,
+    node_offset: usize,
+    query_fingerprint: &str,
+) -> String {
+    format!(
+        "xrt1.{index_epoch}.{root_offset}.{node_offset}.{query_fingerprint}"
+    )
+}
+
+fn flatten_call_tree_root(root: &Value, root_offset: usize) -> Vec<Value> {
+    fn visit(
+        node: &Value,
+        parent_index: Option<usize>,
+        relation: Option<&str>,
+        ordinal: usize,
+        root_offset: usize,
+        records: &mut Vec<Value>,
+    ) {
+        let node_index = records.len();
+        let node_id = format!("r{root_offset}:n{node_index}");
+        let parent_node_id = parent_index.map(|index| format!("r{root_offset}:n{index}"));
+        let node_data = if let Some(object) = node.as_object() {
+            Value::Object(
+                object
+                    .iter()
+                    .filter(|(key, _)| !CALL_TREE_CHILD_KEYS.contains(&key.as_str()))
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            )
+        } else {
+            node.clone()
+        };
+        records.push(json!({
+            "nodeId": node_id,
+            "parentNodeId": parent_node_id,
+            "relation": relation,
+            "ordinal": ordinal,
+            "node": node_data,
+        }));
+        for child_key in CALL_TREE_CHILD_KEYS {
+            if let Some(children) = node.get(child_key).and_then(Value::as_array) {
+                for (child_ordinal, child) in children.iter().enumerate() {
+                    visit(
+                        child,
+                        Some(node_index),
+                        Some(child_key),
+                        child_ordinal,
+                        root_offset,
+                        records,
+                    );
+                }
+            }
+        }
+    }
+
+    let mut records = Vec::new();
+    visit(root, None, None, 0, root_offset, &mut records);
+    records
+}
+
+fn call_tree_node_page_skeleton(output: &Value) -> Value {
+    let mut skeleton = serde_json::Map::new();
+    for key in ["query", "summary", "resultStatus"] {
+        if let Some(value) = output.get(key) {
+            skeleton.insert(key.to_string(), value.clone());
+        }
+    }
+    const RETAINED_FIELDS: &[&str] = &["query", "summary", "resultStatus", "callTree"];
+    let mut omitted_fields: Vec<&str> = output
+        .as_object()
+        .map(|object| {
+            object
+                .keys()
+                .map(String::as_str)
+                .filter(|key| !RETAINED_FIELDS.contains(key))
+                .collect()
+        })
+        .unwrap_or_default();
+    omitted_fields.sort_unstable();
+    if !omitted_fields.is_empty() {
+        if let Some(summary) = skeleton.get_mut("summary") {
+            summary["nodePageOmittedFields"] = json!(omitted_fields);
+        }
+        if let Some(status) = skeleton.get_mut("resultStatus") {
+            status["safeForExhaustiveClaims"] = json!(false);
+            if let Some(reasons) = status["reasons"].as_array_mut()
+                && !reasons
+                    .iter()
+                    .any(|reason| reason == "node_page_omits_auxiliary_fields")
+            {
+                reasons.push(json!("node_page_omits_auxiliary_fields"));
+            }
+        }
+    }
+    Value::Object(skeleton)
+}
+
+
+#[allow(clippy::too_many_arguments)]
+fn call_tree_node_page_error(
+    code: &str,
+    message: &str,
+    max_bytes: usize,
+    root_offset: usize,
+    root_total: usize,
+    node_offset: usize,
+    node_total: usize,
+    workspace_generation: u64,
+    index_epoch: u64,
+    query_fingerprint: &str,
+    total_known: bool,
+) -> Value {
+    let mut result = json!({
+        "error": {
+            "code": code,
+            "message": message,
+            "rootOffset": root_offset,
+            "nodeOffset": node_offset,
+            "maxResponseBytes": max_bytes,
+            "unit": "callTreeNodes",
+        },
+        "summary": {
+            "responseTruncated": true,
+            "hint": "Continue with the returned token unchanged, or reduce included auxiliary data if one node record itself exceeds the budget.",
+        },
+        "resultStatus": {
+            "status": "partial",
+            "complete": false,
+            "safeForExhaustiveClaims": false,
+            "safeForExactSemantics": false,
+            "totalKnown": total_known,
+            "evidenceLevel": "metadata",
+            "reasons": [code],
+            "page": {
+                "unit": "callTreeNodes",
+                "rootOffset": root_offset,
+                "rootTotal": root_total,
+                "offset": node_offset,
+                "returned": 0,
+                "total": node_total,
+                "totalKnown": total_known,
+                "workspaceGeneration": workspace_generation,
+                "indexEpoch": index_epoch,
+                "queryFingerprint": query_fingerprint,
+            },
+        },
+    });
+    if measure_json_size(&result) > max_bytes {
+        result = json!({
+            "error": {
+                "code": code,
+                "rootOffset": root_offset,
+                "nodeOffset": node_offset,
+            }
+        });
+    }
+    if measure_json_size(&result) > max_bytes {
+        result = json!({ "error": 1 });
+    }
+    if measure_json_size(&result) > max_bytes {
+        result = if max_bytes >= 2 { json!({}) } else { json!(0) };
+    }
+    result
+}
+
+
+fn fit_call_tree_node_page(
+    output: &Value,
+    max_bytes: usize,
+    reasons: &[String],
+    original_bytes: usize,
+) -> Option<Value> {
+    let root = output.get("callTree")?.as_array()?.first()?;
+    let page = output.get("resultStatus")?.get("page")?;
+    let root_offset = page.get("offset")?.as_u64()? as usize;
+    let root_total = page.get("total")?.as_u64()? as usize;
+    let node_offset = page
+        .get("nodeOffset")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let workspace_generation = page.get("workspaceGeneration")?.as_u64()?;
+    let index_epoch = page.get("indexEpoch")?.as_u64()?;
+    let query_fingerprint = page.get("queryFingerprint")?.as_str()?;
+    let total_known = output
+        .get("resultStatus")?
+        .get("totalKnown")?
+        .as_bool()?;
+    let records = flatten_call_tree_root(root, root_offset);
+    if node_offset >= records.len() {
+        return Some(call_tree_node_page_error(
+            "continuation_offset_out_of_range",
+            "The call-tree continuation node offset is outside the rebuilt root.",
+            max_bytes,
+            root_offset,
+            root_total,
+            node_offset,
+            records.len(),
+            workspace_generation,
+            index_epoch,
+            query_fingerprint,
+            total_known,
+        ));
+    }
+    let skeleton = call_tree_node_page_skeleton(output);
+
+    let build_candidate = |keep: usize, measurement: bool| {
+        let end = node_offset.saturating_add(keep).min(records.len());
+        let mut candidate = skeleton.clone();
+        if let Some(object) = candidate.as_object_mut() {
+            object.insert(
+                "callTreeNodes".to_string(),
+                Value::Array(records[node_offset..end].to_vec()),
+            );
+        }
+        if let Some(status) = candidate.get_mut("resultStatus") {
+            status["status"] = json!("partial");
+            status["complete"] = json!(false);
+            status["safeForExhaustiveClaims"] = json!(false);
+            status["shown"]["nodes"] = json!(keep);
+            if let Some(total_nodes) = status["total"]["nodes"].as_u64() {
+                status["omitted"]["nodes"] = json!(total_nodes.saturating_sub(keep as u64));
+            }
+            status["page"] = json!({
+                "unit": "callTreeNodes",
+                "rootOffset": root_offset,
+                "rootTotal": root_total,
+                "offset": node_offset,
+                "returned": keep,
+                "total": records.len(),
+                "totalKnown": total_known,
+                "workspaceGeneration": workspace_generation,
+                "indexEpoch": index_epoch,
+                "queryFingerprint": query_fingerprint,
+            });
+            let page = &mut status["page"];
+            if end < records.len() {
+                page["nextOffset"] = json!(end);
+                page["continuationToken"] = json!(call_tree_node_continuation_token(
+                    index_epoch,
+                    root_offset,
+                    end,
+                    query_fingerprint,
+                ));
+            } else if root_offset.saturating_add(1) < root_total {
+                page["nextRootOffset"] = json!(root_offset + 1);
+                page["continuationToken"] = json!(continuation_token(
+                    index_epoch,
+                    root_offset + 1,
+                    query_fingerprint,
+                ));
+            }
+            if measurement && page.get("continuationToken").is_none() {
+                page["continuationToken"] = json!(call_tree_node_continuation_token(
+                    index_epoch,
+                    root_offset,
+                    end,
+                    query_fingerprint,
+                ));
+            }
+        }
+        let mut candidate_reasons = reasons.to_vec();
+        candidate_reasons.push(format!(
+            "byte-fitted call tree root {} into node records {}..{} of {}",
+            root_offset,
+            node_offset,
+            end,
+            records.len(),
+        ));
+        inject_truncation_metadata(&mut candidate, &candidate_reasons, original_bytes);
+        candidate
+    };
+
+    let mut low = 1usize;
+    let mut high = records.len() - node_offset;
+    let mut best_keep = None;
+    while low <= high {
+        let midpoint = low + (high - low) / 2;
+        let candidate = build_candidate(midpoint, true);
+        if measure_json_size(&candidate) <= max_bytes {
+            best_keep = Some(midpoint);
+            low = midpoint.saturating_add(1);
+        } else {
+            high = midpoint.saturating_sub(1);
+        }
+    }
+
+    Some(if let Some(keep) = best_keep {
+        build_candidate(keep, false)
+    } else {
+        call_tree_node_page_error(
+            "single_item_exceeds_response_budget",
+            "The next complete call-tree node record exceeds the response byte budget.",
+            max_bytes,
+            root_offset,
+            root_total,
+            node_offset,
+            records.len(),
+            workspace_generation,
+            index_epoch,
+            query_fingerprint,
+            total_known,
+        )
+    })
+}
+
+
 fn recoverable_page_array_key(output: &Value) -> Option<&'static str> {
     let unit = output
         .get("resultStatus")?
@@ -2357,9 +2686,14 @@ fn fit_recoverable_page(
         }
     }
 
-    best_keep
-        .map(|keep| build_candidate(keep, false))
-        .unwrap_or_else(|| oversized_page_item_error(&output, max_bytes))
+    if let Some(keep) = best_keep {
+        build_candidate(keep, false)
+    } else if array_key == "callTree" {
+        fit_call_tree_node_page(&output, max_bytes, reasons, original_bytes)
+            .unwrap_or_else(|| oversized_page_item_error(&output, max_bytes))
+    } else {
+        oversized_page_item_error(&output, max_bytes)
+    }
 }
 
 
@@ -2410,46 +2744,56 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
         return output;
     }
     let initial_size = measure_json_size(&output);
-    if initial_size <= max_bytes {
+    let node_page_requested = output
+        .get("resultStatus")
+        .and_then(|status| status.get("page"))
+        .and_then(|page| page.get("nodeOffset"))
+        .is_some_and(Value::is_number);
+    if initial_size <= max_bytes && !node_page_requested {
         return output;
     }
 
     let mut reasons: Vec<String> = Vec::new();
 
     phase_cap_lines_per_file(&mut output, &mut reasons);
-    if measure_json_size(&output) <= max_bytes {
+    if measure_json_size(&output) <= max_bytes && !node_page_requested {
         inject_truncation_metadata(&mut output, &reasons, initial_size);
         return output;
     }
 
     phase_cap_matched_tokens(&mut output, &mut reasons);
-    if measure_json_size(&output) <= max_bytes {
+    if measure_json_size(&output) <= max_bytes && !node_page_requested {
         inject_truncation_metadata(&mut output, &reasons, initial_size);
         return output;
     }
 
     phase_reduce_file_count(&mut output, max_bytes, &mut reasons);
-    if measure_json_size(&output) <= max_bytes {
+    if measure_json_size(&output) <= max_bytes && !node_page_requested {
         inject_truncation_metadata(&mut output, &reasons, initial_size);
         return output;
     }
 
     phase_remove_lines_arrays(&mut output, &mut reasons);
-    if measure_json_size(&output) <= max_bytes {
+    if measure_json_size(&output) <= max_bytes && !node_page_requested {
         inject_truncation_metadata(&mut output, &reasons, initial_size);
         return output;
     }
 
     phase_strip_body_fields(&mut output, &mut reasons);
-    if measure_json_size(&output) <= max_bytes {
+    if measure_json_size(&output) <= max_bytes && !node_page_requested {
         inject_truncation_metadata(&mut output, &reasons, initial_size);
         return output;
     }
 
     phase_remove_line_content(&mut output, &mut reasons);
-    if measure_json_size(&output) <= max_bytes {
+    if measure_json_size(&output) <= max_bytes && !node_page_requested {
         inject_truncation_metadata(&mut output, &reasons, initial_size);
         return output;
+    }
+
+    if node_page_requested {
+        return fit_call_tree_node_page(&output, max_bytes, &reasons, initial_size)
+            .unwrap_or_else(|| oversized_page_item_error(&output, max_bytes));
     }
 
     if let Some(array_key) = recoverable_page_array_key(&output) {
@@ -2506,12 +2850,17 @@ fn inject_truncation_metadata(output: &mut Value, reasons: &[String], original_b
 
 /// Apply response size truncation to a ToolCallResult (no metrics injection).
 /// Used when metrics are disabled but we still need to cap response size.
-fn is_single_item_budget_error(output: &Value, truncation_applied: bool) -> bool {
+fn is_response_truncation_error(output: &Value, truncation_applied: bool) -> bool {
     let structured_error = output
         .get("error")
         .and_then(|error| error.get("code"))
         .and_then(Value::as_str)
-        == Some("single_item_exceeds_response_budget");
+        .is_some_and(|code| {
+            matches!(
+                code,
+                "single_item_exceeds_response_budget" | "continuation_offset_out_of_range"
+            )
+        });
     structured_error
         || (truncation_applied
             && match output {
@@ -2540,7 +2889,7 @@ pub(crate) fn truncate_response_if_needed(result: ToolCallResult, max_bytes: usi
 
     if let Ok(output) = serde_json::from_str::<Value>(text) {
         let truncated = truncate_large_response(output, max_bytes);
-        let is_error = result.is_error || is_single_item_budget_error(&truncated, true);
+        let is_error = result.is_error || is_response_truncation_error(&truncated, true);
         ToolCallResult {
             is_error,
             ..ToolCallResult::success(json_to_string(&truncated))
@@ -2593,7 +2942,7 @@ pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start
         let truncation_applied =
             truncation_budget > 0 && measure_json_size(&output) > truncation_budget;
         output = truncate_large_response(output, truncation_budget);
-        let force_error = is_single_item_budget_error(&output, truncation_applied);
+        let force_error = is_response_truncation_error(&output, truncation_applied);
 
         // Measure response size after truncation.
         let bytes = json_to_string(&output).len();
