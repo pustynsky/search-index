@@ -978,7 +978,8 @@ export class UnavailableComponent {}"#,
     .unwrap();
     assert_eq!(
         global_blind_spot_output["callTree"][0]["class"],
-        "ParentComponent"
+        "ParentComponent",
+        "{global_blind_spot_output}"
     );
     assert_eq!(global_blind_spot_output["resultStatus"]["status"], "partial");
     assert!(global_blind_spot_output["resultStatus"]["reasons"]
