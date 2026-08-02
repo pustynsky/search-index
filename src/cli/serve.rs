@@ -1362,6 +1362,16 @@ type LoadOrBuildDefinitionIndexResult = (
     bool,
 );
 
+fn publish_definition_index(
+    target: &Arc<RwLock<definitions::DefinitionIndex>>,
+    replacement: definitions::DefinitionIndex,
+) {
+    definitions::replace_live_definition_index(
+        &mut target.write().unwrap_or_else(|error| error.into_inner()),
+        replacement,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 fn load_or_build_definition_index(
     dir_str: &str,
@@ -1535,7 +1545,7 @@ fn load_or_build_definition_index(
             idx.shrink_maps();
             let shrink_elapsed = shrink_start.elapsed();
             let publish_start = Instant::now();
-            *def_arc.write().unwrap_or_else(|e| e.into_inner()) = idx;
+            publish_definition_index(&def_arc, idx);
             let publish_elapsed = publish_start.elapsed();
             let post_load_elapsed = post_load_start.elapsed();
             crate::index::log_phase("definitionsReady", &[
@@ -1635,7 +1645,7 @@ fn load_or_build_definition_index(
                 );
                 let mut new_idx = new_idx;
                 new_idx.shrink_maps();
-                *bg_def.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
+                publish_definition_index(&bg_def, new_idx);
                 build_state.mark_not_building();
                 crate::index::log_phase("definitionsReady", &[
                     ("cacheHitDefinitions", "false".to_string()),
@@ -2494,7 +2504,7 @@ mod serve_respect_git_exclude_tests {
         let def_build_terminal = Arc::new(AtomicBool::new(false));
         let def_building = Arc::new(AtomicBool::new(false));
 
-        let (_def_index, _def_extensions, _definition_reconcile_extensions, effective) = load_or_build_definition_index(
+        let (def_index, _def_extensions, _definition_reconcile_extensions, effective) = load_or_build_definition_index(
             &dir.to_string_lossy(),
             &extensions,
             &idx_base,
@@ -2508,6 +2518,12 @@ mod serve_respect_git_exclude_tests {
             1,     // build_threads (unused — cache hit path)
         );
 
+        let def_index = def_index.expect("definitions_enabled=true must yield Some(arc)");
+        assert_eq!(
+            def_index.read().unwrap().definition_generation,
+            original.definition_generation + 1,
+            "cache publication must advance beyond the persisted generation"
+        );
         assert!(
             effective,
             "effective respect_git_exclude must be true for definition index (persisted wins)"
@@ -2707,6 +2723,10 @@ mod serve_respect_git_exclude_tests {
 
         // Verify the in-memory def index has the fresh symbol despite save failure.
         let def_idx = def_index.read().unwrap();
+        assert_eq!(
+            def_idx.definition_generation, 2,
+            "background publication must advance beyond the completed build generation"
+        );
         assert!(
             def_idx.definitions.iter().any(|d| d.name.contains("DefSaveFailUniqZzqqMarker")),
             "in-memory def index must contain freshly-built symbol despite save failure; got {} definitions",
