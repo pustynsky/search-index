@@ -3,6 +3,8 @@
 
 ## 0.6.0 (2026-08-03)
 
+- **Documented installer launch from Command Prompt.** README and the installation guide now provide tested bare and parameterized `cmd.exe` launch commands, including safe quoting for repository paths containing spaces.
+
 - **Hardened installer dependency handling.** Public `xray.exe` releases now download directly over HTTPS without requiring GitHub CLI authentication, while authenticated `gh` remains a fallback for private repositories. Git-managed and Hidden operations fail before mutation when Git cannot inspect the work tree, and tracked Hidden installs exercise their real clean/smudge runtime through Git before creating backups or changing MCP config; missing `bash`/`perl` now produces a non-zero result with filter rollback instead of silent passthrough.
 
 - **Kept rare structural files in installer auto-selection.** The installer detection allowlist now covers all supported solution, project, build, Razor, XAML, XML, resource, and manifest extensions; detected structural files remain selected below the normal percentage threshold while explicit `-Extensions` remains authoritative.

@@ -876,6 +876,165 @@ exit `$LASTEXITCODE
 }
 
 
+function Get-DocumentedCmdInstallCommands {
+    param([Parameter(Mandatory)] [string]$Path)
+
+    $raw = [IO.File]::ReadAllText($Path)
+    $fences = [Regex]::Matches($raw, '(?ms)```cmd\r?\n(?<body>.*?)\r?\n```')
+    return @($fences | ForEach-Object { $_.Groups['body'].Value.Trim() } |
+            Where-Object { $_ -match '^powershell\.exe .*setup-xray\.ps1' })
+}
+
+function Invoke-CmdDocumentationInstall {
+    Write-Host '== CMD documentation launcher ==' -ForegroundColor Cyan
+
+    $readmePath = Join-Path $repoRoot 'README.md'
+    $guidePath = Join-Path $repoRoot 'docs\installation.md'
+    $readmeCommands = @(Get-DocumentedCmdInstallCommands -Path $readmePath)
+    $guideCommands = @(Get-DocumentedCmdInstallCommands -Path $guidePath)
+
+    Assert-True 'CMD docs expose bare and parameterized commands' ($readmeCommands.Count -eq 2)
+    if ($readmeCommands.Count -ne 2) { return }
+
+    $docsAreIdentical = ($readmeCommands -join "`n") -eq ($guideCommands -join "`n")
+    Assert-True 'README and installation guide CMD commands are identical' $docsAreIdentical
+    if (-not $docsAreIdentical) { return }
+
+    $expectedBareCommand = 'powershell.exe -NoLogo -NoProfile -Command "& ([scriptblock]::Create((Invoke-WebRequest ''https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1'' -UseBasicParsing).Content))"'
+    $expectedWorkedCommand = 'powershell.exe -NoLogo -NoProfile -Command "& ([scriptblock]::Create((Invoke-WebRequest ''https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1'' -UseBasicParsing).Content)) -RepoPath ''C:\My Repo'' -EnableVSCode"'
+    Assert-True 'CMD bare command matches the pinned contract' ($readmeCommands[0] -eq $expectedBareCommand)
+    if ($readmeCommands[0] -ne $expectedBareCommand) { return }
+    Assert-True 'CMD worked command matches the pinned safe-quoting contract' ($readmeCommands[1] -eq $expectedWorkedCommand)
+    if ($readmeCommands[1] -ne $expectedWorkedCommand) { return }
+    $workedCommand = $readmeCommands[1]
+
+    $cmdPath = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+    Assert-True 'system cmd.exe is available for documentation contract' (Test-Path -LiteralPath $cmdPath -PathType Leaf)
+    if (-not (Test-Path -LiteralPath $cmdPath -PathType Leaf)) { return }
+
+    $root = Join-Path ([IO.Path]::GetTempPath()) ("xray-cmd-doc-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $repo = Join-Path $root 'repo with spaces'
+    $installDir = Join-Path $root 'install with spaces'
+    $bareRepo = Join-Path $root 'bare repo with spaces'
+    $bareInstallDir = Join-Path $root 'bare install with spaces'
+    $rootIsContained = $false
+    try {
+        $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar
+        $resolvedRoot = [IO.Path]::GetFullPath($root)
+        $rootIsContained = $resolvedRoot.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase)
+        Assert-True 'CMD documentation test root is contained under TEMP' $rootIsContained
+        if (-not $rootIsContained) { return }
+
+        New-Item -ItemType Directory -Path $repo, $installDir, $bareRepo, $bareInstallDir -Force | Out-Null
+        & git -C $repo init --quiet
+        if ($LASTEXITCODE -ne 0) { throw "Could not initialize CMD worked-example repo: $repo" }
+        & git -C $bareRepo init --quiet
+        if ($LASTEXITCODE -ne 0) { throw "Could not initialize CMD bare-command repo: $bareRepo" }
+        New-Item -ItemType File -Path (Join-Path $installDir 'xray.exe') -Force | Out-Null
+        New-Item -ItemType File -Path (Join-Path $bareInstallDir 'xray.exe') -Force | Out-Null
+
+        $remoteLoader = "(Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content"
+        $setupLiteral = $canonicalSetup.Replace("'", "''")
+        $localLoader = "[IO.File]::ReadAllText('$setupLiteral')"
+        $testCommand = $workedCommand.Replace($remoteLoader, $localLoader)
+        $loaderWasReplaced = $testCommand -ne $workedCommand
+        Assert-True 'CMD test replaced only the remote loader' $loaderWasReplaced
+        if (-not $loaderWasReplaced) { return }
+
+        $repoLiteral = $repo.Replace("'", "''")
+        $installLiteral = $installDir.Replace("'", "''")
+        $sampleRepoToken = "'C:\My Repo'"
+        $testCommand = $testCommand.Replace($sampleRepoToken, "'$repoLiteral'")
+        $repoWasSubstituted = $testCommand -notmatch [Regex]::Escape($sampleRepoToken) -and
+            $testCommand.Contains("'$repoLiteral'")
+        Assert-True 'CMD test substituted the TEMP repo path' $repoWasSubstituted
+        if (-not $repoWasSubstituted) { return }
+
+        $outerQuoteIsIntact = $testCommand.EndsWith('"')
+        Assert-True 'CMD worked command retains its outer closing quote' $outerQuoteIsIntact
+        if (-not $outerQuoteIsIntact) { return }
+        $testCommand = $testCommand.Substring(0, $testCommand.Length - 1) +
+            " -InstallDir '$installLiteral' -SkipDownload -Extensions ts -GitVisibility Visible -Force`""
+
+        $oldErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $output = @(& $cmdPath /d /s /c $testCommand 2>&1)
+            $exitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $oldErrorActionPreference
+        }
+
+        Assert-True 'documented CMD command exits 0' ($exitCode -eq 0)
+        if ($exitCode -ne 0) {
+            Write-Host ('  CMD output: ' + ($output -join ' | ')) -ForegroundColor DarkYellow
+            return
+        }
+
+        $configPath = Join-Path $repo '.vscode\mcp.json'
+        Assert-True 'documented CMD command creates VS Code config' (Test-Path $configPath)
+        if (Test-Path $configPath) {
+            $config = Get-Content -Path $configPath -Raw | ConvertFrom-Json
+            Assert-True 'documented CMD command writes stdio server' ($config.servers.xray.type -eq 'stdio')
+            Assert-True 'documented CMD command preserves spaced install path' `
+                ($config.servers.xray.command -eq (Join-Path $installDir 'xray.exe'))
+        }
+        $workedStatus = @(& git -C $repo status --short -- '.vscode/mcp.json')
+        Assert-True 'documented CMD command produces a visible Git change' `
+            ($workedStatus.Count -eq 1 -and $workedStatus[0] -match '^\?\? \.vscode/mcp\.json$')
+
+        $bareRepoLiteral = $bareRepo.Replace("'", "''")
+        $bareInstallLiteral = $bareInstallDir.Replace("'", "''")
+        $bareCommand = $readmeCommands[0].Replace($remoteLoader, $localLoader)
+        $bareLoaderWasReplaced = $bareCommand -ne $readmeCommands[0]
+        Assert-True 'bare CMD test replaced only the remote loader' $bareLoaderWasReplaced
+        if (-not $bareLoaderWasReplaced) { return }
+        $bareOuterQuoteIsIntact = $bareCommand.EndsWith('"')
+        Assert-True 'bare CMD command retains its outer closing quote' $bareOuterQuoteIsIntact
+        if (-not $bareOuterQuoteIsIntact) { return }
+        $bareCommand = $bareCommand.Substring(0, $bareCommand.Length - 1) +
+            " -RepoPath '$bareRepoLiteral' -EnableVSCode -InstallDir '$bareInstallLiteral' -SkipDownload -Extensions ts -GitVisibility Visible -Force`""
+
+        $oldErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = 'Continue'
+            $bareOutput = @(& $cmdPath /d /s /c $bareCommand 2>&1)
+            $bareExitCode = $LASTEXITCODE
+        }
+        finally {
+            $ErrorActionPreference = $oldErrorActionPreference
+        }
+
+        Assert-True 'bare documented CMD command exits 0' ($bareExitCode -eq 0)
+        if ($bareExitCode -ne 0) {
+            Write-Host ('  bare CMD output: ' + ($bareOutput -join ' | ')) -ForegroundColor DarkYellow
+            return
+        }
+        $bareConfigPath = Join-Path $bareRepo '.vscode\mcp.json'
+        Assert-True 'bare documented CMD command creates VS Code config' (Test-Path $bareConfigPath)
+        if (Test-Path $bareConfigPath) {
+            $bareConfig = Get-Content -Path $bareConfigPath -Raw | ConvertFrom-Json
+            Assert-True 'bare documented CMD command preserves spaced install path' `
+                ($bareConfig.servers.xray.command -eq (Join-Path $bareInstallDir 'xray.exe'))
+        }
+        $bareStatus = @(& git -C $bareRepo status --short -- '.vscode/mcp.json')
+        Assert-True 'bare documented CMD command produces a visible Git change' `
+            ($bareStatus.Count -eq 1 -and $bareStatus[0] -match '^\?\? \.vscode/mcp\.json$')
+    }
+    finally {
+        if (-not $KeepTempDir -and $rootIsContained) {
+            Remove-Item -Path $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        else {
+            Write-Host "  Kept: $root" -ForegroundColor DarkYellow
+        }
+    }
+}
+
+Invoke-CmdDocumentationInstall
+Write-Host ''
+
 # Round 1: current host runtime.
 $currentLabel = "PS $($PSVersionTable.PSVersion)"
 $currentExe = if ($PSVersionTable.PSVersion.Major -ge 6) { 'pwsh' } else { 'powershell.exe' }
