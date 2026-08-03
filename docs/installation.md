@@ -8,6 +8,14 @@ End-to-end setup for using `xray` as an MCP server with your AI coding agent.
 
 The [`setup-xray.ps1`](../scripts/setup-xray.ps1) script automates the entire installation — download, extension detection, MCP config creation, and git protection — in one command.
 
+### Requirements
+
+- Windows x64 with Windows PowerShell 5.1+ or PowerShell 7+.
+- Public releases download directly over HTTPS; GitHub CLI (`gh`) is not required. An authenticated `gh` installation is used only as a fallback for private or restricted repositories supplied through `-GithubRepo`.
+- Git is optional for a non-Git folder in Visible mode. A working Git executable is required for Git-managed setup, `-GitVisibility Hidden`, and uninstall operations that touch Git state. `-Restore` remains available when Git is broken or unavailable.
+- Tracked Hidden configs use a Git clean/smudge filter. Git for Windows supplies its `bash`/`perl` runtime; setup verifies the actual filter through Git and rolls back before changing MCP config if that runtime is unavailable.
+- VS Code and GitHub Copilot CLI do not need to be installed while running setup; the script only writes their selected config files.
+
 Three ways to launch it. Pick whichever fits — they all run the same script and accept the same parameters.
 
 ### A1. One-liner (download + run inline)

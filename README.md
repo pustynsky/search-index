@@ -88,6 +88,8 @@ Built on the same [`ignore`](https://crates.io/crates/ignore) crate that backs [
 
 **Option A — automated setup (recommended).** Run the [setup script](scripts/setup-xray.ps1). It downloads the latest `xray.exe`, detects your project's file extensions, and creates the MCP config for the clients you opt into (VS Code Copilot Chat, GitHub Copilot CLI, or both).
 
+Requirements: Windows x64 and Windows PowerShell 5.1+ or PowerShell 7+. Public releases download directly over HTTPS, so GitHub CLI is not required. Git is optional for a non-Git folder in Visible mode, but required for Git-managed setup and Hidden mode; `-Restore` remains available without Git. Tracked Hidden installs validate their Git-provided shell runtime before changing MCP config files.
+
 Three ways to launch it. Pick whichever fits. Same script, same parameters.
 
 **A1. One-liner (download and run inline).** Shortest path. The script is fetched and run in memory; nothing is written to disk. The script will prompt for the target repo path; pass `-RepoPath <path>` to skip the prompt.
