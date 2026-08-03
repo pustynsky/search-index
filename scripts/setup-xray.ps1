@@ -24,7 +24,9 @@
     Where to install xray.exe. Defaults to %LOCALAPPDATA%\xray.
 
 .PARAMETER GithubRepo
-    GitHub repository that publishes xray.exe releases.
+    GitHub repository that publishes xray.exe releases. Public assets download
+    directly over HTTPS; authenticated GitHub CLI is only a fallback for private
+    or restricted repositories.
 
 .PARAMETER Extensions
     Optional comma-separated list of extensions to index. When provided,
@@ -57,9 +59,10 @@
         formatting and other servers) with a "//" warning field. NO smudge/clean
         filter, NO skip-worktree, NO .git/info/exclude. If the file is git-tracked
         the change appears in 'git status' and YOU decide whether to commit/push it.
-      - Hidden: the previous behavior. Installs a smudge/clean filter on tracked
-        files (or .git/info/exclude / skip-worktree fallback) so the xray entry
-        never shows in 'git status' and cannot leak upstream.
+      - Hidden: the previous behavior. Requires a working Git repository. Installs
+        a smudge/clean filter on tracked files (or .git/info/exclude / skip-worktree
+        fallback) so the xray entry never shows in 'git status' and cannot leak
+        upstream. The tracked filter runtime is verified before config mutation.
     When omitted: interactive runs prompt (default Visible); -Force defaults to
     Hidden to preserve existing automation behavior; outside a git repo the mode
     is Visible (there is nothing to hide).
@@ -243,6 +246,89 @@ function Normalize-ExtensionList {
             ForEach-Object { $_.Trim().TrimStart('.').ToLowerInvariant() } |
             Where-Object { $_ } |
             Sort-Object -Unique) -join ','
+}
+
+function Test-WindowsExecutable {
+    param([Parameter(Mandatory)] [string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $false
+    }
+
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        try {
+            if ($stream.Length -lt 64 -or $stream.ReadByte() -ne 0x4D -or $stream.ReadByte() -ne 0x5A) {
+                return $false
+            }
+
+            $dosHeader = New-Object byte[] 64
+            $stream.Position = 0
+            if ($stream.Read($dosHeader, 0, $dosHeader.Length) -ne $dosHeader.Length) {
+                return $false
+            }
+            $peOffset = [BitConverter]::ToInt32($dosHeader, 0x3C)
+            if ($peOffset -lt 0 -or $peOffset -gt ($stream.Length - 4)) {
+                return $false
+            }
+
+            $stream.Position = $peOffset
+            return $stream.ReadByte() -eq 0x50 -and
+                $stream.ReadByte() -eq 0x45 -and
+                $stream.ReadByte() -eq 0 -and
+                $stream.ReadByte() -eq 0
+        }
+        finally {
+            $stream.Dispose()
+        }
+    }
+    catch {
+        return $false
+    }
+}
+
+function Save-XrayReleaseAsset {
+    param(
+        [Parameter(Mandatory)] [string]$GithubRepo,
+        [Parameter(Mandatory)] [string]$Destination
+    )
+
+    if ($GithubRepo -notmatch '^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$' -or $GithubRepo -match '(^|/)\.{1,2}($|/)') {
+        throw "Invalid GitHub repository '$GithubRepo'. Expected owner/repo."
+    }
+
+    $downloadUri = "https://github.com/$GithubRepo/releases/latest/download/xray.exe"
+    $oldProgressPreference = $ProgressPreference
+    $oldSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
+    try {
+        $ProgressPreference = 'SilentlyContinue'
+        if ($PSVersionTable.PSVersion.Major -lt 6) {
+            [Net.ServicePointManager]::SecurityProtocol = $oldSecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        }
+        Invoke-WebRequest -Uri $downloadUri -OutFile $Destination -UseBasicParsing -ErrorAction Stop
+    }
+    catch {
+        $directDownloadError = $_.Exception.Message
+        $ghCommand = Get-Command gh -CommandType Application -ErrorAction SilentlyContinue
+        if (-not $ghCommand) {
+            throw ("Download failed from {0}: {1}" -f $downloadUri, $directDownloadError)
+        }
+
+        Write-Warning 'Direct public download failed; retrying with authenticated GitHub CLI for a private or restricted repository.'
+        Remove-Item $Destination -Force -ErrorAction SilentlyContinue
+        & $ghCommand.Source release download --repo $GithubRepo --pattern 'xray.exe' --dir (Split-Path -Parent $Destination)
+        if ($LASTEXITCODE -ne 0) {
+            throw "GitHub CLI download failed for $GithubRepo (exit $LASTEXITCODE)."
+        }
+    }
+    finally {
+        $ProgressPreference = $oldProgressPreference
+        [Net.ServicePointManager]::SecurityProtocol = $oldSecurityProtocol
+    }
+
+    if (-not (Test-WindowsExecutable -Path $Destination)) {
+        throw 'Download failed - release asset is not a valid Windows executable'
+    }
 }
 
 function Get-AutoSelectedExtensions {
@@ -942,6 +1028,31 @@ function Get-GitWorkTreeRoot {
 }
 
 
+function Find-GitMetadataRoot {
+    param([Parameter(Mandatory)] [string]$StartPath)
+
+    $ErrorActionPreference = 'Continue'
+    try {
+        $current = Get-Item -LiteralPath $StartPath -ErrorAction Stop
+        while ($current) {
+            try {
+                if (Test-Path -LiteralPath (Join-Path $current.FullName '.git') -ErrorAction Stop) {
+                    return $current.FullName
+                }
+            }
+            catch {
+                # Keep walking: an inaccessible ancestor may itself be inside
+                # a higher, readable work tree.
+            }
+            $current = $current.Parent
+        }
+    }
+    catch {
+        return $null
+    }
+    return $null
+}
+
 function Get-ResolvedGitDir {
     param([Parameter(Mandatory)] [string]$RepoRoot)
 
@@ -1271,6 +1382,146 @@ function Set-McpFileWithSnapshot {
     return $true
 }
 
+function Test-McpFilterRuntime {
+    param(
+        [Parameter(Mandatory)] [string]$RepoRoot,
+        [Parameter(Mandatory)] [string]$FilterDir,
+        [Parameter(Mandatory)] [string]$AttributePath,
+        [Parameter(Mandatory)] [ValidateSet('mcpServers', 'servers')] [string]$ContainerKey,
+        [Parameter(Mandatory)] [string]$SnapshotLine
+    )
+
+    # Git for Windows can resolve its bundled bash/perl even when PowerShell
+    # cannot. Exercise the configured filter through Git instead of comparing
+    # the two processes' PATH values.
+    $ErrorActionPreference = 'Continue'
+    $probeDir = Join-Path $FilterDir (".runtime-probe-{0}" -f [Guid]::NewGuid().ToString('N'))
+    $probeCanonicalPath = Join-Path $probeDir 'canonical.json'
+    $probeEnrichedPath = Join-Path $probeDir 'enriched.json'
+    $probeObjectDir = Join-Path $probeDir 'objects'
+    $probeGitConfig = @('-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false')
+    $hadGitObjectDirectory = Test-Path Env:GIT_OBJECT_DIRECTORY
+    $oldGitObjectDirectory = $env:GIT_OBJECT_DIRECTORY
+
+    try {
+        New-Item -ItemType Directory -Path $probeObjectDir -Force -ErrorAction Stop | Out-Null
+        $env:GIT_OBJECT_DIRECTORY = $probeObjectDir
+
+        $probeCanonical = "{`n  `"$ContainerKey`": {`n  }`n}`n"
+        $probeEnriched = "{`n  `"$ContainerKey`": {`n$SnapshotLine`n  }`n}`n"
+        $utf8NoBom = [Text.UTF8Encoding]::new($false)
+        [IO.File]::WriteAllText($probeCanonicalPath, $probeCanonical, $utf8NoBom)
+        [IO.File]::WriteAllText($probeEnrichedPath, $probeEnriched, $utf8NoBom)
+
+        Push-Location $RepoRoot -ErrorAction Stop
+        try {
+            $expectedCleanHash = & git @probeGitConfig hash-object -- $probeCanonicalPath 2>&1
+            if ($LASTEXITCODE -ne 0 -or -not $expectedCleanHash) {
+                Write-Warning ("Git filter runtime probe could not hash canonical input: {0}" -f (($expectedCleanHash | Out-String).Trim()))
+                return $false
+            }
+
+            $actualCleanHash = & git @probeGitConfig hash-object ("--path={0}" -f $AttributePath) -- $probeEnrichedPath 2>&1
+            if ($LASTEXITCODE -ne 0 -or $actualCleanHash -ne $expectedCleanHash) {
+                Write-Warning ("Git clean filter runtime probe failed; bash/perl may be unavailable. No MCP config was changed. Git output: {0}" -f (($actualCleanHash | Out-String).Trim()))
+                return $false
+            }
+
+            $canonicalBlob = & git @probeGitConfig hash-object -w -- $probeCanonicalPath 2>&1
+            if ($LASTEXITCODE -ne 0 -or -not $canonicalBlob) {
+                Write-Warning ("Git filter runtime probe could not create its temporary blob: {0}" -f (($canonicalBlob | Out-String).Trim()))
+                return $false
+            }
+            $smudged = (& git @probeGitConfig cat-file --filters ("--path={0}" -f $AttributePath) $canonicalBlob 2>&1) -join "`n"
+            if ($LASTEXITCODE -ne 0 -or $smudged -notmatch [Regex]::Escape($Script:XrayMcpMarker)) {
+                Write-Warning ("Git smudge filter runtime probe failed; bash/perl may be unavailable. No MCP config was changed. Git output: {0}" -f $smudged.Trim())
+                return $false
+            }
+        }
+        finally {
+            Pop-Location
+        }
+    }
+    catch {
+        Write-Warning ("Git filter runtime probe failed: {0}" -f $_.Exception.Message)
+        return $false
+    }
+    finally {
+        if ($hadGitObjectDirectory) {
+            $env:GIT_OBJECT_DIRECTORY = $oldGitObjectDirectory
+        }
+        else {
+            Remove-Item Env:GIT_OBJECT_DIRECTORY -ErrorAction SilentlyContinue
+        }
+        Remove-Item $probeDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
+    return $true
+}
+
+function Backup-McpJsonForFilteredInstall {
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$RepoRoot,
+        [Parameter(Mandatory)] [ValidateSet('xray-mcp', 'xray-vscode-mcp')] [string]$FilterName,
+        [Parameter(Mandatory)] [string]$AttributePath
+    )
+
+    try {
+        Backup-McpJson -Path $Path
+        return $true
+    }
+    catch {
+        Write-Warning ("Could not create MCP config backup: {0}" -f $_.Exception.Message)
+        $rollbackResult = Uninstall-McpFilter `
+            -RepoRoot $RepoRoot `
+            -FilterName $FilterName `
+            -AttributePath $AttributePath `
+            -McpRelPath $AttributePath
+        Write-Warning ("Filter rollback after backup failure: {0}" -f $rollbackResult)
+        return $false
+    }
+}
+
+function Enable-GitTrackingForFilteredConfig {
+    param(
+        [Parameter(Mandatory)] [string]$RepoRoot,
+        [Parameter(Mandatory)] [string]$RelativePath,
+        [Parameter(Mandatory)] [string]$ConfigPath,
+        [Parameter(Mandatory)] [ValidateSet('xray-mcp', 'xray-vscode-mcp')] [string]$FilterName,
+        [Parameter(Mandatory)] [string]$AttributePath
+    )
+
+    $ErrorActionPreference = 'Continue'
+    $gitOutput = ''
+    $gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue
+    if ($gitCommand) {
+        Push-Location $RepoRoot
+        try {
+            $gitOutput = & $gitCommand.Source update-index --no-skip-worktree -- $RelativePath 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                return $true
+            }
+        }
+        finally {
+            Pop-Location
+        }
+    }
+    else {
+        $gitOutput = 'git executable is unavailable'
+    }
+
+    Write-Warning ("Could not clear skip-worktree for {0}: {1}" -f $RelativePath, (($gitOutput | Out-String).Trim()))
+    [void](Restore-McpJson -Path $ConfigPath)
+    $rollbackResult = Uninstall-McpFilter `
+        -RepoRoot $RepoRoot `
+        -FilterName $FilterName `
+        -AttributePath $AttributePath `
+        -McpRelPath $RelativePath
+    Write-Warning ("Filter rollback after update-index failure: {0}" -f $rollbackResult)
+    return $false
+}
+
 function Install-McpFilter {
     <#
         Installs the smudge/clean filter for an MCP config file in the
@@ -1503,6 +1754,8 @@ function Install-McpFilter {
     # or tab), so a line attaching attributes to a DIFFERENT path that
     # happens to begin with this path's basename does NOT get stripped.
     $attrFile = Join-Path $resolvedGitCommonDir 'info\attributes'
+    $attrFileExistedBeforeInstall = Test-Path -LiteralPath $attrFile -PathType Leaf
+    $attrFileBytesBeforeInstall = if ($attrFileExistedBeforeInstall) { [IO.File]::ReadAllBytes($attrFile) } else { $null }
     $attrDir = Split-Path -Parent $attrFile
     if (-not (Test-Path $attrDir)) {
         New-Item -ItemType Directory -Path $attrDir -Force | Out-Null
@@ -1517,6 +1770,26 @@ function Install-McpFilter {
     $existingAttrs = @($existingAttrs | Where-Object { $_ -notmatch $stripPattern })
     $existingAttrs += $attrLine
     Set-Content -Path $attrFile -Value $existingAttrs -Encoding UTF8
+
+    if (-not (Test-McpFilterRuntime `
+            -RepoRoot $RepoRoot `
+            -FilterDir $filterDir `
+            -AttributePath $AttributePath `
+            -ContainerKey $ContainerKey `
+            -SnapshotLine $SnapshotLine)) {
+        try {
+            if ($attrFileExistedBeforeInstall) {
+                [IO.File]::WriteAllBytes($attrFile, $attrFileBytesBeforeInstall)
+            }
+            else {
+                Remove-Item -LiteralPath $attrFile -Force -ErrorAction SilentlyContinue
+            }
+        }
+        catch {
+            Write-Warning ("Could not restore {0} after filter probe failure: {1}" -f $attrFile, $_.Exception.Message)
+        }
+        return $false
+    }
 
     return $true
 }
@@ -1633,7 +1906,12 @@ function Uninstall-McpFilter {
                 Write-Host ("  [DryRun] Would remove {0} line from {1}" -f $AttributePath, $attrFile) -ForegroundColor DarkYellow
             }
             else {
-                Set-Content -Path $attrFile -Value $filteredAttrs -Encoding UTF8
+                if ($filteredAttrs.Count -eq 0) {
+                    Remove-Item -LiteralPath $attrFile -Force
+                }
+                else {
+                    Set-Content -Path $attrFile -Value $filteredAttrs -Encoding UTF8
+                }
             }
         }
     }
@@ -1791,8 +2069,19 @@ catch {
     exit 1
 }
 
-$gitWorkTreeRoot = Get-GitWorkTreeRoot -RepoRoot $RepoPath
+$gitCommand = Get-Command git -CommandType Application -ErrorAction SilentlyContinue
+$gitMetadataRoot = Find-GitMetadataRoot -StartPath $RepoPath
+$gitWorkTreeRoot = if ($gitCommand) { Get-GitWorkTreeRoot -RepoRoot $RepoPath } else { $null }
 $isGitRepo = $null -ne $gitWorkTreeRoot
+
+if (-not $Restore -and $gitMetadataRoot -and -not $isGitRepo) {
+    Write-Error "Git metadata was found at $gitMetadataRoot, but git could not inspect the work tree. Ensure git is on PATH and the repository is trusted (safe.directory), then retry. No files were changed."
+    exit 1
+}
+if (-not $Restore -and $GitVisibility -eq 'Hidden' -and -not $isGitRepo) {
+    Write-Error '-GitVisibility Hidden requires a working Git repository. Use -GitVisibility Visible for a non-Git directory.'
+    exit 1
+}
 if ($isGitRepo -and $gitWorkTreeRoot -ne $RepoPath) {
     Write-Host "Resolved git worktree root: $gitWorkTreeRoot" -ForegroundColor DarkGray
     $RepoPath = $gitWorkTreeRoot
@@ -1993,40 +2282,31 @@ if (-not $SkipDownload) {
         New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     }
 
-    if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
-        Write-Error 'GitHub CLI (gh) is required. Install from https://cli.github.com/'
-        exit 1
-    }
-
-    $tag = (gh api "repos/$GithubRepo/releases/latest" --jq '.tag_name') 2>$null
-    if (-not $tag) {
-        Write-Error "No releases found in $GithubRepo (check gh auth status and repo name)"
-        exit 1
-    }
-
     $needsDownload = $true
     if (Test-Path $xrayPath) {
         Write-Host "xray.exe already exists at $xrayPath" -ForegroundColor Yellow
-        $needsDownload = Read-YesNo -Prompt "Download latest ($tag) and overwrite?" -Default $false -ForceYes:$Force
+        $needsDownload = Read-YesNo -Prompt 'Download the latest release and overwrite?' -Default $false -ForceYes:$Force
         if ($needsDownload -and $Force) {
             Write-Host 'Force enabled; overwriting existing xray.exe.' -ForegroundColor Yellow
         }
     }
 
     if ($needsDownload) {
-        Write-Host "Downloading xray $tag..." -ForegroundColor Cyan
-        $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) 'xray-download'
+        Write-Host 'Downloading the latest xray release...' -ForegroundColor Cyan
+        $tempDir = Join-Path ([System.IO.Path]::GetTempPath()) ("xray-download-{0}" -f [Guid]::NewGuid().ToString('N'))
         if (Test-Path $tempDir) {
             Remove-Item $tempDir -Recurse -Force
         }
         New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
 
-        gh release download $tag --repo $GithubRepo --pattern 'xray.exe' --dir $tempDir
-
         $downloaded = Join-Path $tempDir 'xray.exe'
-        if (-not (Test-Path $downloaded)) {
-            Write-Error 'Download failed - xray.exe not found in release assets'
-            Remove-Item $tempDir -Recurse -Force
+        try {
+            Save-XrayReleaseAsset -GithubRepo $GithubRepo -Destination $downloaded
+        }
+        catch {
+            $message = $_.Exception.Message
+            Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+            Write-Error $message
             exit 1
         }
 
@@ -2073,7 +2353,7 @@ if (-not $SkipDownload) {
             Write-Host 'Note: MCP hosts that were using xray will need to restart it.' -ForegroundColor Yellow
         }
         Remove-Item $tempDir -Recurse -Force
-        Write-Host "Installed xray $tag to $xrayPath" -ForegroundColor Green
+        Write-Host "Installed the latest xray release to $xrayPath" -ForegroundColor Green
     }
 }
 else {
@@ -2251,11 +2531,11 @@ if ($writeVscode) {
         New-Item -ItemType Directory -Path $vscodeMcpDir -Force | Out-Null
     }
 
-    Backup-McpJson -Path $vscodeMcpPath
-
     $vscodeFilterInstalled = $false
 
     if ($visibleMode) {
+        Backup-McpJson -Path $vscodeMcpPath
+
         # VISIBLE mode: write a normal, user-visible xray entry into
         # .vscode/mcp.json. Preserve existing formatting and other servers via
         # line-injection, and never hide the change from git. If the file is
@@ -2308,20 +2588,28 @@ if ($writeVscode) {
         $scriptDir = if ($scriptPath) { Split-Path -Parent $scriptPath } else { $null }
         $vscodeSnapshotLine = New-XraySnapshotLine -XrayPath $xrayPath -XrayArgs $xrayArgs -Shape 'VsCode'
 
-        # Lift any pre-existing skip-worktree from a legacy install BEFORE we
-        # touch the file - otherwise our write would silently no-op in the index.
-        Push-Location $RepoPath
-        try {
-            & git update-index --no-skip-worktree '.vscode/mcp.json' 2>$null | Out-Null
-        }
-        finally {
-            Pop-Location
-        }
-
+        # Keep any legacy skip-worktree bit in place until the filter, backup,
+        # and working-tree injection have all succeeded.
         if (Install-McpFilter -RepoRoot $RepoPath -ScriptDir $scriptDir -SnapshotLine $vscodeSnapshotLine -FilterName 'xray-vscode-mcp' -ContainerKey 'servers' -AttributePath '.vscode/mcp.json') {
+            if (-not (Backup-McpJsonForFilteredInstall `
+                    -Path $vscodeMcpPath `
+                    -RepoRoot $RepoPath `
+                    -FilterName 'xray-vscode-mcp' `
+                    -AttributePath '.vscode/mcp.json')) {
+                exit 1
+            }
             $vscodeFilterInstalled = $true
             $injected = Set-McpFileWithSnapshot -Path $vscodeMcpPath -SnapshotLine $vscodeSnapshotLine -ContainerKey 'servers'
             if ($injected) {
+                if (-not (Enable-GitTrackingForFilteredConfig `
+                        -RepoRoot $RepoPath `
+                        -RelativePath '.vscode/mcp.json' `
+                        -ConfigPath $vscodeMcpPath `
+                        -FilterName 'xray-vscode-mcp' `
+                        -AttributePath '.vscode/mcp.json')) {
+                    exit 1
+                }
+
                 # Renormalize so the index reflects the canonical (clean) form.
                 Push-Location $RepoPath
                 try {
@@ -2359,12 +2647,14 @@ if ($writeVscode) {
             Write-Warning 'Refusing to fall back to JSON merge + skip-worktree (would corrupt upstream formatting and create silent diff hazards on future git operations).'
             Write-Warning 'Rolling back any partial filter artifacts and aborting the VS Code install for this repo.'
             $rollbackResult = Uninstall-McpFilter -RepoRoot $RepoPath -FilterName 'xray-vscode-mcp' -AttributePath '.vscode/mcp.json' -McpRelPath '.vscode/mcp.json'
-            Write-Warning ("Rollback result: {0}. Investigate the Install-McpFilter warning above (likely missing bash, missing filter source files, or .git/info not writable) and re-run." -f $rollbackResult)
-            $writeVscode = $false
+            Write-Warning ("Rollback result: {0}. Investigate the Install-McpFilter warning above (filter runtime, Git configuration, filter sources, or Git metadata permissions) and re-run." -f $rollbackResult)
+            exit 1
         }
     }
 
     if (-not $useVscodeFilterStrategy -and $writeVscode) {
+        Backup-McpJson -Path $vscodeMcpPath
+
         $xrayEntry = [ordered]@{
             type    = 'stdio'
             command = $xrayPath
@@ -2516,11 +2806,11 @@ if ($writeCopilotCli -and (Test-Path $copilotCliMcpPath)) {
 
 if ($writeCopilotCli) {
     # .mcp.json lives in the repo root, which always exists - no mkdir needed.
-    Backup-McpJson -Path $copilotCliMcpPath
-
     $copilotCliFilterInstalled = $false
 
     if ($visibleMode) {
+        Backup-McpJson -Path $copilotCliMcpPath
+
         # VISIBLE mode: write a normal, user-visible xray entry into .mcp.json.
         # Preserve existing formatting and other servers via line-injection, and
         # never hide the change from git. If the file is tracked, the user sees
@@ -2574,20 +2864,28 @@ if ($writeCopilotCli) {
         $scriptDir = if ($scriptPath) { Split-Path -Parent $scriptPath } else { $null }
         $snapshotLine = New-XraySnapshotLine -XrayPath $xrayPath -XrayArgs $xrayArgs
 
-        # Lift any pre-existing skip-worktree from a legacy install BEFORE we
-        # touch the file - otherwise our write would silently no-op in the index.
-        Push-Location $RepoPath
-        try {
-            & git update-index --no-skip-worktree '.mcp.json' 2>$null | Out-Null
-        }
-        finally {
-            Pop-Location
-        }
-
+        # Keep any legacy skip-worktree bit in place until the filter, backup,
+        # and working-tree injection have all succeeded.
         if (Install-McpFilter -RepoRoot $RepoPath -ScriptDir $scriptDir -SnapshotLine $snapshotLine -FilterName 'xray-mcp' -ContainerKey 'mcpServers' -AttributePath '.mcp.json') {
+            if (-not (Backup-McpJsonForFilteredInstall `
+                    -Path $copilotCliMcpPath `
+                    -RepoRoot $RepoPath `
+                    -FilterName 'xray-mcp' `
+                    -AttributePath '.mcp.json')) {
+                exit 1
+            }
             $copilotCliFilterInstalled = $true
             $injected = Set-McpFileWithSnapshot -Path $copilotCliMcpPath -SnapshotLine $snapshotLine
             if ($injected) {
+                if (-not (Enable-GitTrackingForFilteredConfig `
+                        -RepoRoot $RepoPath `
+                        -RelativePath '.mcp.json' `
+                        -ConfigPath $copilotCliMcpPath `
+                        -FilterName 'xray-mcp' `
+                        -AttributePath '.mcp.json')) {
+                    exit 1
+                }
+
                 # Renormalize so the index reflects the canonical (clean) form.
                 # Without this, the just-written enriched file would appear as
                 # 'modified' in git status until the next checkout.
@@ -2625,12 +2923,14 @@ if ($writeCopilotCli) {
             Write-Warning 'Refusing to fall back to JSON merge + skip-worktree (would corrupt upstream formatting and create silent diff hazards on future git operations).'
             Write-Warning 'Rolling back any partial filter artifacts and aborting the Copilot CLI install for this repo.'
             $rollbackResult = Uninstall-McpFilter -RepoRoot $RepoPath -FilterName 'xray-mcp' -AttributePath '.mcp.json' -McpRelPath '.mcp.json'
-            Write-Warning ("Rollback result: {0}. Investigate the Install-McpFilter warning above (likely missing bash, missing filter source files, or .git/info not writable) and re-run." -f $rollbackResult)
-            $writeCopilotCli = $false
+            Write-Warning ("Rollback result: {0}. Investigate the Install-McpFilter warning above (filter runtime, Git configuration, filter sources, or Git metadata permissions) and re-run." -f $rollbackResult)
+            exit 1
         }
     }
 
     if (-not $useFilterStrategy -and $writeCopilotCli) {
+        Backup-McpJson -Path $copilotCliMcpPath
+
         $copilotCliXrayEntry = [ordered]@{
             command = $xrayPath
             args    = $xrayArgs
