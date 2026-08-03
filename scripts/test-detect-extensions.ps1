@@ -1,10 +1,10 @@
 #!/usr/bin/env pwsh
 <#
 .SYNOPSIS
-    Regression tests for Get-DetectedExtensions in setup-xray.ps1.
+    Regression tests for extension detection and auto-selection in setup-xray.ps1.
 
 .DESCRIPTION
-    Loads the production Get-DetectedExtensions function via AST extraction
+    Loads the production extension detection and auto-selection policy via AST extraction
     (the script has top-level imperative code, so plain dot-source is not
     possible) and runs it against fixture trees that exercise the
     invariants the function must preserve:
@@ -88,7 +88,90 @@ function Remove-TempDir {
     }
 }
 
-# Load Get-DetectedExtensions from production setup-xray.ps1 via AST.
+function New-InstallerFixture {
+    $root = New-TempDir
+    $repo = Join-Path $root 'repo'
+    $install = Join-Path $root 'install'
+    New-Item -ItemType Directory -Path $repo, $install -Force | Out-Null
+    New-Item -ItemType File -Path (Join-Path $install 'xray.exe') -Force | Out-Null
+    & git -C $repo init --quiet
+    if ($LASTEXITCODE -ne 0) { throw "git init failed for installer fixture: $repo" }
+
+    return [PSCustomObject]@{
+        Root    = $root
+        Repo    = $repo
+        Install = $install
+    }
+}
+
+function Add-InstallerSelectionFiles {
+    param([Parameter(Mandatory)] [string]$Repo)
+
+    1..20 | ForEach-Object {
+        "export const value$_ = $_;" | Set-Content (Join-Path $Repo "file$_.ts") -Encoding UTF8
+    }
+    '<h1>View</h1>' | Set-Content (Join-Path $Repo 'Index.cshtml') -Encoding UTF8
+    '<Project />' | Set-Content (Join-Path $Repo 'App.csproj') -Encoding UTF8
+    '<Project />' | Set-Content (Join-Path $Repo 'Directory.Build.props') -Encoding UTF8
+    '<Project />' | Set-Content (Join-Path $Repo 'Directory.Build.targets') -Encoding UTF8
+    'unknown' | Set-Content (Join-Path $Repo 'sample.rareunknown') -Encoding UTF8
+}
+
+function Invoke-InstallerFixture {
+    param(
+        [Parameter(Mandatory)] [string]$ScriptPath,
+        [Parameter(Mandatory)] [string]$Repo,
+        [Parameter(Mandatory)] [string]$Install,
+        [switch]$Force,
+        [switch]$AcceptSuggestion,
+        [string]$Extensions
+    )
+
+    $pwshPath = (Get-Process -Id $PID).Path
+    $processArgs = @(
+        '-NoLogo', '-NoProfile', '-File', $ScriptPath,
+        '-RepoPath', $Repo,
+        '-InstallDir', $Install,
+        '-SkipDownload',
+        '-EnableVSCode',
+        '-GitVisibility', 'Visible'
+    )
+    if ($Force) { $processArgs += '-Force' }
+    if ($Extensions) { $processArgs += @('-Extensions', $Extensions) }
+
+    if ($AcceptSuggestion) {
+        $output = @('' | & $pwshPath @processArgs 2>&1)
+    }
+    else {
+        $output = @(& $pwshPath @processArgs 2>&1)
+    }
+    $exitCode = $LASTEXITCODE
+    if ($exitCode -ne 0) {
+        throw "setup-xray.ps1 exited $exitCode`n$($output -join "`n")"
+    }
+
+    return [PSCustomObject]@{
+        Output = $output
+        Config = Get-Content -Path (Join-Path $Repo '.vscode/mcp.json') -Raw | ConvertFrom-Json
+    }
+}
+
+function Get-ConfiguredExtensionState {
+    param([Parameter(Mandatory)] $Config)
+
+    $xrayArgs = @($Config.servers.xray.args)
+    $extIndexes = @(for ($index = 0; $index -lt $xrayArgs.Count; $index++) {
+            if ($xrayArgs[$index] -eq '--ext') { $index }
+        })
+    $extensionList = if ($extIndexes.Count -eq 1) { $xrayArgs[$extIndexes[0] + 1] } else { $null }
+
+    return [PSCustomObject]@{
+        ExtFlagCount  = $extIndexes.Count
+        ExtensionList = $extensionList
+    }
+}
+
+# Load extension detection and auto-selection policy from setup-xray.ps1 via AST.
 $scriptPath = Join-Path (Split-Path -Parent $PSCommandPath) 'setup-xray.ps1'
 if (-not (Test-Path $scriptPath)) {
     Write-Error "setup-xray.ps1 not found next to this test: $scriptPath"
@@ -101,14 +184,33 @@ if ($parseErrors -and $parseErrors.Count -gt 0) {
     Write-Error "Parse errors in setup-xray.ps1: $($parseErrors -join '; ')"
     exit 1
 }
-$funcAst = $ast.Find({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-DetectedExtensions' }, $true)
-if (-not $funcAst) {
-    Write-Error "Get-DetectedExtensions not found in $scriptPath"
-    exit 1
+foreach ($functionName in @('Get-DetectedExtensions', 'Get-AutoSelectedExtensions')) {
+    $functionAst = $ast.Find({
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq $functionName
+        }, $true)
+    if (-not $functionAst) {
+        Write-Error "$functionName not found in $scriptPath"
+        exit 1
+    }
+    . ([scriptblock]::Create($functionAst.Extent.Text))
 }
-. ([scriptblock]::Create($funcAst.Extent.Text))
 
-# Fixture knowns and skips for tests below.
+foreach ($variableName in @('KnownCodeExtensions', 'AlwaysIncludeIfDetected')) {
+    $assignmentAst = $ast.Find({
+            param($node)
+            $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+            $node.Left.Extent.Text -eq ('$' + $variableName)
+        }, $true)
+    if (-not $assignmentAst) {
+        Write-Error "$variableName assignment not found in $scriptPath"
+        exit 1
+    }
+    . ([scriptblock]::Create($assignmentAst.Extent.Text))
+}
+
+# Fixture knowns and skips for scanner invariants below.
 $KnownExt = @{ 'cs' = 'C#'; 'rs' = 'Rust'; 'md' = 'MD'; 'ps1' = 'PS' }
 $SkipDirs = @('.git', 'node_modules', 'target', 'bin', 'obj')
 
@@ -248,6 +350,125 @@ try {
     Assert-Equal -Actual $r -Expected @{ 'rs' = 1 } -Label 'T7 prefix-of-skip-name not falsely skipped'
 }
 finally { Remove-TempDir $root }
+
+# ---------------------------------------------------------------
+# Test 8: a rare structural extension bypasses the count threshold.
+# ---------------------------------------------------------------
+$root = New-TempDir
+try {
+    1..20 | ForEach-Object {
+        "export const value$_ = $_;" | Set-Content (Join-Path $root "file$_.ts") -Encoding UTF8
+    }
+    '<h1>View</h1>' | Set-Content (Join-Path $root 'Index.cshtml') -Encoding UTF8
+
+    $r = Get-DetectedExtensions -RootPath $root -KnownExtensions $KnownCodeExtensions -SkipDirectoryNames $SkipDirs
+    $threshold = [Math]::Max(5, [Math]::Ceiling((($r.Values | Measure-Object -Sum).Sum) * 0.005))
+    $selection = Get-AutoSelectedExtensions -ExtensionCounts $r -Threshold $threshold -AlwaysIncludeIfDetected $AlwaysIncludeIfDetected
+
+    Assert-Equal -Actual ($selection.ThresholdSelected -join ',') -Expected 'ts' -Label 'T8 threshold-selected source extension'
+    Assert-Equal -Actual ($selection.StructuralSelected -join ',') -Expected 'cshtml' -Label 'T8 rare cshtml structural exception'
+    Assert-Equal -Actual ($selection.All -join ',') -Expected 'cshtml,ts' -Label 'T8 deterministic complete suggestion'
+}
+finally { Remove-TempDir $root }
+
+# ---------------------------------------------------------------
+# Test 9: project/build structural files are retained below threshold.
+# ---------------------------------------------------------------
+$counts = @{ 'ts' = 20; 'csproj' = 1; 'props' = 1; 'targets' = 1 }
+$selection = Get-AutoSelectedExtensions -ExtensionCounts $counts -Threshold 5 -AlwaysIncludeIfDetected $AlwaysIncludeIfDetected
+Assert-Equal -Actual ($selection.StructuralSelected -join ',') -Expected 'csproj,props,targets' -Label 'T9 project and build structural exceptions'
+Assert-Equal -Actual ($selection.All -join ',') -Expected 'csproj,props,targets,ts' -Label 'T9 sorted complete suggestion'
+
+# ---------------------------------------------------------------
+# Test 9b: structural extensions at the threshold stay in the threshold bucket.
+# ---------------------------------------------------------------
+$counts = @{ 'cs' = 500; 'xml' = 5; 'csproj' = 2 }
+$selection = Get-AutoSelectedExtensions -ExtensionCounts $counts -Threshold 5 -AlwaysIncludeIfDetected $AlwaysIncludeIfDetected
+Assert-Equal -Actual ($selection.ThresholdSelected -join ',') -Expected 'cs,xml' -Label 'T9b at-threshold structural extension uses threshold bucket'
+Assert-Equal -Actual ($selection.StructuralSelected -join ',') -Expected 'csproj' -Label 'T9b structural exception bucket stays below threshold'
+Assert-Equal -Actual ($selection.All -join ',') -Expected 'cs,csproj,xml' -Label 'T9b boundary selection remains sorted and deduplicated'
+
+# ---------------------------------------------------------------
+# Test 10: unknown and absent structural extensions are not selected.
+# ---------------------------------------------------------------
+$counts = @{ 'ts' = 20; 'rareunknown' = 1; 'cshtml' = 1 }
+$selection = Get-AutoSelectedExtensions -ExtensionCounts $counts -Threshold 5 -AlwaysIncludeIfDetected $AlwaysIncludeIfDetected
+Assert-Equal -Actual ($selection.StructuralSelected -join ',') -Expected 'cshtml' -Label 'T10 absent structural extensions are not added'
+Assert-Equal -Actual ($selection.All -join ',') -Expected 'cshtml,ts' -Label 'T10 rare unknown extension remains excluded'
+
+# ---------------------------------------------------------------
+# Test 11: every structural policy extension is detectable in production.
+# ---------------------------------------------------------------
+$missingKnownExtensions = @($AlwaysIncludeIfDetected | Where-Object { -not $KnownCodeExtensions.ContainsKey($_) })
+Assert-Equal -Actual ($missingKnownExtensions -join ',') -Expected '' -Label 'T11 structural policy is covered by scanner allowlist'
+Assert-Equal -Actual (($AlwaysIncludeIfDetected | Sort-Object -Unique) -join ',') `
+    -Expected 'appxmanifest,config,cshtml,csproj,fsproj,manifestxml,md,props,razor,resx,sln,targets,vbproj,vcxproj,vsixmanifest,xaml,xml' `
+    -Label 'T11 structural policy is deduplicated and complete'
+
+# ---------------------------------------------------------------
+# Test 12: real -Force setup writes the complete structural suggestion once.
+# ---------------------------------------------------------------
+$fixture = New-InstallerFixture
+try {
+    Add-InstallerSelectionFiles -Repo $fixture.Repo
+    $forceResult = Invoke-InstallerFixture -ScriptPath $scriptPath -Repo $fixture.Repo -Install $fixture.Install -Force
+    $forceState = Get-ConfiguredExtensionState -Config $forceResult.Config
+    $forceOutput = $forceResult.Output -join "`n"
+
+    Assert-Equal -Actual $forceState.ExtensionList -Expected 'cshtml,csproj,props,targets,ts' -Label 'T12 Force accepts complete structural suggestion'
+    Assert-Equal -Actual ([bool]($forceOutput -match 'Threshold-selected extensions \(>= 5 files\): ts')) -Expected $true -Label 'T12 output identifies threshold-selected extensions'
+    Assert-Equal -Actual ([bool]($forceOutput -match 'Structural exceptions \(detected below threshold\): cshtml,csproj,props,targets')) -Expected $true -Label 'T12 output identifies structural exceptions'
+
+    $repeatResult = Invoke-InstallerFixture -ScriptPath $scriptPath -Repo $fixture.Repo -Install $fixture.Install -Force
+    $repeatState = Get-ConfiguredExtensionState -Config $repeatResult.Config
+    $extensionValues = @($repeatState.ExtensionList -split ',')
+    Assert-Equal -Actual $repeatState.ExtFlagCount -Expected 1 -Label 'T12 repeated setup writes one --ext argument'
+    Assert-Equal -Actual (($extensionValues | Sort-Object -Unique).Count) -Expected $extensionValues.Count -Label 'T12 repeated setup does not duplicate extension values'
+
+    $explicitResult = Invoke-InstallerFixture -ScriptPath $scriptPath -Repo $fixture.Repo -Install $fixture.Install -Force -Extensions 'ts'
+    $explicitState = Get-ConfiguredExtensionState -Config $explicitResult.Config
+    Assert-Equal -Actual $explicitState.ExtensionList -Expected 'ts' -Label 'T12 explicit Extensions remains authoritative'
+}
+finally { Remove-TempDir $fixture.Root }
+
+# ---------------------------------------------------------------
+# Test 13: interactive Enter and -Force accept the same suggestion.
+# ---------------------------------------------------------------
+$fixture = New-InstallerFixture
+try {
+    Add-InstallerSelectionFiles -Repo $fixture.Repo
+    $interactiveResult = Invoke-InstallerFixture -ScriptPath $scriptPath -Repo $fixture.Repo -Install $fixture.Install -AcceptSuggestion
+    $interactiveState = Get-ConfiguredExtensionState -Config $interactiveResult.Config
+    $parityForceResult = Invoke-InstallerFixture -ScriptPath $scriptPath -Repo $fixture.Repo -Install $fixture.Install -Force
+    $parityForceState = Get-ConfiguredExtensionState -Config $parityForceResult.Config
+
+    Assert-Equal -Actual $interactiveState.ExtensionList -Expected 'cshtml,csproj,props,targets,ts' -Label 'T13 Enter accepts complete structural suggestion'
+    Assert-Equal -Actual $parityForceState.ExtensionList -Expected 'cshtml,csproj,props,targets,ts' -Label 'T13 Force accepts complete structural suggestion'
+    Assert-Equal -Actual $interactiveState.ExtensionList -Expected $parityForceState.ExtensionList -Label 'T13 Enter and Force produce identical extensions'
+}
+finally { Remove-TempDir $fixture.Root }
+
+# ---------------------------------------------------------------
+# Test 14: installer output names empty selection buckets explicitly.
+# ---------------------------------------------------------------
+$fixture = New-InstallerFixture
+try {
+    '<h1>View</h1>' | Set-Content (Join-Path $fixture.Repo 'Index.cshtml') -Encoding UTF8
+    $structuralOnlyResult = Invoke-InstallerFixture -ScriptPath $scriptPath -Repo $fixture.Repo -Install $fixture.Install -Force
+    $structuralOnlyOutput = $structuralOnlyResult.Output -join "`n"
+    Assert-Equal -Actual ([bool]($structuralOnlyOutput -match 'Threshold-selected extensions \(>= 5 files\): \(none\)')) -Expected $true -Label 'T14 empty threshold bucket is explicit'
+    Assert-Equal -Actual ([bool]($structuralOnlyOutput -match 'Structural exceptions \(detected below threshold\): cshtml')) -Expected $true -Label 'T14 structural-only bucket remains visible'
+
+    Remove-Item -Path (Join-Path $fixture.Repo 'Index.cshtml') -Force
+    1..5 | ForEach-Object {
+        "export const value$_ = $_;" | Set-Content (Join-Path $fixture.Repo "file$_.ts") -Encoding UTF8
+    }
+    $thresholdOnlyResult = Invoke-InstallerFixture -ScriptPath $scriptPath -Repo $fixture.Repo -Install $fixture.Install -Force
+    $thresholdOnlyOutput = $thresholdOnlyResult.Output -join "`n"
+    Assert-Equal -Actual ([bool]($thresholdOnlyOutput -match 'Threshold-selected extensions \(>= 5 files\): ts')) -Expected $true -Label 'T14 threshold-only bucket remains visible'
+    Assert-Equal -Actual ([bool]($thresholdOnlyOutput -match 'Structural exceptions \(detected below threshold\): \(none\)')) -Expected $true -Label 'T14 empty structural bucket is explicit'
+}
+finally { Remove-TempDir $fixture.Root }
 
 # ---------------------------------------------------------------
 Write-Host ""

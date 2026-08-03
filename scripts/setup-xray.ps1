@@ -186,6 +186,7 @@ $AllowedTools = @(
 $KnownCodeExtensions = @{
     'cs' = 'C#'; 'csx' = 'C# Script'; 'csproj' = 'C# Project';
     'vb' = 'VB.NET'; 'vbproj' = 'VB Project';
+    'fsproj' = 'F# Project'; 'vcxproj' = 'C++ Project';
     'sln' = 'Solution'; 'props' = 'MSBuild'; 'targets' = 'MSBuild';
     'xaml' = 'XAML'; 'razor' = 'Razor'; 'cshtml' = 'Razor View';
     'ts' = 'TypeScript'; 'tsx' = 'TSX'; 'js' = 'JavaScript'; 'jsx' = 'JSX';
@@ -203,10 +204,10 @@ $KnownCodeExtensions = @{
     'swift' = 'Swift'; 'm' = 'Objective-C'; 'mm' = 'Objective-C++';
     'ps1' = 'PowerShell'; 'psm1' = 'PS Module'; 'psd1' = 'PS Data';
     'sh' = 'Shell'; 'bash' = 'Bash'; 'zsh' = 'Zsh';
-    'xml' = 'XML'; 'json' = 'JSON'; 'jsonc' = 'JSONC';
+    'xml' = 'XML'; 'resx' = 'Resource XML'; 'json' = 'JSON'; 'jsonc' = 'JSONC';
     'yaml' = 'YAML'; 'yml' = 'YAML';
     'config' = 'Config'; 'ini' = 'INI'; 'env' = 'Env';
-    'manifestxml' = 'Manifest XML';
+    'manifestxml' = 'Manifest XML'; 'appxmanifest' = 'Appx Manifest'; 'vsixmanifest' = 'VSIX Manifest';
     'md' = 'Markdown'; 'txt' = 'Text'; 'rst' = 'reStructuredText';
     'sql' = 'SQL';
     'scala' = 'Scala'; 'clj' = 'Clojure'; 'ex' = 'Elixir'; 'erl' = 'Erlang';
@@ -215,6 +216,17 @@ $KnownCodeExtensions = @{
     'r' = 'R'; 'rmd' = 'R Markdown';
     'tf' = 'Terraform'; 'hcl' = 'HCL'
 }
+
+$AlwaysIncludeIfDetected = @(
+    'md',
+    'sln',
+    'csproj', 'vbproj', 'fsproj', 'vcxproj',
+    'props', 'targets',
+    'xaml',
+    'razor', 'cshtml',
+    'xml', 'config', 'resx',
+    'manifestxml', 'appxmanifest', 'vsixmanifest'
+)
 
 $SkipDirs = @(
     '.git', 'node_modules', 'bin', 'obj', 'target', 'dist',
@@ -231,6 +243,31 @@ function Normalize-ExtensionList {
             ForEach-Object { $_.Trim().TrimStart('.').ToLowerInvariant() } |
             Where-Object { $_ } |
             Sort-Object -Unique) -join ','
+}
+
+function Get-AutoSelectedExtensions {
+    param(
+        [Parameter(Mandatory)] [System.Collections.IDictionary]$ExtensionCounts,
+        [Parameter(Mandatory)] [int]$Threshold,
+        [Parameter(Mandatory)] [string[]]$AlwaysIncludeIfDetected
+    )
+
+    $thresholdSelected = @($ExtensionCounts.GetEnumerator() |
+            Where-Object { $_.Value -ge $Threshold } |
+            Select-Object -ExpandProperty Key)
+
+    $structuralSelected = @($AlwaysIncludeIfDetected |
+            Where-Object {
+                $ExtensionCounts.Contains($_) -and
+                $ExtensionCounts[$_] -lt $Threshold
+            })
+
+    $allSelected = @($thresholdSelected) + @($structuralSelected)
+    return [PSCustomObject]@{
+        ThresholdSelected  = @($thresholdSelected | Sort-Object -Unique)
+        StructuralSelected = @($structuralSelected | Sort-Object -Unique)
+        All                = @($allSelected | Sort-Object -Unique)
+    }
 }
 
 function Read-YesNo {
@@ -2079,16 +2116,22 @@ else {
     $totalFiles = ($extCounts.Values | Measure-Object -Sum).Sum
     $threshold = [Math]::Max(5, [Math]::Ceiling($totalFiles * 0.005))
 
-    $autoSelected = ($extCounts.GetEnumerator() |
-            Where-Object { $_.Value -ge $threshold } |
-            Select-Object -ExpandProperty Key)
+    $autoSelection = Get-AutoSelectedExtensions `
+        -ExtensionCounts $extCounts `
+        -Threshold $threshold `
+        -AlwaysIncludeIfDetected $AlwaysIncludeIfDetected
 
-    if ($extCounts.ContainsKey('md') -and 'md' -notin $autoSelected) {
-        $autoSelected += 'md'
-    }
+    $thresholdSelected = Normalize-ExtensionList -Value ($autoSelection.ThresholdSelected -join ',')
+    $structuralSelected = Normalize-ExtensionList -Value ($autoSelection.StructuralSelected -join ',')
+    $suggested = Normalize-ExtensionList -Value ($autoSelection.All -join ',')
+    $thresholdDisplay = if ($thresholdSelected) { $thresholdSelected } else { '(none)' }
+    $structuralDisplay = if ($structuralSelected) { $structuralSelected } else { '(none)' }
 
-    $suggested = Normalize-ExtensionList -Value (($autoSelected | Sort-Object) -join ',')
-    Write-Host "`nSuggested extensions (>= $([int]$threshold) files): " -NoNewline
+    Write-Host "`nThreshold-selected extensions (>= $([int]$threshold) files): " -NoNewline
+    Write-Host $thresholdDisplay -ForegroundColor Green
+    Write-Host 'Structural exceptions (detected below threshold): ' -NoNewline
+    Write-Host $structuralDisplay -ForegroundColor Green
+    Write-Host 'Suggested extensions: ' -NoNewline
     Write-Host $suggested -ForegroundColor Green
 
     if ($Force) {

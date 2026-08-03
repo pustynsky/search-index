@@ -49,7 +49,7 @@ cd xray
 **What it does:**
 
 1. Downloads the latest `xray.exe` from [GitHub releases](https://github.com/pustynsky/xray/releases) to `%LOCALAPPDATA%\xray\`
-2. Scans the target repository and detects file extensions (shows top-20, auto-suggests based on frequency)
+2. Scans the target repository and detects file extensions (shows the top 20, selects frequent extensions, and retains detected structural files below the normal threshold)
 3. Creates MCP configuration:
    - `.vscode/mcp.json` — for **VS Code GitHub Copilot Chat** (agent mode, with `-EnableVSCode`)
    - `.mcp.json` — for **GitHub Copilot CLI** (with `-EnableCopilotCli`)
