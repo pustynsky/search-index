@@ -26,6 +26,20 @@ Shortest. The script is fetched and executed in-memory; nothing is left on disk.
 & ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content))
 ```
 
+#### From Command Prompt (`cmd.exe`)
+
+CMD has no PowerShell host, so launch the same installer through the built-in `powershell.exe`:
+
+```cmd
+powershell.exe -NoLogo -NoProfile -Command "& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content))"
+```
+
+Put installer parameters inside the outer double quotes. In CMD, wrap parameter values containing spaces in PowerShell single quotes, not additional double quotes:
+
+```cmd
+powershell.exe -NoLogo -NoProfile -Command "& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content)) -RepoPath 'C:\My Repo' -EnableVSCode"
+```
+
 ### A2. Download-then-run
 
 Recommended if you want to read the script before executing it. Saves to `%TEMP%`, runs from there.
