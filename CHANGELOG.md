@@ -1,7 +1,11 @@
 # Changelog
 
 
-## 0.6.1 (Unreleased)
+## 0.6.1 (2026-08-09)
+
+- **Hardened standalone installer dependencies.** Public releases now download over HTTPS without requiring `gh`; Git-managed and Hidden setup validates the work tree and runtime filters before mutation and rolls back failures transactionally.
+
+- **Expanded installer project coverage and launch docs.** Detection retains rare supported project, build, resource, and manifest extensions, while the README and installation guide document regression-tested `cmd.exe` launch patterns.
 
 - **Accelerated auto-balanced count-only searches.** Multi-term substring counts now derive balancing diagnostics from compact aggregates without building ranked file results.
 
