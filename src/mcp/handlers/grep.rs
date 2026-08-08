@@ -3743,6 +3743,53 @@ fn find_matching_tokens_for_term(
     verified
 }
 
+#[derive(Default)]
+struct CountOnlyFileEntry {
+    occurrences: usize,
+    terms_matched: usize,
+    last_term_idx: Option<usize>,
+}
+
+// Keep filtering and token-recording semantics aligned with `score_token_postings`.
+fn aggregate_count_only_postings(
+    matched_tokens: &[&str],
+    term_idx: usize,
+    index: &ContentIndex,
+    scope: &ResolvedFileScope,
+    record_matched_tokens: bool,
+    tokens_with_hits: &mut HashSet<String>,
+    file_counts: &mut HashMap<u32, CountOnlyFileEntry>,
+) -> usize {
+    let mut postings_checked = 0usize;
+
+    for &token in matched_tokens {
+        if let Some(postings) = index.index.get(token) {
+            let mut token_recorded = false;
+            for posting in postings {
+                postings_checked += 1;
+                if !scope.contains(posting.file_id)
+                    || index.files.get(posting.file_id as usize).is_none()
+                {
+                    continue;
+                }
+                if record_matched_tokens && !token_recorded {
+                    tokens_with_hits.insert(token.to_string());
+                    token_recorded = true;
+                }
+
+                let entry = file_counts.entry(posting.file_id).or_default();
+                entry.occurrences += posting.lines.len();
+                if entry.last_term_idx != Some(term_idx) {
+                    entry.terms_matched += 1;
+                    entry.last_term_idx = Some(term_idx);
+                }
+            }
+        }
+    }
+
+    postings_checked
+}
+
 /// Score matched tokens against the main inverted index for a single term.
 /// Applies file filters, computes TF-IDF, and accumulates into shared structures.
 #[allow(clippy::too_many_arguments)]
@@ -4056,7 +4103,10 @@ fn handle_substring_search(
 
     let mut tokens_with_hits: HashSet<String> = HashSet::new();
     let mut file_scores: HashMap<u32, FileScoreEntry> = HashMap::new();
+    let mut count_only_files: HashMap<u32, CountOnlyFileEntry> = HashMap::new();
     let term_count = raw_terms.len();
+    let lightweight_count_only = params.count_only
+        && (!params.auto_balance || params.mode_and || term_count < 2);
     let mut diag = SubstringSearchDiag::default();
 
     for (term_idx, term) in raw_terms.iter().enumerate() {
@@ -4079,10 +4129,17 @@ fn handle_substring_search(
             .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
 
         let scoring_start = ctx.metrics.then(Instant::now);
-        diag.posting_entries_checked += score_token_postings(
-            &matched_tokens, term_idx, index, scope, total_docs,
-            !params.count_only || ctx.metrics, &mut tokens_with_hits, &mut file_scores,
-        );
+        diag.posting_entries_checked += if lightweight_count_only {
+            aggregate_count_only_postings(
+                &matched_tokens, term_idx, index, scope, ctx.metrics,
+                &mut tokens_with_hits, &mut count_only_files,
+            )
+        } else {
+            score_token_postings(
+                &matched_tokens, term_idx, index, scope, total_docs,
+                !params.count_only || ctx.metrics, &mut tokens_with_hits, &mut file_scores,
+            )
+        };
         diag.scoring_ms += scoring_start
             .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
     }
@@ -4095,8 +4152,27 @@ fn handle_substring_search(
         tokens.sort_unstable();
         tokens
     };
-    diag.unique_matched_files = file_scores.len();
+    if lightweight_count_only {
+        diag.unique_matched_files = count_only_files.len();
+        let ranking_start = ctx.metrics.then(Instant::now);
+        let mut total_files = 0usize;
+        let mut total_occurrences = 0usize;
+        for entry in count_only_files.values() {
+            if !params.mode_and || entry.terms_matched >= term_count {
+                total_files += 1;
+                total_occurrences += entry.occurrences;
+            }
+        }
+        diag.ranking_ms = ranking_start
+            .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
+        return build_substring_response(
+            &[], &raw_terms, &all_matched_tokens, &warnings,
+            total_files, total_occurrences, search_mode, index, ctx, params,
+            None, &diag,
+        );
+    }
 
+    diag.unique_matched_files = file_scores.len();
     let ranking_start = ctx.metrics.then(Instant::now);
     let (mut results, total_files, total_occurrences) =
         finalize_grep_results(file_scores, params.mode_and, term_count);
