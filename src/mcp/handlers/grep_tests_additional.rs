@@ -234,7 +234,10 @@ fn test_score_token_postings_multi_term_tracking() {
 #[test]
 fn test_build_substring_response_count_only() {
     let index = ContentIndex::default();
-    let ctx = HandlerContext::default();
+    let ctx = HandlerContext {
+        metrics: true,
+        ..HandlerContext::default()
+    };
     let params = GrepSearchParams {
         count_only: true,
         ..make_params_default()
@@ -252,10 +255,16 @@ fn test_build_substring_response_count_only() {
     let matched_tokens = vec!["userservice".to_string()];
     let warnings = vec!["Short substring query (<4 chars) may return broad results".to_string()];
 
+    let diag = SubstringSearchDiag {
+        matched_token_count: 1,
+        posting_entries_checked: 2,
+        unique_matched_files: 1,
+        ..SubstringSearchDiag::default()
+    };
     let result = build_substring_response(
         &results, &raw_terms, &matched_tokens, &warnings,
         1, 2, "or", &index, &ctx, &params,
-        None,
+        None, &diag,
     );
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -264,6 +273,17 @@ fn test_build_substring_response_count_only() {
     assert!(summary.get("matchedTokens").is_none(),
         "matchedTokens should be absent in countOnly mode (Block A fix)");
     assert!(summary.get("warnings").is_some());
+    for field in [
+        "indexSearchMs", "scoringMs", "rankingMs", "previewReadMs",
+        "previewBuildMs", "responseFinalizeMs",
+    ] {
+        assert!(summary[field].as_f64().is_some(), "missing {field}");
+    }
+    assert_eq!(summary["previewReadMs"], 0.0);
+    assert_eq!(summary["previewBuildMs"], 0.0);
+    assert_eq!(summary["matchedTokenCount"], 1);
+    assert_eq!(summary["postingEntriesChecked"], 2);
+    assert_eq!(summary["uniqueMatchedFiles"], 1);
     assert!(v.get("files").is_none());
 }
 
@@ -287,7 +307,7 @@ fn test_build_substring_response_normal() {
     let result = build_substring_response(
         &results, &raw_terms, &matched_tokens, &[],
         1, 1, "or", &index, &ctx, &params,
-        None,
+        None, &SubstringSearchDiag::default(),
     );
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();

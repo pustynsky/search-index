@@ -237,6 +237,16 @@ pub(crate) struct FileScoreEntry {
     pub per_term_occurrences: Vec<usize>,
 }
 
+#[derive(Default)]
+struct SubstringSearchDiag {
+    index_search_ms: f64,
+    scoring_ms: f64,
+    ranking_ms: f64,
+    matched_token_count: usize,
+    posting_entries_checked: usize,
+    unique_matched_files: usize,
+}
+
 /// A single file match from phrase search, with matched lines and optionally cached content.
 pub(crate) struct PhraseFileMatch {
     pub file_path: String,
@@ -3745,7 +3755,7 @@ fn score_token_postings(
     tokens_with_hits: &mut HashSet<String>,
     file_scores: &mut HashMap<u32, FileScoreEntry>,
     file_matched_terms: &mut HashMap<u32, HashSet<usize>>,
-) {
+) -> usize {
     let lookup_start = Instant::now();
     let average_file_len = index.total_tokens as f64 / total_docs.max(1.0);
     let scoring_model = active_lexical_scoring_model();
@@ -3816,6 +3826,25 @@ fn score_token_postings(
     debug!("[substring-trace] Main index lookup: {} tokens, {} postings checked, {} files passed in {:.3}ms",
         matched_tokens.len(), term_postings_checked, term_files_passed,
         lookup_start.elapsed().as_secs_f64() * 1000.0);
+    term_postings_checked
+}
+
+fn inject_substring_observability(
+    summary: &mut Value,
+    diag: &SubstringSearchDiag,
+    preview_read_ms: f64,
+    preview_build_ms: f64,
+    response_finalize_ms: f64,
+) {
+    summary["indexSearchMs"] = json!(diag.index_search_ms);
+    summary["scoringMs"] = json!(diag.scoring_ms);
+    summary["rankingMs"] = json!(diag.ranking_ms);
+    summary["previewReadMs"] = json!(preview_read_ms);
+    summary["previewBuildMs"] = json!(preview_build_ms);
+    summary["responseFinalizeMs"] = json!(response_finalize_ms);
+    summary["matchedTokenCount"] = json!(diag.matched_token_count);
+    summary["postingEntriesChecked"] = json!(diag.posting_entries_checked);
+    summary["uniqueMatchedFiles"] = json!(diag.unique_matched_files);
 }
 
 /// Build the final substring search response (JSON with files, summary, warnings, matchedTokens).
@@ -3832,6 +3861,7 @@ fn build_substring_response(
     ctx: &HandlerContext,
     params: &GrepSearchParams,
     auto_balance_info: Option<&AutoBalanceInfo>,
+    diag: &SubstringSearchDiag,
 ) -> ToolCallResult {
     let search_start = params.search_start;
     let search_mode_label = format!("substring-{}", search_mode);
@@ -3854,19 +3884,29 @@ fn build_substring_response(
         apply_dir_auto_converted_note(&mut summary, params);
         let result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
         let execution = build_grep_execution(params, &search_mode_label, None, false, Some(total_files), None);
-        let output = finalize_grep_output(
+        let response_finalize_start = ctx.metrics.then(Instant::now);
+        let mut output = finalize_grep_output(
             json!({ "summary": summary }),
             result_status,
             execution,
             &terms_value,
             params,
         );
+        let response_finalize_ms = response_finalize_start
+            .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
+        if ctx.metrics {
+            inject_substring_observability(
+                &mut output["summary"], diag, 0.0, 0.0, response_finalize_ms,
+            );
+        }
         debug!("[substring-trace] Total: {:.3}ms (count_only)", search_start.elapsed().as_secs_f64() * 1000.0);
         return ToolCallResult::success(json_to_string(&output));
     }
 
     let json_start = Instant::now();
     let mut stale_line_files = 0usize;
+    let mut preview_read_ms = 0.0;
+    let mut preview_build_ms = 0.0;
     let files_json: Vec<Value> = results.iter().map(|r| {
         let mut file_obj = if params.files_only {
             json!({
@@ -3882,8 +3922,13 @@ fn build_substring_response(
             })
         };
 
-        if params.show_lines && !params.files_only
-            && let Ok((content, _lossy)) = read_file_lossy(std::path::Path::new(&r.file_path)) {
+        if params.show_lines && !params.files_only {
+            let preview_read_start = ctx.metrics.then(Instant::now);
+            let content_result = read_file_lossy(std::path::Path::new(&r.file_path));
+            preview_read_ms += preview_read_start
+                .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
+            if let Ok((content, _lossy)) = content_result {
+                let preview_build_start = ctx.metrics.then(Instant::now);
                 // Index-staleness guard: verify posting lines against the
                 // freshly-read content and drop any the file no longer
                 // corroborates, so lineContent never shows a stale,
@@ -3897,7 +3942,10 @@ fn build_substring_response(
                     file_obj["staleLineNumbers"] = json!(stale);
                     stale_line_files += 1;
                 }
+                preview_build_ms += preview_build_start
+                    .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
             }
+        }
 
         file_obj
     }).collect();
@@ -3928,7 +3976,8 @@ fn build_substring_response(
         false,
     );
     let execution = build_grep_execution(params, &search_mode_label, None, false, Some(total_files), None);
-    let output = finalize_grep_output(
+    let response_finalize_start = ctx.metrics.then(Instant::now);
+    let mut output = finalize_grep_output(
         json!({
             "files": files_json,
             "summary": summary
@@ -3938,6 +3987,14 @@ fn build_substring_response(
         &terms_value,
         params,
     );
+    let response_finalize_ms = response_finalize_start
+        .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
+    if ctx.metrics {
+        inject_substring_observability(
+            &mut output["summary"], diag, preview_read_ms, preview_build_ms,
+            response_finalize_ms,
+        );
+    }
     debug!("[substring-trace] Response JSON: {:.3}ms", json_start.elapsed().as_secs_f64() * 1000.0);
     debug!("[substring-trace] Total: {:.3}ms ({} files, {} tokens matched)",
         search_start.elapsed().as_secs_f64() * 1000.0, total_files, all_matched_tokens.len());
@@ -4001,8 +4058,10 @@ fn handle_substring_search(
     let mut file_scores: HashMap<u32, FileScoreEntry> = HashMap::new();
     let term_count = raw_terms.len();
     let mut file_matched_terms: HashMap<u32, HashSet<usize>> = HashMap::new();
+    let mut diag = SubstringSearchDiag::default();
 
     for (term_idx, term) in raw_terms.iter().enumerate() {
+        let index_search_start = ctx.metrics.then(Instant::now);
         // When trigram is stale (rebuild skipped for narrow scope), fall back
         // to brute-force token matching to avoid false negatives from missing
         // trigram entries for newly-added tokens.
@@ -4017,16 +4076,24 @@ fn handle_substring_search(
                 .filter_map(|&idx| trigram_idx.tokens.get(idx as usize).cloned())
                 .collect()
         };
+        diag.index_search_ms += index_search_start
+            .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
 
-        score_token_postings(
+        let scoring_start = ctx.metrics.then(Instant::now);
+        diag.posting_entries_checked += score_token_postings(
             &matched_tokens, term_idx, index, scope, total_docs,
             &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
         );
+        diag.scoring_ms += scoring_start
+            .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
     }
 
     let mut all_matched_tokens: Vec<String> = tokens_with_hits.into_iter().collect();
     all_matched_tokens.sort();
+    diag.matched_token_count = all_matched_tokens.len();
+    diag.unique_matched_files = file_scores.len();
 
+    let ranking_start = ctx.metrics.then(Instant::now);
     // Set terms_matched from the distinct matched term indices
     for (file_id, entry) in &mut file_scores {
         if let Some(matched) = file_matched_terms.get(file_id) {
@@ -4057,10 +4124,13 @@ fn handle_substring_search(
         }
     };
 
+    diag.ranking_ms = ranking_start
+        .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
+
     let result = build_substring_response(
         &results, &raw_terms, &all_matched_tokens, &warnings,
         total_files, total_occurrences, search_mode, index, ctx, params,
-        auto_balance_info.as_ref(),
+        auto_balance_info.as_ref(), &diag,
     );
     finish_grep_page(result, page.as_ref(), &params.page_request)
 }

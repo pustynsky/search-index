@@ -116,7 +116,8 @@ fn assert_json_without_guidance_prefix(text: &str) -> Value {
 #[test] fn test_metrics_on_injects_fields() {
     let mut idx = HashMap::new();
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
-    let index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
+    let mut index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
+    index.trigram = crate::index::build_trigram_index_from_tokens(vec!["httpclient".to_string()], 1);
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: true, ..Default::default() };
     let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["HttpClient"]}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -125,6 +126,42 @@ fn assert_json_without_guidance_prefix(text: &str) -> Value {
     assert!(output["summary"]["searchTimeMs"].as_f64().is_some());
     assert!(output["summary"]["responseBytes"].as_u64().is_some());
     assert!(output["summary"]["estimatedTokens"].as_u64().is_some());
+    for field in [
+        "indexSearchMs",
+        "scoringMs",
+        "rankingMs",
+        "previewReadMs",
+        "previewBuildMs",
+        "responseFinalizeMs",
+    ] {
+        assert!(output["summary"][field].as_f64().is_some(), "missing {field}");
+    }
+    assert_eq!(output["summary"]["matchedTokenCount"], 1);
+    assert_eq!(output["summary"]["postingEntriesChecked"], 1);
+    assert_eq!(output["summary"]["uniqueMatchedFiles"], 1);
+}
+
+#[test] fn test_metrics_off_omits_substring_observability() {
+    let mut idx = HashMap::new();
+    idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
+    let mut index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
+    index.trigram = crate::index::build_trigram_index_from_tokens(vec!["httpclient".to_string()], 1);
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: false, ..Default::default() };
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["HttpClient"]}));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    for field in [
+        "indexSearchMs",
+        "scoringMs",
+        "rankingMs",
+        "previewReadMs",
+        "previewBuildMs",
+        "responseFinalizeMs",
+        "matchedTokenCount",
+        "postingEntriesChecked",
+        "uniqueMatchedFiles",
+    ] {
+        assert!(output["summary"].get(field).is_none(), "unexpected {field}");
+    }
 }
 
 #[test]
