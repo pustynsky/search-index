@@ -3747,14 +3747,13 @@ fn find_matching_tokens_for_term(
 /// Applies file filters, computes TF-IDF, and accumulates into shared structures.
 #[allow(clippy::too_many_arguments)]
 fn score_token_postings(
-    matched_tokens: &[String],
+    matched_tokens: &[&str],
     term_idx: usize,
     index: &ContentIndex,
     scope: &ResolvedFileScope,
     total_docs: f64,
     tokens_with_hits: &mut HashSet<String>,
     file_scores: &mut HashMap<u32, FileScoreEntry>,
-    file_matched_terms: &mut HashMap<u32, HashSet<usize>>,
 ) -> usize {
     let lookup_start = Instant::now();
     let average_file_len = index.total_tokens as f64 / total_docs.max(1.0);
@@ -3762,8 +3761,8 @@ fn score_token_postings(
     let mut term_postings_checked: usize = 0;
     let mut term_files_passed: usize = 0;
 
-    for token in matched_tokens {
-        if let Some(postings) = index.index.get(token.as_str()) {
+    for &token in matched_tokens {
+        if let Some(postings) = index.index.get(token) {
             let doc_freq = postings.len() as f64;
             let tfidf_idf = (total_docs / doc_freq).ln();
             let mut token_recorded = false;
@@ -3780,7 +3779,7 @@ fn score_token_postings(
 
                 term_files_passed += 1;
                 if !token_recorded {
-                    tokens_with_hits.insert(token.clone());
+                    tokens_with_hits.insert(token.to_string());
                     token_recorded = true;
                 }
 
@@ -3816,9 +3815,9 @@ fn score_token_postings(
                 entry.lines.extend_from_slice(&posting.lines);
                 if entry.per_term_occurrences.len() <= term_idx {
                     entry.per_term_occurrences.resize(term_idx + 1, 0);
+                    entry.terms_matched += 1;
                 }
                 entry.per_term_occurrences[term_idx] += occurrences;
-                file_matched_terms.entry(posting.file_id).or_default().insert(term_idx);
             }
         }
     }
@@ -4057,7 +4056,6 @@ fn handle_substring_search(
     let mut tokens_with_hits: HashSet<String> = HashSet::new();
     let mut file_scores: HashMap<u32, FileScoreEntry> = HashMap::new();
     let term_count = raw_terms.len();
-    let mut file_matched_terms: HashMap<u32, HashSet<usize>> = HashMap::new();
     let mut diag = SubstringSearchDiag::default();
 
     for (term_idx, term) in raw_terms.iter().enumerate() {
@@ -4065,15 +4063,15 @@ fn handle_substring_search(
         // When trigram is stale (rebuild skipped for narrow scope), fall back
         // to brute-force token matching to avoid false negatives from missing
         // trigram entries for newly-added tokens.
-        let matched_tokens: Vec<String> = if params.trigram_stale {
+        let matched_tokens: Vec<&str> = if params.trigram_stale {
             index.index.keys()
                 .filter(|k| k.contains(term.as_str()))
-                .cloned()
+                .map(String::as_str)
                 .collect()
         } else {
             let matched_token_indices = find_matching_tokens_for_term(term, trigram_idx);
             matched_token_indices.iter()
-                .filter_map(|&idx| trigram_idx.tokens.get(idx as usize).cloned())
+                .filter_map(|&idx| trigram_idx.tokens.get(idx as usize).map(String::as_str))
                 .collect()
         };
         diag.index_search_ms += index_search_start
@@ -4082,7 +4080,7 @@ fn handle_substring_search(
         let scoring_start = ctx.metrics.then(Instant::now);
         diag.posting_entries_checked += score_token_postings(
             &matched_tokens, term_idx, index, scope, total_docs,
-            &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
+            &mut tokens_with_hits, &mut file_scores,
         );
         diag.scoring_ms += scoring_start
             .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
@@ -4094,13 +4092,6 @@ fn handle_substring_search(
     diag.unique_matched_files = file_scores.len();
 
     let ranking_start = ctx.metrics.then(Instant::now);
-    // Set terms_matched from the distinct matched term indices
-    for (file_id, entry) in &mut file_scores {
-        if let Some(matched) = file_matched_terms.get(file_id) {
-            entry.terms_matched = matched.len();
-        }
-    }
-
     let (mut results, total_files, total_occurrences) =
         finalize_grep_results(file_scores, params.mode_and, term_count);
 
