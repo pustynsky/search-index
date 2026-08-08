@@ -12,13 +12,14 @@ use tracing::{debug, info, warn};
 use crate::mcp::protocol::ToolCallResult;
 use crate::{read_file_lossy, tokenize, ContentIndex};
 use crate::index::build_trigram_index_from_tokens;
-use code_xray::{generate_trigrams, normalize_identifier_for_file_stem, score_token_tf_idf};
+use code_xray::{normalize_identifier_for_file_stem, score_token_tf_idf};
 
 #[allow(unused_imports)] // `self` needed by test submodules for utils::ExcludePatterns
 use super::utils::{self,
     build_line_content_from_matches, inject_branch_warning, is_under_dir, json_to_string,
-    matches_ext_filter, partition_verified_lines, read_enum_string_with_default, sorted_intersect,
-    stale_lines_warning, stale_phrase_warning, validate_search_dir,
+    intersect_trigram_postings, matches_ext_filter, partition_verified_lines,
+    read_enum_string_with_default, stale_lines_warning, stale_phrase_warning,
+    validate_search_dir,
 };
 use super::file_scope::ResolvedFileScope;
 use super::token_regex::{
@@ -3704,7 +3705,7 @@ fn find_matching_tokens_for_term(
     term: &str,
     trigram_idx: &crate::TrigramIndex,
 ) -> Vec<u32> {
-    if term.len() < 3 {
+    if term.chars().count() < 3 {
         // Linear scan for very short terms (no trigrams possible)
         return trigram_idx.tokens.iter().enumerate()
             .filter(|(_, tok)| tok.contains(term))
@@ -3712,25 +3713,9 @@ fn find_matching_tokens_for_term(
             .collect();
     }
 
-    let trigrams = generate_trigrams(term);
-    if trigrams.is_empty() {
+    let Some(candidate_indices) = intersect_trigram_postings(term, trigram_idx) else {
         return Vec::new();
-    }
-
-    // Intersect trigram posting lists to find candidate token indices
-    let mut candidates: Option<Vec<u32>> = None;
-    for tri in &trigrams {
-        if let Some(posting_list) = trigram_idx.trigram_map.get(tri) {
-            candidates = Some(match candidates {
-                None => posting_list.clone(),
-                Some(prev) => sorted_intersect(&prev, posting_list),
-            });
-        } else {
-            return Vec::new(); // Trigram not found → no candidates
-        }
-    }
-
-    let candidate_indices = candidates.unwrap_or_default();
+    };
 
     // Verify candidates actually contain the term (.contains() check)
     let verify_start = Instant::now();
@@ -3768,6 +3753,7 @@ fn score_token_postings(
         if let Some(postings) = index.index.get(token.as_str()) {
             let doc_freq = postings.len() as f64;
             let tfidf_idf = (total_docs / doc_freq).ln();
+            let mut token_recorded = false;
 
             for posting in postings {
                 term_postings_checked += 1;
@@ -3780,7 +3766,10 @@ fn score_token_postings(
                 };
 
                 term_files_passed += 1;
-                tokens_with_hits.insert(token.clone());
+                if !token_recorded {
+                    tokens_with_hits.insert(token.clone());
+                    token_recorded = true;
+                }
 
                 let occurrences = posting.lines.len();
                 let file_total = if (posting.file_id as usize) < index.file_token_counts.len() {
@@ -3953,6 +3942,10 @@ fn build_substring_response(
     ToolCallResult::success(json_to_string(&output))
 }
 
+fn has_short_substring_term(terms: &[String]) -> bool {
+    terms.iter().any(|term| term.chars().count() < 4)
+}
+
 /// Substring search using the trigram index.
 fn handle_substring_search(
     ctx: &HandlerContext,
@@ -3994,7 +3987,7 @@ fn handle_substring_search(
     }
 
     let mut warnings: Vec<String> = Vec::new();
-    if raw_terms.iter().any(|t| t.len() < 4) {
+    if has_short_substring_term(&raw_terms) {
         warnings.push("Short substring query (<4 chars) may return broad results".to_string());
     }
 

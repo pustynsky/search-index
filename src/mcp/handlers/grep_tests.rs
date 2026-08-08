@@ -1,5 +1,6 @@
 #![allow(clippy::field_reassign_with_default)] // tests prefer mutate-after-default for readability
 use super::*;
+use super::super::utils::ordered_trigram_posting_lists;
 use std::time::{Duration, Instant};
 
 /// Helper: create GrepSearchParams with given filters.
@@ -657,11 +658,80 @@ fn test_find_matching_tokens_short_term() {
 }
 
 #[test]
+fn test_find_matching_tokens_unicode_short_term() {
+    use crate::TrigramIndex;
+    let mut trigram_idx = TrigramIndex::default();
+    trigram_idx.tokens = vec!["中".to_string(), "中文".to_string(), "abc".to_string()];
+
+    let results = find_matching_tokens_for_term("中", &trigram_idx);
+
+    assert_eq!(results, vec![0, 1]);
+}
+
+#[test]
 fn test_find_matching_tokens_empty_trigrams() {
     use crate::TrigramIndex;
     let trigram_idx = TrigramIndex::default();
     let results = find_matching_tokens_for_term("hello", &trigram_idx);
     assert!(results.is_empty());
+}
+
+#[test]
+fn test_find_matching_tokens_missing_trigram_returns_empty() {
+    use crate::TrigramIndex;
+    let mut trigram_idx = TrigramIndex::default();
+    trigram_idx.tokens = vec!["catalog".to_string()];
+    trigram_idx.trigram_map.insert("cat".to_string(), vec![0]);
+
+    let results = find_matching_tokens_for_term("catalog", &trigram_idx);
+
+    assert!(results.is_empty());
+}
+
+#[test]
+fn test_short_substring_warning_uses_character_count() {
+    assert!(has_short_substring_term(&["中文测".to_string()]));
+    assert!(!has_short_substring_term(&["中文测试".to_string()]));
+}
+
+#[test]
+fn test_ordered_trigram_posting_lists_rejects_empty_trigram_set() {
+    let trigram_idx = crate::TrigramIndex::default();
+
+    assert!(ordered_trigram_posting_lists("中", &trigram_idx).is_none());
+}
+
+#[test]
+fn test_ordered_trigram_posting_lists_uses_most_selective_first() {
+    use crate::TrigramIndex;
+    let mut trigram_idx = TrigramIndex::default();
+    for (trigram, postings) in [
+        ("cat", vec![0, 1, 2, 3, 4]),
+        ("ata", vec![0, 1, 2, 3]),
+        ("tal", vec![0, 1, 2]),
+        ("alo", vec![0, 1]),
+        ("log", vec![0]),
+    ] {
+        trigram_idx.trigram_map.insert(trigram.to_string(), postings);
+    }
+
+    let posting_lists = ordered_trigram_posting_lists("catalog", &trigram_idx).unwrap();
+    let lengths: Vec<usize> = posting_lists.iter()
+        .map(|posting_list| posting_list.len())
+        .collect();
+
+    assert_eq!(lengths, vec![1, 2, 3, 4, 5]);
+}
+
+#[test]
+fn test_ordered_trigram_posting_lists_deduplicates_trigrams() {
+    use crate::TrigramIndex;
+    let mut trigram_idx = TrigramIndex::default();
+    trigram_idx.trigram_map.insert("aaa".to_string(), vec![0, 1]);
+
+    let posting_lists = ordered_trigram_posting_lists("aaaaa", &trigram_idx).unwrap();
+
+    assert_eq!(posting_lists.len(), 1);
 }
 
 // ─── build_grep_response tests ──────────────────────────────────

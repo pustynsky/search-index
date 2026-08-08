@@ -1,6 +1,10 @@
 # Changelog
 
 
+## 0.6.1 (Unreleased)
+
+- **Accelerated substring searches with selective trigram intersections.** Grep, CLI expansion, and caller discovery now intersect rare trigrams first, deduplicate repeated trigrams, and stop as soon as no candidates remain. Grep and CLI expansion now handle short Unicode terms by character count, including the `xray_grep` broad-result warning.
+
 ## 0.6.0 (2026-08-03)
 
 - **Documented installer launch from Command Prompt.** README and the installation guide now provide tested bare and parameterized `cmd.exe` launch commands, including safe quoting for repository paths containing spaces.

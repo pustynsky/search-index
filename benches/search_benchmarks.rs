@@ -449,6 +449,66 @@ fn build_trigram_for_bench(inverted: &HashMap<String, Vec<Posting>>) -> TrigramI
     TrigramIndex { tokens, trigram_map }
 }
 
+fn add_skewed_substring_tokens(index: &mut ContentIndex, decoy_count: usize) {
+    let file_count = index.files.len().max(1);
+    for i in 0..decoy_count {
+        index.index.insert(
+            format!("commonprefix_variant_{i}"),
+            vec![Posting { file_id: (i % file_count) as u32, lines: vec![1] }],
+        );
+    }
+    index.index.insert(
+        "commonprefix_needle_target".to_string(),
+        vec![Posting { file_id: 0, lines: vec![1] }],
+    );
+}
+
+// Baseline mirrors the pre-optimization common-first intersection order.
+fn trigram_candidates_common_first_for_bench(query: &str, trigram: &TrigramIndex) -> Vec<u32> {
+    let query_trigrams = generate_trigrams(query);
+    let mut posting_lists = query_trigrams.iter()
+        .map(|trigram_key| trigram.trigram_map.get(trigram_key).map(Vec::as_slice));
+    let Some(first) = posting_lists.next().flatten() else {
+        return Vec::new();
+    };
+
+    let mut candidates = first.to_vec();
+    for posting_list in posting_lists {
+        let Some(posting_list) = posting_list else {
+            return Vec::new();
+        };
+        candidates = sorted_intersect(&candidates, posting_list);
+    }
+    candidates
+}
+
+// Mirrors handlers::utils::intersect_trigram_postings; keep its ordering and miss semantics aligned.
+fn trigram_candidates_for_bench(query: &str, trigram: &TrigramIndex) -> Vec<u32> {
+    let mut query_trigrams = generate_trigrams(query);
+    query_trigrams.sort_unstable();
+    query_trigrams.dedup();
+
+    let Some(mut posting_lists) = query_trigrams.iter()
+        .map(|trigram_key| trigram.trigram_map.get(trigram_key).map(Vec::as_slice))
+        .collect::<Option<Vec<_>>>() else {
+            return Vec::new();
+        };
+    posting_lists.sort_unstable_by_key(|posting_list| posting_list.len());
+
+    let mut posting_lists = posting_lists.into_iter();
+    let Some(first) = posting_lists.next() else {
+        return Vec::new();
+    };
+    let mut candidates = first.to_vec();
+    for posting_list in posting_lists {
+        candidates = sorted_intersect(&candidates, posting_list);
+        if candidates.is_empty() {
+            break;
+        }
+    }
+    candidates
+}
+
 /// Sorted intersection of two u32 slices (mirrors sorted_intersect in handlers.rs)
 fn sorted_intersect(a: &[u32], b: &[u32]) -> Vec<u32> {
     let mut result = Vec::new();
@@ -488,36 +548,23 @@ fn bench_substring_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("substring_search");
 
     for &num_files in BENCH_SIZES {
-        let index = build_synthetic_index(num_files, 200);
+        let mut index = build_synthetic_index(num_files, 200);
+        add_skewed_substring_tokens(&mut index, num_files);
         let trigram = build_trigram_for_bench(&index.index);
 
-        // Long query (10+ chars) — uses trigram intersection
         group.bench_with_input(
-            BenchmarkId::new("long_query_12chars", num_files),
+            BenchmarkId::new("legacy_common_first_long_query", num_files),
             &(&index, &trigram),
             |b, &(index, trigram)| {
                 b.iter(|| {
-                    let query = "rarehttpclie"; // 12 chars, partial match
-                    let query_lower = query.to_lowercase();
-                    let query_trigrams = generate_trigrams(&query_lower);
-
-                    let mut candidates: Option<Vec<u32>> = None;
-                    for tri in &query_trigrams {
-                        if let Some(list) = trigram.trigram_map.get(tri) {
-                            candidates = Some(match candidates {
-                                None => list.clone(),
-                                Some(prev) => sorted_intersect(&prev, list),
-                            });
-                        }
-                    }
-
-                    let verified: Vec<&str> = candidates.unwrap_or_default().iter()
+                    let query = "commonprefix_needle";
+                    let candidates = trigram_candidates_common_first_for_bench(query, trigram);
+                    let verified: Vec<&str> = candidates.iter()
                         .filter_map(|&idx| trigram.tokens.get(idx as usize))
-                        .filter(|t| t.contains(&query_lower))
-                        .map(|t| t.as_str())
+                        .filter(|token| token.contains(query))
+                        .map(|token| token.as_str())
                         .collect();
 
-                    // Look up in main index
                     for token in &verified {
                         black_box(index.index.get(*token));
                     }
@@ -526,16 +573,36 @@ fn bench_substring_search(c: &mut Criterion) {
             },
         );
 
-        // Short query (2 chars) — linear scan fallback
         group.bench_with_input(
-            BenchmarkId::new("short_query_2chars", num_files),
+            BenchmarkId::new("skewed_long_query", num_files),
+            &(&index, &trigram),
+            |b, &(index, trigram)| {
+                b.iter(|| {
+                    let query = "commonprefix_needle";
+                    let candidates = trigram_candidates_for_bench(query, trigram);
+                    let verified: Vec<&str> = candidates.iter()
+                        .filter_map(|&idx| trigram.tokens.get(idx as usize))
+                        .filter(|token| token.contains(query))
+                        .map(|token| token.as_str())
+                        .collect();
+
+                    for token in &verified {
+                        black_box(index.index.get(*token));
+                    }
+                    black_box(verified.len());
+                })
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("skewed_corpus_short_query_2chars", num_files),
             &(&index, &trigram),
             |b, &(_index, trigram)| {
                 b.iter(|| {
-                    let query = "cl"; // 2 chars — falls back to linear scan
+                    let query = "cl";
                     let matches: Vec<&str> = trigram.tokens.iter()
-                        .filter(|t| t.contains(query))
-                        .map(|t| t.as_str())
+                        .filter(|token| token.contains(query))
+                        .map(|token| token.as_str())
                         .collect();
                     black_box(matches.len());
                 })
@@ -549,52 +616,51 @@ fn bench_substring_search(c: &mut Criterion) {
 fn bench_substring_vs_regex(c: &mut Criterion) {
     let mut group = c.benchmark_group("substring_vs_regex");
 
-    let index = build_synthetic_index(10_000, 200);
+    let mut index = build_synthetic_index(10_000, 200);
+    add_skewed_substring_tokens(&mut index, 10_000);
     let trigram = build_trigram_for_bench(&index.index);
 
-    // Substring search via trigram
-    group.bench_function("trigram_substring", |b| {
+    group.bench_function("legacy_common_first_trigram_substring", |b| {
         b.iter(|| {
-            let query = "rarehttpclie";
-            let query_lower = query.to_lowercase();
-            let query_trigrams = generate_trigrams(&query_lower);
-
-            let mut candidates: Option<Vec<u32>> = None;
-            for tri in &query_trigrams {
-                if let Some(list) = trigram.trigram_map.get(tri) {
-                    candidates = Some(match candidates {
-                        None => list.clone(),
-                        Some(prev) => sorted_intersect(&prev, list),
-                    });
-                }
-            }
-
-            let verified: Vec<&str> = candidates.unwrap_or_default().iter()
+            let query = "commonprefix_needle";
+            let candidates = trigram_candidates_common_first_for_bench(query, &trigram);
+            let verified: Vec<&str> = candidates.iter()
                 .filter_map(|&idx| trigram.tokens.get(idx as usize))
-                .filter(|t| t.contains(&query_lower))
-                .map(|t| t.as_str())
+                .filter(|token| token.contains(query))
+                .map(|token| token.as_str())
                 .collect();
             black_box(verified.len());
         })
     });
 
-    // Equivalent regex scan of all keys
-    group.bench_function("regex_scan_all_keys", |b| {
-        let re = regex::Regex::new("(?i).*rarehttpclie.*").unwrap();
+    group.bench_function("skewed_trigram_substring", |b| {
+        b.iter(|| {
+            let query = "commonprefix_needle";
+            let candidates = trigram_candidates_for_bench(query, &trigram);
+            let verified: Vec<&str> = candidates.iter()
+                .filter_map(|&idx| trigram.tokens.get(idx as usize))
+                .filter(|token| token.contains(query))
+                .map(|token| token.as_str())
+                .collect();
+            black_box(verified.len());
+        })
+    });
+
+    group.bench_function("skewed_regex_scan_all_keys", |b| {
+        let re = regex::Regex::new("(?i).*commonprefix_needle.*").unwrap();
         b.iter(|| {
             let matches: Vec<&String> = index.index.keys()
-                .filter(|k| re.is_match(k))
+                .filter(|token| re.is_match(token))
                 .collect();
             black_box(matches.len());
         })
     });
 
-    // Linear contains() scan of all keys
-    group.bench_function("linear_contains_scan", |b| {
+    group.bench_function("skewed_linear_contains_scan", |b| {
         b.iter(|| {
-            let query = "rarehttpclie";
+            let query = "commonprefix_needle";
             let matches: Vec<&String> = index.index.keys()
-                .filter(|k| k.contains(query))
+                .filter(|token| token.contains(query))
                 .collect();
             black_box(matches.len());
         })
@@ -768,24 +834,8 @@ fn bench_top_authors_aggregation(c: &mut Criterion) {
 }
 
 fn bench_resolve_parent_substring(c: &mut Criterion) {
-    // Mirrors the *memoisation shape* of callers' `resolve_parent_file_ids`:
-    // PERF-07 caches a per-(parent_class) result so a tree-build with N
-    // nodes pays the resolve cost once per distinct class instead of once
-    // per node. The bench compares naive (per-node) vs memoised paths and
-    // demonstrates the speed-up.
-    //
-    // **NOT representative of production substring lookup cost.** The
-    // inner substring scan here is a linear `index.keys()` walk
-    // (`for k in idx2.index.keys() { if k.contains(cls) }`) — production's
-    // `collect_substring_file_ids` (see `src/mcp/handlers/callers.rs`,
-    // ~lines 1483/1495/1508) uses **trigram intersection** against
-    // `content_index.trigrams` and only falls back to a linear scan for
-    // queries shorter than the trigram threshold (3 chars). Numbers from
-    // this bench therefore upper-bound the per-resolve cost; they do not
-    // reflect the real index-lookup latency. **TODO (follow-up)**: replace
-    // the linear key scan with a trigram-intersection helper that mirrors
-    // `collect_substring_file_ids`, and add a separate naive-vs-trigram
-    // bench so the memoisation comparison stays clean.
+    // Isolates parent-class memoisation with a linear scan; production uses trigrams.
+    // Keep trigram-order comparisons in `bench_substring_search`.
     let mut group = c.benchmark_group("callers_resolve_substring_memo_shape");
 
     // Build a synthetic content index where ~5% of files contain a token
