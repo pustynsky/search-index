@@ -381,6 +381,36 @@ fn test_find_phrase_candidates_all_tokens_found() {
 }
 
 #[test]
+fn test_find_phrase_candidates_requires_tokens_on_same_line() {
+    let index = make_test_index(
+        vec!["src/a.cs"],
+        vec![
+            ("new", vec![Posting { file_id: 0, lines: vec![1] }]),
+            ("httpclient", vec![Posting { file_id: 0, lines: vec![2] }]),
+        ],
+        vec![10],
+    );
+    let tokens = vec!["new".to_string(), "httpclient".to_string()];
+    let result = find_phrase_candidates(&index, &tokens, &None, &[], &[]);
+    assert!(result.is_empty());
+}
+
+#[test]
+fn test_find_phrase_candidates_includes_token_prefix_matches() {
+    let index = make_test_index(
+        vec!["src/a.cs"],
+        vec![
+            ("public", vec![Posting { file_id: 0, lines: vec![1] }]),
+            ("classbuilder", vec![Posting { file_id: 0, lines: vec![1] }]),
+        ],
+        vec![10],
+    );
+    let tokens = vec!["public".to_string(), "class".to_string()];
+    let result = find_phrase_candidates(&index, &tokens, &None, &[], &[]);
+    assert!(result.contains(&0));
+}
+
+#[test]
 fn test_find_phrase_candidates_token_missing() {
     let index = make_test_index(
         vec!["src/a.cs"],

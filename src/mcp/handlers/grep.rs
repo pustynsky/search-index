@@ -11,6 +11,9 @@ use tracing::{debug, info, warn};
 
 use crate::mcp::protocol::ToolCallResult;
 use crate::{read_file_lossy, tokenize, ContentIndex};
+use crate::phrase_search::collect_phrase_line_candidates;
+#[cfg(test)]
+use crate::phrase_search::intersect_sorted_unique;
 use crate::index::build_trigram_index_from_tokens;
 use code_xray::{normalize_identifier_for_file_stem, score_token_tf_idf};
 
@@ -4482,110 +4485,16 @@ fn collect_phrase_matches(
         ));
     }
 
-    // PERF (tier-B): use per-token line lists from the inverted index to
-    // intersect at the LINE level, not just the file level. The existing
-    // `Posting { file_id, lines: Vec<u32> }` already records which lines a
-    // token appears on inside each file; the previous implementation threw
-    // that information away (only kept `file_id`) and re-scanned every
-    // candidate file's bytes through a regex. The new flow:
-    //   1. For each phrase token, collect (file_id -> sorted-unique line set)
-    //      from its postings, applying file filters once per posting.
-    //   2. Intersect file ids AND line numbers across all tokens. A file
-    //      where token A appears only on line 5 and token B appears only on
-    //      line 12 is dropped without ever opening the file -- the phrase
-    //      cannot fit on a single line in that file.
-    //   3. Read only the surviving candidate files and verify the phrase
-    //      regex/substring on the small set of candidate lines.
-    // For phrases like "foo bar" on a large repo the candidate
-    // file count typically drops from hundreds to ~the result count itself,
-    // eliminating most of the disk I/O that dominated phrase search runtime.
-    // Backward compatible: no index format change.
+    let candidate_scan = collect_phrase_line_candidates(index, &phrase_tokens, |file_id| {
+        scope.contains(file_id) && index.files.get(file_id as usize).is_some()
+    });
     diag.token_count = phrase_tokens.len();
-    let posting_scan_start = Instant::now();
-    let mut per_token_file_lines: Vec<HashMap<u32, Vec<u32>>> =
-        Vec::with_capacity(phrase_tokens.len());
-    for token in &phrase_tokens {
-        let token_start = Instant::now();
-        let postings = match index.index.get(token.as_str()) {
-            Some(p) => p,
-            None => {
-                diag.missing_tokens.push(token.clone());
-                diag.per_token.push((
-                    token.clone(),
-                    0,
-                    0,
-                    token_start.elapsed().as_secs_f64() * 1000.0,
-                ));
-                diag.posting_scan_ms = posting_scan_start.elapsed().as_secs_f64() * 1000.0;
-                return Ok((Vec::new(), diag));
-            }
-        };
-        let posting_count = postings.len();
-        let mut pass_count = 0usize;
-        let mut map: HashMap<u32, Vec<u32>> = HashMap::with_capacity(postings.len());
-        for p in postings {
-            if !scope.contains(p.file_id) {
-                continue;
-            }
-            if index.files.get(p.file_id as usize).is_none() {
-                continue;
-            }
-            // Postings record a line number once per occurrence; dedup so
-            // intersection works on sets, not multisets.
-            let mut lines = p.lines.clone();
-            lines.sort_unstable();
-            lines.dedup();
-            map.insert(p.file_id, lines);
-            pass_count += 1;
-        }
-        diag.per_token.push((token.clone(), posting_count, pass_count,
-            token_start.elapsed().as_secs_f64() * 1000.0));
-        if map.is_empty() {
-            diag.posting_scan_ms = posting_scan_start.elapsed().as_secs_f64() * 1000.0;
-            return Ok((Vec::new(), diag));
-        }
-        per_token_file_lines.push(map);
-    }
-    diag.posting_scan_ms = posting_scan_start.elapsed().as_secs_f64() * 1000.0;
-
-    // Start the intersection from the smallest per-token map -- minimises
-    // outer-loop iterations and the size of `current_lines` we carry forward.
-    let smallest_idx = per_token_file_lines
-        .iter()
-        .enumerate()
-        .min_by_key(|(_, m)| m.len())
-        .map(|(i, _)| i)
-        .unwrap_or(0);
-    let smallest = per_token_file_lines.swap_remove(smallest_idx);
-    let other_maps: &[HashMap<u32, Vec<u32>>] = &per_token_file_lines;
-    let intersection_start = Instant::now();
-
-    let mut candidates: Vec<(u32, Vec<u32>)> = Vec::new();
-    for (file_id, mut current_lines) in smallest {
-        let mut keep = true;
-        for other in other_maps {
-            match other.get(&file_id) {
-                None => {
-                    keep = false;
-                    break;
-                }
-                Some(other_lines) => {
-                    current_lines = intersect_sorted_unique(&current_lines, other_lines);
-                    if current_lines.is_empty() {
-                        keep = false;
-                        break;
-                    }
-                }
-            }
-        }
-        if keep && !current_lines.is_empty() {
-            candidates.push((file_id, current_lines));
-        }
-    }
-
-    // Index tokens select candidates; raw content decides phrase semantics.
-    diag.intersection_ms = intersection_start.elapsed().as_secs_f64() * 1000.0;
-    diag.candidates_after_intersection = candidates.len();
+    diag.per_token = candidate_scan.per_token;
+    diag.missing_tokens = candidate_scan.missing_tokens;
+    diag.posting_scan_ms = candidate_scan.posting_scan_ms;
+    diag.intersection_ms = candidate_scan.intersection_ms;
+    diag.candidates_after_intersection = candidate_scan.candidates.len();
+    let candidates = candidate_scan.candidates;
 
     // PERF (tier-A): parallelize file I/O + per-file scan across the
     // surviving (post-line-intersection) candidates. Even after tier-B's
@@ -4739,26 +4648,6 @@ fn collect_phrase_matches(
     }
 
     Ok((results, diag))
-}
-
-/// Intersection of two sorted-unique `Vec<u32>` lists, in O(n + m).
-/// Both inputs MUST be sorted ascending and free of duplicates; the result
-/// preserves both invariants.
-fn intersect_sorted_unique(a: &[u32], b: &[u32]) -> Vec<u32> {
-    let mut out = Vec::with_capacity(a.len().min(b.len()));
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < a.len() && j < b.len() {
-        match a[i].cmp(&b[j]) {
-            std::cmp::Ordering::Equal => {
-                out.push(a[i]);
-                i += 1;
-                j += 1;
-            }
-            std::cmp::Ordering::Less => i += 1,
-            std::cmp::Ordering::Greater => j += 1,
-        }
-    }
-    out
 }
 
 /// Multi-phrase search: searches each phrase independently, merges with OR/AND semantics.
