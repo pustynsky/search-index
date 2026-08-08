@@ -9,6 +9,8 @@
 
 - **Added opt-in substring search stage metrics.** When the server starts with `--metrics`, `xray_grep` reports index lookup, scoring, ranking, preview, and response finalization timings plus matched-token, posting, and file counters.
 
+- **Reduced substring scoring allocations.** Grep now tracks matched terms directly in per-file scores and borrows matched token strings, avoiding redundant per-file sets and cloned token roundtrips.
+
 ## 0.6.0 (2026-08-03)
 
 - **Documented installer launch from Command Prompt.** README and the installation guide now provide tested bare and parameterized `cmd.exe` launch commands, including safe quoting for repository paths containing spaces.

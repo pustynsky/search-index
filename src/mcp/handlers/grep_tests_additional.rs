@@ -144,22 +144,26 @@ fn test_score_token_postings_basic() {
     index.index.insert("userservice".to_string(), vec![
         Posting { file_id: 0, lines: vec![10, 20] },
     ]);
+    index.index.insert("authservice".to_string(), vec![
+        Posting { file_id: 0, lines: vec![30] },
+    ]);
 
     let params = make_params_default();
     let mut tokens_with_hits = HashSet::new();
     let mut file_scores = HashMap::new();
-    let mut file_matched_terms = HashMap::new();
 
     score_token_postings(
-        &["userservice".to_string()], 0, &index,
+        &["userservice", "authservice"], 0, &index,
         &resolve_grep_file_scope(&index, &params), 1.0,
-        &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
+        &mut tokens_with_hits, &mut file_scores,
     );
 
     assert!(tokens_with_hits.contains("userservice"));
+    assert!(tokens_with_hits.contains("authservice"));
     assert_eq!(file_scores.len(), 1);
-    assert_eq!(file_scores[&0].occurrences, 2);
-    assert_eq!(file_matched_terms[&0].len(), 1);
+    assert_eq!(file_scores[&0].occurrences, 3);
+    assert_eq!(file_scores[&0].terms_matched, 1);
+    assert_eq!(file_scores[&0].per_term_occurrences, vec![3]);
 }
 
 #[test]
@@ -181,12 +185,11 @@ fn test_score_token_postings_filters_applied() {
 
     let mut tokens_with_hits = HashSet::new();
     let mut file_scores = HashMap::new();
-    let mut file_matched_terms = HashMap::new();
 
     score_token_postings(
-        &["token".to_string()], 0, &index,
+        &["token"], 0, &index,
         &resolve_grep_file_scope(&index, &params), 2.0,
-        &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
+        &mut tokens_with_hits, &mut file_scores,
     );
 
     // Only file1.cs should pass (ext filter = cs)
@@ -211,22 +214,20 @@ fn test_score_token_postings_multi_term_tracking() {
     let params = make_params_default();
     let mut tokens_with_hits = HashSet::new();
     let mut file_scores = HashMap::new();
-    let mut file_matched_terms = HashMap::new();
 
     score_token_postings(
-        &["term_a".to_string()], 0, &index,
+        &["term_a"], 0, &index,
         &resolve_grep_file_scope(&index, &params), 1.0,
-        &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
+        &mut tokens_with_hits, &mut file_scores,
     );
     score_token_postings(
-        &["term_b".to_string()], 1, &index,
+        &["term_b"], 1, &index,
         &resolve_grep_file_scope(&index, &params), 1.0,
-        &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
+        &mut tokens_with_hits, &mut file_scores,
     );
 
-    assert_eq!(file_matched_terms[&0].len(), 2);
-    assert!(file_matched_terms[&0].contains(&0));
-    assert!(file_matched_terms[&0].contains(&1));
+    assert_eq!(file_scores[&0].terms_matched, 2);
+    assert_eq!(file_scores[&0].per_term_occurrences, vec![1, 1]);
 }
 
 // ─── build_substring_response tests ─────────────────────────────
