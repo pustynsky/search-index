@@ -3,6 +3,8 @@
 
 ## 0.6.1 (Unreleased)
 
+- **Accelerated count-only substring aggregation.** Single-term, AND, and auto-balance-disabled requests now collect compact per-file totals without building ranked line results; auto-balanced multi-term OR keeps the existing path.
+
 - **Accelerated count-only substring searches.** Default metrics-off requests no longer clone or sort matched token names that count-only responses omit.
 
 - **Reduced broad substring response latency.** Matched tokens now avoid stable-sort overhead when producing broad search results.

@@ -129,6 +129,13 @@ fn make_common_token_ctx(file_count: usize) -> HandlerContext {
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1);
+
+    let count_result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["httpcli","grpchan"], "substring": true, "mode": "and", "countOnly": true
+    }));
+    let count_output: Value = serde_json::from_str(&count_result.content[0].text).unwrap();
+    assert_eq!(count_output["summary"]["totalFiles"], output["summary"]["totalFiles"]);
+    assert_eq!(count_output["summary"]["totalOccurrences"], output["summary"]["totalOccurrences"]);
 }
 
 #[test] fn test_substring_and_mode_no_false_positive_from_multi_token_match() {
@@ -172,18 +179,28 @@ fn make_common_token_ctx(file_count: usize) -> HandlerContext {
 }
 
 #[test] fn test_substring_search_count_only() {
-    let mut ctx = make_substring_ctx(vec![("httpclient", 0, vec![5, 12]), ("httphandler", 1, vec![3])], vec!["C:\\test\\Client.cs", "C:\\test\\Handler.cs"]);
+    let mut ctx = make_substring_ctx(vec![("httpclient", 0, vec![5, 12]), ("httpservice", 0, vec![20]), ("httphandler", 1, vec![3])], vec!["C:\\test\\Client.cs", "C:\\test\\Handler.cs"]);
+    let detailed_result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["http"], "substring": true}));
+    let detailed_output: Value = serde_json::from_str(&detailed_result.content[0].text).unwrap();
     let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["http"], "substring": true, "countOnly": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    assert_eq!(output["summary"]["totalFiles"], 2);
+    assert_eq!(output["summary"]["totalFiles"], detailed_output["summary"]["totalFiles"]);
+    assert_eq!(output["summary"]["totalOccurrences"], detailed_output["summary"]["totalOccurrences"]);
     assert!(output.get("files").is_none());
+
+    let scoped_result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["http"], "substring": true, "countOnly": true, "file": ["Client.cs"]
+    }));
+    let scoped_output: Value = serde_json::from_str(&scoped_result.content[0].text).unwrap();
+    assert_eq!(scoped_output["summary"]["totalFiles"], 1);
+    assert_eq!(scoped_output["summary"]["totalOccurrences"], 3);
 
     ctx.metrics = true;
     let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["http"], "substring": true, "countOnly": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    assert_eq!(output["summary"]["matchedTokenCount"], 2);
-    assert_eq!(output["summary"]["postingEntriesChecked"], 2);
+    assert_eq!(output["summary"]["matchedTokenCount"], 3);
+    assert_eq!(output["summary"]["postingEntriesChecked"], 3);
 }
 
 #[test]
@@ -2098,6 +2115,14 @@ fn test_xray_grep_duplicate_terms_do_not_change_auto_balance() {
     assert_eq!(unique_output["resultStatus"]["page"]["returned"], 21);
     assert_eq!(unique_output["files"].as_array().unwrap().len(), 21);
     assert_eq!(duplicate_output["files"], unique_output["files"]);
+    let count_result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["rareterm", "commonterm"],
+        "countOnly": true
+    }));
+    let count_output: Value = serde_json::from_str(&count_result.content[0].text).unwrap();
+    assert_eq!(count_output["summary"]["totalFiles"], 101);
+    assert_eq!(count_output["summary"]["autoBalance"], unique_output["summary"]["autoBalance"]);
+
     assert_eq!(
         duplicate_output["summary"]["autoBalance"],
         unique_output["summary"]["autoBalance"]
