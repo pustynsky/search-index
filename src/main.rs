@@ -22,6 +22,7 @@ mod error;
 mod git;
 mod index;
 mod mcp;
+mod phrase_search;
 mod tips;
 
 pub use error::SearchError;

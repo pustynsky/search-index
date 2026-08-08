@@ -517,6 +517,7 @@ fn load_grep_index(
 }
 
 /// Find file IDs that contain all phrase tokens via inverted index intersection.
+#[cfg(test)]
 fn find_phrase_candidates(
     index: &ContentIndex,
     phrase_tokens: &[String],
@@ -524,28 +525,15 @@ fn find_phrase_candidates(
     exclude_dir: &[String],
     exclude: &[String],
 ) -> std::collections::HashSet<u32> {
-    let mut candidate_file_ids: Option<std::collections::HashSet<u32>> = None;
-    for token in phrase_tokens {
-        if let Some(postings) = index.index.get(token.as_str()) {
-            let file_ids: std::collections::HashSet<u32> = postings.iter()
-                .filter(|p| {
-                    let path = match index.files.get(p.file_id as usize) {
-                        Some(p) => p,
-                        None => return false,
-                    };
-                    file_matches_filters(path, ext, exclude_dir, exclude)
-                })
-                .map(|p| p.file_id).collect();
-            candidate_file_ids = Some(match candidate_file_ids {
-                Some(existing) => existing.intersection(&file_ids).cloned().collect(),
-                None => file_ids,
-            });
-        } else {
-            candidate_file_ids = Some(std::collections::HashSet::new());
-            break;
-        }
-    }
-    candidate_file_ids.unwrap_or_default()
+    crate::phrase_search::collect_phrase_line_candidates(index, phrase_tokens, |file_id| {
+        index.files.get(file_id as usize).is_some_and(|path| {
+            file_matches_filters(path, ext, exclude_dir, exclude)
+        })
+    })
+    .candidates
+    .into_iter()
+    .map(|(file_id, _)| file_id)
+    .collect()
 }
 
 struct PhraseMatch { file_path: String, lines: Vec<u32> }
@@ -555,24 +543,28 @@ fn verify_phrase_matches(
     index: &ContentIndex,
     candidates: &std::collections::HashSet<u32>,
     phrase_re: &Regex,
-) -> Vec<PhraseMatch> {
+) -> (Vec<PhraseMatch>, usize) {
     let mut results: Vec<PhraseMatch> = Vec::new();
+    let mut files_read = 0;
     for &file_id in candidates {
         let file_path = match index.files.get(file_id as usize) {
             Some(p) => p,
             None => continue,
         };
-        if let Ok(content) = fs::read_to_string(file_path) && phrase_re.is_match(&content) {
-            let mut matching_lines = Vec::new();
-            for (line_num, line) in content.lines().enumerate() {
-                if phrase_re.is_match(line) { matching_lines.push((line_num + 1) as u32); }
-            }
-            if !matching_lines.is_empty() {
-                results.push(PhraseMatch { file_path: file_path.clone(), lines: matching_lines });
+        if let Ok(content) = fs::read_to_string(file_path) {
+            files_read += 1;
+            if phrase_re.is_match(&content) {
+                let mut matching_lines = Vec::new();
+                for (line_num, line) in content.lines().enumerate() {
+                    if phrase_re.is_match(line) { matching_lines.push((line_num + 1) as u32); }
+                }
+                if !matching_lines.is_empty() {
+                    results.push(PhraseMatch { file_path: file_path.clone(), lines: matching_lines });
+                }
             }
         }
     }
-    results
+    (results, files_read)
 }
 
 /// Handle the entire phrase search branch (early return path).
@@ -600,10 +592,31 @@ fn cmd_grep_phrase(
 
     eprintln!("Phrase search: '{}' -> tokens: {:?} -> regex: {}", phrase, phrase_tokens, phrase_regex_pattern);
 
-    let candidates = find_phrase_candidates(index, &phrase_tokens, &args.ext, &args.exclude_dir, &args.exclude);
+    let candidate_scan = crate::phrase_search::collect_phrase_line_candidates(
+        index,
+        &phrase_tokens,
+        |file_id| {
+            index.files.get(file_id as usize).is_some_and(|path| {
+                file_matches_filters(path, &args.ext, &args.exclude_dir, &args.exclude)
+            })
+        },
+    );
+    let candidates: std::collections::HashSet<u32> = candidate_scan.candidates
+        .iter()
+        .map(|(file_id, _)| *file_id)
+        .collect();
     eprintln!("Found {} candidate files containing all tokens", candidates.len());
 
-    let results = verify_phrase_matches(index, &candidates, &phrase_re);
+    let file_verify_start = Instant::now();
+    let (results, files_read) = verify_phrase_matches(index, &candidates, &phrase_re);
+    let file_verify_ms = file_verify_start.elapsed().as_secs_f64() * 1000.0;
+    eprintln!(
+        "Phrase detail: postingScanMs={:.3} intersectionMs={:.3} filesRead={} fileVerifyMs={:.3}",
+        candidate_scan.posting_scan_ms,
+        candidate_scan.intersection_ms,
+        files_read,
+        file_verify_ms,
+    );
 
     let search_elapsed = search_start.elapsed();
     let total_elapsed = load_elapsed + search_elapsed;
