@@ -764,6 +764,40 @@ pub(crate) fn sorted_intersect(a: &[u32], b: &[u32]) -> Vec<u32> {
     result
 }
 
+pub(crate) fn ordered_trigram_posting_lists<'a>(
+    term: &str,
+    trigram_idx: &'a crate::TrigramIndex,
+) -> Option<Vec<&'a [u32]>> {
+    let mut trigrams = code_xray::generate_trigrams(term);
+    trigrams.sort_unstable();
+    trigrams.dedup();
+    if trigrams.is_empty() {
+        return None;
+    }
+
+    let mut posting_lists: Vec<&[u32]> = trigrams.iter()
+        .map(|trigram| trigram_idx.trigram_map.get(trigram).map(Vec::as_slice))
+        .collect::<Option<_>>()?;
+    posting_lists.sort_unstable_by_key(|posting_list| posting_list.len());
+    Some(posting_lists)
+}
+
+/// Returns `None` when the term has no trigrams or any trigram has no posting list.
+pub(crate) fn intersect_trigram_postings(
+    term: &str,
+    trigram_idx: &crate::TrigramIndex,
+) -> Option<Vec<u32>> {
+    let mut posting_lists = ordered_trigram_posting_lists(term, trigram_idx)?.into_iter();
+    let mut candidates = posting_lists.next()?.to_vec();
+    for posting_list in posting_lists {
+        candidates = sorted_intersect(&candidates, posting_list);
+        if candidates.is_empty() {
+            break;
+        }
+    }
+    Some(candidates)
+}
+
 // ─── Line content helpers ───────────────────────────────────────────
 
 /// Build compact grouped lineContent for xray_grep from raw file content.

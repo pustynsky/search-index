@@ -15,12 +15,11 @@ use crate::definitions::{
     CSharpCallableRecord, CSharpRefKind, CSharpTypeEvidence, DefinitionEntry,
     AngularTemplateSource, DefinitionIndex, DefinitionKind, StaticValue,
 };
-use code_xray::generate_trigrams;
 
 use super::HandlerContext;
 use super::advisory_hints::{interface_vias_caveat, interfaces_declaring_method, low_count_caveat};
 #[allow(unused_imports)] // `self` needed by test submodules for utils::ExcludePatterns
-use super::utils::{self, add_collection_accounting, attach_result_status, build_result_status, count_tree_nodes, inject_body_into_obj, inject_branch_warning, inject_index_degraded, json_to_string, name_similarity, read_enum_string_with_default, read_string, sorted_intersect};
+use super::utils::{self, add_collection_accounting, attach_result_status, build_result_status, count_tree_nodes, inject_body_into_obj, inject_branch_warning, inject_index_degraded, intersect_trigram_postings, json_to_string, name_similarity, read_enum_string_with_default, read_string};
 
 /// Closed enum of accepted `direction` values for `xray_callers`.
 ///
@@ -3306,43 +3305,23 @@ fn collect_substring_file_ids(
     content_index: &ContentIndex,
     file_ids: &mut HashSet<u32>,
 ) {
-    if term.len() < 3 {
-        return; // trigrams require at least 3 chars
-    }
     let trigram_idx = &content_index.trigram;
     if trigram_idx.tokens.is_empty() {
         return; // trigram index not built yet
     }
 
-    let trigrams = generate_trigrams(term);
-    if trigrams.is_empty() {
+    let Some(candidate_indices) = intersect_trigram_postings(term, trigram_idx) else {
         return;
-    }
-
-    // Intersect trigram posting lists to find candidate token indices
-    let mut candidates: Option<Vec<u32>> = None;
-    for tri in &trigrams {
-        if let Some(posting_list) = trigram_idx.trigram_map.get(tri) {
-            candidates = Some(match candidates {
-                None => posting_list.clone(),
-                Some(prev) => sorted_intersect(&prev, posting_list),
-            });
-        } else {
-            // Trigram not found → no tokens can contain this term
-            return;
-        }
-    }
+    };
 
     // Verify candidates actually contain the term, then collect their file_ids
-    if let Some(candidate_indices) = candidates {
-        for &ti in &candidate_indices {
-            if let Some(tok) = trigram_idx.tokens.get(ti as usize) {
-                // Only match tokens strictly LONGER than the term (substring, not exact)
-                if tok.len() > term.len() && tok.contains(term)
-                    && let Some(postings) = content_index.index.get(tok) {
-                        file_ids.extend(postings.iter().map(|p| p.file_id));
-                    }
-            }
+    for &ti in &candidate_indices {
+        if let Some(tok) = trigram_idx.tokens.get(ti as usize) {
+            // Only match tokens strictly LONGER than the term (substring, not exact)
+            if tok.len() > term.len() && tok.contains(term)
+                && let Some(postings) = content_index.index.get(tok) {
+                    file_ids.extend(postings.iter().map(|p| p.file_id));
+                }
         }
     }
 }

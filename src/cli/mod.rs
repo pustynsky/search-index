@@ -639,35 +639,20 @@ fn expand_substring_terms(
 ) -> Vec<String> {
     let mut expanded = Vec::new();
     for term in raw_terms {
-        let matched_tokens: Vec<String> = if term.len() < 3 {
+        let matched_tokens: Vec<String> = if term.chars().count() < 3 {
             // Linear scan for very short terms (no trigrams possible)
             trigram_idx.tokens.iter()
                 .filter(|tok| tok.contains(term.as_str()))
                 .cloned()
                 .collect()
         } else {
-            let trigrams = code_xray::generate_trigrams(term);
-            if trigrams.is_empty() {
-                Vec::new()
-            } else {
-                let mut candidates: Option<Vec<u32>> = None;
-                for tri in &trigrams {
-                    if let Some(posting_list) = trigram_idx.trigram_map.get(tri) {
-                        candidates = Some(match candidates {
-                            None => posting_list.clone(),
-                            Some(prev) => crate::mcp::handlers::utils::sorted_intersect(&prev, posting_list),
-                        });
-                    } else {
-                        candidates = Some(Vec::new());
-                        break;
-                    }
-                }
-                candidates.unwrap_or_default().into_iter()
-                    .filter_map(|idx| trigram_idx.tokens.get(idx as usize))
-                    .filter(|tok| tok.contains(term.as_str()))
-                    .cloned()
-                    .collect()
-            }
+            crate::mcp::handlers::utils::intersect_trigram_postings(term, trigram_idx)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|idx| trigram_idx.tokens.get(idx as usize))
+                .filter(|tok| tok.contains(term.as_str()))
+                .cloned()
+                .collect()
         };
         if matched_tokens.is_empty() {
             eprintln!("Warning: substring '{}' matched 0 tokens", term);

@@ -280,6 +280,16 @@ fn test_expand_substring_terms_short_term_linear_scan() {
     assert_eq!(result, vec!["ax"]);
 }
 
+#[test]
+fn test_expand_substring_terms_unicode_short_term_linear_scan() {
+    let tokens = vec!["中".to_string(), "中文".to_string(), "abc".to_string()];
+    let trigram_idx = TrigramIndex { tokens, trigram_map: HashMap::new() };
+
+    let result = expand_substring_terms(&["中".to_string()], &trigram_idx);
+
+    assert_eq!(result, vec!["中", "中文"]);
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  expand_grep_terms() tests — routing logic
 // ═══════════════════════════════════════════════════════════════════
