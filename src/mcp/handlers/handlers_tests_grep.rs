@@ -2123,6 +2123,22 @@ fn test_xray_grep_duplicate_terms_do_not_change_auto_balance() {
     assert_eq!(count_output["summary"]["totalFiles"], 101);
     assert_eq!(count_output["summary"]["autoBalance"], unique_output["summary"]["autoBalance"]);
 
+    let custom_detailed = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["rareterm", "commonterm"],
+        "maxOccurrencesPerTerm": 7,
+        "maxResults": 0
+    }));
+    let custom_count = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["rareterm", "commonterm"],
+        "maxOccurrencesPerTerm": 7,
+        "countOnly": true
+    }));
+    let custom_detailed_output: Value = serde_json::from_str(&custom_detailed.content[0].text).unwrap();
+    let custom_count_output: Value = serde_json::from_str(&custom_count.content[0].text).unwrap();
+    assert_eq!(custom_count_output["summary"]["autoBalance"], custom_detailed_output["summary"]["autoBalance"]);
+    assert_eq!(custom_count_output["summary"]["autoBalance"]["cap"], 7);
+    assert_eq!(custom_count_output["summary"]["autoBalance"]["droppedFiles"], 93);
+
     assert_eq!(
         duplicate_output["summary"]["autoBalance"],
         unique_output["summary"]["autoBalance"]
