@@ -7,6 +7,8 @@
 
 - **Reduced CLI phrase-search file reads with a shared line-level candidate core.** CLI and MCP phrase search now intersect token postings by file and line before verification, while CLI diagnostics report posting scan, intersection, files read, and file verification timings.
 
+- **Added opt-in substring search stage metrics.** When the server starts with `--metrics`, `xray_grep` reports index lookup, scoring, ranking, preview, and response finalization timings plus matched-token, posting, and file counters.
+
 ## 0.6.0 (2026-08-03)
 
 - **Documented installer launch from Command Prompt.** README and the installation guide now provide tested bare and parameterized `cmd.exe` launch commands, including safe quoting for repository paths containing spaces.
