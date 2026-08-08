@@ -3,6 +3,8 @@
 
 ## 0.6.1 (Unreleased)
 
+- **Reduced broad substring response latency.** Matched tokens now avoid stable-sort overhead when producing broad search results.
+
 - **Accelerated substring searches with selective trigram intersections.** Grep, CLI expansion, and caller discovery now intersect rare trigrams first, deduplicate repeated trigrams, and stop as soon as no candidates remain. Grep and CLI expansion now handle short Unicode terms by character count, including the `xray_grep` broad-result warning.
 
 - **Reduced CLI phrase-search file reads with a shared line-level candidate core.** CLI and MCP phrase search now intersect token postings by file and line before verification, while CLI diagnostics report posting scan, intersection, files read, and file verification timings.

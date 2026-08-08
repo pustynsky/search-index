@@ -4087,7 +4087,7 @@ fn handle_substring_search(
     }
 
     let mut all_matched_tokens: Vec<String> = tokens_with_hits.into_iter().collect();
-    all_matched_tokens.sort();
+    all_matched_tokens.sort_unstable();
     diag.matched_token_count = all_matched_tokens.len();
     diag.unique_matched_files = file_scores.len();
 
