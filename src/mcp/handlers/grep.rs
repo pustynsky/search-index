@@ -268,6 +268,71 @@ pub(crate) struct AutoBalanceInfo {
     pub dropped_files: usize,
 }
 
+struct AutoBalancePlan {
+    dominant_idx: usize,
+    dominant_term: String,
+    dominant_occurrences: usize,
+    second_max_occurrences: usize,
+    min_nonzero_occurrences: usize,
+    cap: usize,
+}
+
+impl AutoBalancePlan {
+    fn into_info(self, dropped_files: usize) -> AutoBalanceInfo {
+        AutoBalanceInfo {
+            dominant_term: self.dominant_term,
+            dominant_occurrences: self.dominant_occurrences,
+            second_max_occurrences: self.second_max_occurrences,
+            min_nonzero_occurrences: self.min_nonzero_occurrences,
+            ratio: self.dominant_occurrences as f64
+                / self.min_nonzero_occurrences.max(1) as f64,
+            cap: self.cap,
+            dropped_files,
+        }
+    }
+}
+
+fn plan_auto_balance(
+    per_term_occurrences: &[usize],
+    raw_terms: &[String],
+    user_cap: Option<usize>,
+) -> Option<AutoBalancePlan> {
+    let nonzero: Vec<usize> = per_term_occurrences
+        .iter()
+        .copied()
+        .filter(|&occurrences| occurrences > 0)
+        .collect();
+    if nonzero.len() < 2 {
+        return None;
+    }
+
+    let dominant_occurrences = *nonzero.iter().max()?;
+    let min_nonzero_occurrences = *nonzero.iter().min()?;
+    if dominant_occurrences < min_nonzero_occurrences.saturating_mul(10) {
+        return None;
+    }
+
+    let dominant_idx = per_term_occurrences
+        .iter()
+        .enumerate()
+        .max_by_key(|&(_, &occurrences)| occurrences)
+        .map(|(idx, _)| idx)?;
+    let mut sorted = per_term_occurrences.to_vec();
+    sorted.sort_unstable();
+    let second_max_occurrences = sorted.iter().rev().nth(1).copied().unwrap_or(0);
+    let cap = user_cap
+        .unwrap_or_else(|| second_max_occurrences.saturating_mul(2).clamp(20, 100));
+
+    Some(AutoBalancePlan {
+        dominant_idx,
+        dominant_term: raw_terms.get(dominant_idx).cloned().unwrap_or_default(),
+        dominant_occurrences,
+        second_max_occurrences,
+        min_nonzero_occurrences,
+        cap,
+    })
+}
+
 /// Trim dominant-only files when ONE term contributes >10x more occurrences
 /// than the rarest matched term. Without this, mixed queries like
 /// `terms="TODO, clearTimeout, localStorage"` are dominated by `localStorage`
@@ -404,29 +469,9 @@ pub(crate) fn apply_auto_balance(
         }
     }
 
-    let nonzero: Vec<usize> = per_term_occ.iter().copied().filter(|&v| v > 0).collect();
-    if nonzero.len() < 2 {
-        return None;
-    }
-    let max_occ = *nonzero.iter().max().unwrap();
-    let min_occ = *nonzero.iter().min().unwrap();
-    if max_occ < min_occ.saturating_mul(10) {
-        return None;
-    }
-
-    let dominant_idx = per_term_occ
-        .iter()
-        .enumerate()
-        .max_by_key(|&(_, &v)| v)
-        .map(|(i, _)| i)?;
-    let mut sorted = per_term_occ.clone();
-    sorted.sort_unstable();
-    let second_max = sorted.iter().rev().nth(1).copied().unwrap_or(0);
-
-    let cap = user_cap.unwrap_or_else(|| {
-        let derived = second_max.saturating_mul(2);
-        derived.clamp(20, 100)
-    });
+    let plan = plan_auto_balance(&per_term_occ, raw_terms, user_cap)?;
+    let dominant_idx = plan.dominant_idx;
+    let cap = plan.cap;
 
     // Sort by tf_idf descending to keep the strongest dominant-only files.
     // Stable indices via enumerate so we can mirror the "keep" decision
@@ -480,15 +525,7 @@ pub(crate) fn apply_auto_balance(
         k
     });
 
-    Some(AutoBalanceInfo {
-        dominant_term: raw_terms.get(dominant_idx).cloned().unwrap_or_default(),
-        dominant_occurrences: max_occ,
-        second_max_occurrences: second_max,
-        min_nonzero_occurrences: min_occ,
-        ratio: max_occ as f64 / min_occ.max(1) as f64,
-        cap,
-        dropped_files: dropped,
-    })
+    Some(plan.into_info(dropped))
 }
 
 /// Render an [`AutoBalanceInfo`] into the response summary so the caller can
@@ -3750,6 +3787,11 @@ struct CountOnlyFileEntry {
     last_term_idx: Option<usize>,
 }
 
+struct CountOnlyCounts<'a> {
+    files: &'a mut HashMap<u32, CountOnlyFileEntry>,
+    per_term_occurrences: &'a mut [usize],
+}
+
 // Keep filtering and token-recording semantics aligned with `score_token_postings`.
 fn aggregate_count_only_postings(
     matched_tokens: &[&str],
@@ -3758,7 +3800,7 @@ fn aggregate_count_only_postings(
     scope: &ResolvedFileScope,
     record_matched_tokens: bool,
     tokens_with_hits: &mut HashSet<String>,
-    file_counts: &mut HashMap<u32, CountOnlyFileEntry>,
+    counts: CountOnlyCounts<'_>,
 ) -> usize {
     let mut postings_checked = 0usize;
 
@@ -3777,8 +3819,14 @@ fn aggregate_count_only_postings(
                     token_recorded = true;
                 }
 
-                let entry = file_counts.entry(posting.file_id).or_default();
-                entry.occurrences += posting.lines.len();
+                let occurrences = posting.lines.len();
+                if let Some(term_occurrences) =
+                    counts.per_term_occurrences.get_mut(term_idx)
+                {
+                    *term_occurrences += occurrences;
+                }
+                let entry = counts.files.entry(posting.file_id).or_default();
+                entry.occurrences += occurrences;
                 if entry.last_term_idx != Some(term_idx) {
                     entry.terms_matched += 1;
                     entry.last_term_idx = Some(term_idx);
@@ -3789,6 +3837,28 @@ fn aggregate_count_only_postings(
 
     postings_checked
 }
+
+fn count_only_auto_balance(
+    file_counts: &HashMap<u32, CountOnlyFileEntry>,
+    per_term_occurrences: &[usize],
+    raw_terms: &[String],
+    user_cap: Option<usize>,
+) -> Option<AutoBalanceInfo> {
+    let plan = plan_auto_balance(per_term_occurrences, raw_terms, user_cap)?;
+    let dominant_only_files = file_counts
+        .values()
+        .filter(|entry| {
+            entry.terms_matched == 1 && entry.last_term_idx == Some(plan.dominant_idx)
+        })
+        .count();
+    let dropped = dominant_only_files.saturating_sub(plan.cap);
+    if dropped == 0 {
+        return None;
+    }
+
+    Some(plan.into_info(dropped))
+}
+
 
 /// Score matched tokens against the main inverted index for a single term.
 /// Applies file filters, computes TF-IDF, and accumulates into shared structures.
@@ -4105,8 +4175,8 @@ fn handle_substring_search(
     let mut file_scores: HashMap<u32, FileScoreEntry> = HashMap::new();
     let mut count_only_files: HashMap<u32, CountOnlyFileEntry> = HashMap::new();
     let term_count = raw_terms.len();
-    let lightweight_count_only = params.count_only
-        && (!params.auto_balance || params.mode_and || term_count < 2);
+    let mut count_only_term_occurrences = vec![0usize; term_count];
+    let lightweight_count_only = params.count_only;
     let mut diag = SubstringSearchDiag::default();
 
     for (term_idx, term) in raw_terms.iter().enumerate() {
@@ -4131,8 +4201,16 @@ fn handle_substring_search(
         let scoring_start = ctx.metrics.then(Instant::now);
         diag.posting_entries_checked += if lightweight_count_only {
             aggregate_count_only_postings(
-                &matched_tokens, term_idx, index, scope, ctx.metrics,
-                &mut tokens_with_hits, &mut count_only_files,
+                &matched_tokens,
+                term_idx,
+                index,
+                scope,
+                ctx.metrics,
+                &mut tokens_with_hits,
+                CountOnlyCounts {
+                    files: &mut count_only_files,
+                    per_term_occurrences: &mut count_only_term_occurrences,
+                },
             )
         } else {
             score_token_postings(
@@ -4163,12 +4241,20 @@ fn handle_substring_search(
                 total_occurrences += entry.occurrences;
             }
         }
+        let auto_balance_info = if params.auto_balance && !params.mode_and && term_count >= 2 {
+            count_only_auto_balance(
+                &count_only_files, &count_only_term_occurrences, &raw_terms,
+                params.max_occurrences_per_term,
+            )
+        } else {
+            None
+        };
         diag.ranking_ms = ranking_start
             .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
         return build_substring_response(
             &[], &raw_terms, &all_matched_tokens, &warnings,
             total_files, total_occurrences, search_mode, index, ctx, params,
-            None, &diag,
+            auto_balance_info.as_ref(), &diag,
         );
     }
 
