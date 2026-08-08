@@ -3752,6 +3752,7 @@ fn score_token_postings(
     index: &ContentIndex,
     scope: &ResolvedFileScope,
     total_docs: f64,
+    record_matched_tokens: bool,
     tokens_with_hits: &mut HashSet<String>,
     file_scores: &mut HashMap<u32, FileScoreEntry>,
 ) -> usize {
@@ -3778,7 +3779,7 @@ fn score_token_postings(
                 };
 
                 term_files_passed += 1;
-                if !token_recorded {
+                if record_matched_tokens && !token_recorded {
                     tokens_with_hits.insert(token.to_string());
                     token_recorded = true;
                 }
@@ -4080,15 +4081,20 @@ fn handle_substring_search(
         let scoring_start = ctx.metrics.then(Instant::now);
         diag.posting_entries_checked += score_token_postings(
             &matched_tokens, term_idx, index, scope, total_docs,
-            &mut tokens_with_hits, &mut file_scores,
+            !params.count_only || ctx.metrics, &mut tokens_with_hits, &mut file_scores,
         );
         diag.scoring_ms += scoring_start
             .map_or(0.0, |start| start.elapsed().as_secs_f64() * 1000.0);
     }
 
-    let mut all_matched_tokens: Vec<String> = tokens_with_hits.into_iter().collect();
-    all_matched_tokens.sort_unstable();
-    diag.matched_token_count = all_matched_tokens.len();
+    diag.matched_token_count = tokens_with_hits.len();
+    let all_matched_tokens = if params.count_only {
+        Vec::new()
+    } else {
+        let mut tokens: Vec<String> = tokens_with_hits.into_iter().collect();
+        tokens.sort_unstable();
+        tokens
+    };
     diag.unique_matched_files = file_scores.len();
 
     let ranking_start = ctx.metrics.then(Instant::now);

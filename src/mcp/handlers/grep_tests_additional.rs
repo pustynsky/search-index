@@ -154,7 +154,7 @@ fn test_score_token_postings_basic() {
 
     score_token_postings(
         &["userservice", "authservice"], 0, &index,
-        &resolve_grep_file_scope(&index, &params), 1.0,
+        &resolve_grep_file_scope(&index, &params), 1.0, true,
         &mut tokens_with_hits, &mut file_scores,
     );
 
@@ -164,6 +164,17 @@ fn test_score_token_postings_basic() {
     assert_eq!(file_scores[&0].occurrences, 3);
     assert_eq!(file_scores[&0].terms_matched, 1);
     assert_eq!(file_scores[&0].per_term_occurrences, vec![3]);
+
+    tokens_with_hits.clear();
+    file_scores.clear();
+    score_token_postings(
+        &["userservice", "authservice"], 0, &index,
+        &resolve_grep_file_scope(&index, &params), 1.0, false,
+        &mut tokens_with_hits, &mut file_scores,
+    );
+
+    assert!(tokens_with_hits.is_empty());
+    assert_eq!(file_scores[&0].occurrences, 3);
 }
 
 #[test]
@@ -188,7 +199,7 @@ fn test_score_token_postings_filters_applied() {
 
     score_token_postings(
         &["token"], 0, &index,
-        &resolve_grep_file_scope(&index, &params), 2.0,
+        &resolve_grep_file_scope(&index, &params), 2.0, true,
         &mut tokens_with_hits, &mut file_scores,
     );
 
@@ -217,12 +228,12 @@ fn test_score_token_postings_multi_term_tracking() {
 
     score_token_postings(
         &["term_a"], 0, &index,
-        &resolve_grep_file_scope(&index, &params), 1.0,
+        &resolve_grep_file_scope(&index, &params), 1.0, true,
         &mut tokens_with_hits, &mut file_scores,
     );
     score_token_postings(
         &["term_b"], 1, &index,
-        &resolve_grep_file_scope(&index, &params), 1.0,
+        &resolve_grep_file_scope(&index, &params), 1.0, true,
         &mut tokens_with_hits, &mut file_scores,
     );
 

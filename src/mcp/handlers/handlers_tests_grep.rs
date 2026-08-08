@@ -172,12 +172,18 @@ fn make_common_token_ctx(file_count: usize) -> HandlerContext {
 }
 
 #[test] fn test_substring_search_count_only() {
-    let ctx = make_substring_ctx(vec![("httpclient", 0, vec![5, 12]), ("httphandler", 1, vec![3])], vec!["C:\\test\\Client.cs", "C:\\test\\Handler.cs"]);
+    let mut ctx = make_substring_ctx(vec![("httpclient", 0, vec![5, 12]), ("httphandler", 1, vec![3])], vec!["C:\\test\\Client.cs", "C:\\test\\Handler.cs"]);
     let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["http"], "substring": true, "countOnly": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 2);
     assert!(output.get("files").is_none());
+
+    ctx.metrics = true;
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["http"], "substring": true, "countOnly": true}));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["matchedTokenCount"], 2);
+    assert_eq!(output["summary"]["postingEntriesChecked"], 2);
 }
 
 #[test]
