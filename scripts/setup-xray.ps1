@@ -2445,7 +2445,6 @@ $xrayArgs = @(
     '--ext', $selectedExts,
     '--watch',
     '--definitions',
-    '--metrics',
     '--debug-log'
 )
 
