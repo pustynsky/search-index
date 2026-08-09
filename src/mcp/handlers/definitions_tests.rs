@@ -3203,6 +3203,62 @@ fn test_exact_name_only_skips_fuzzy_suggestions_by_default() {
 }
 
 #[test]
+fn test_exact_name_only_does_not_emit_wrong_kind_hint_for_prefix_match() {
+    let ctx = make_auto_correction_ctx();
+    let result = handle_xray_definitions(&ctx, &json!({
+        "name": ["User"],
+        "kind": ["class"],
+        "exactNameOnly": true
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(v["definitions"].as_array().unwrap().len(), 0);
+    if let Some(hint) = v["summary"]["hint"].as_str() {
+        assert!(!hint.contains("Did you mean kind"), "{}", v);
+    }
+
+    let result = handle_xray_definitions(&ctx, &json!({
+        "name": ["GetUser"],
+        "kind": ["class"],
+        "exactNameOnly": true
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = v["summary"]["hint"].as_str().unwrap();
+    assert!(hint.contains("Did you mean kind='method'"), "{}", v);
+}
+
+#[test]
+fn test_wrong_kind_hint_respects_other_filters() {
+    let index = make_test_def_index();
+    let requests = [
+        json!({
+            "name": ["GetUser"],
+            "kind": ["class"],
+            "parent": ["MissingParent"],
+            "exactNameOnly": true
+        }),
+        json!({
+            "name": ["GetUser"],
+            "kind": ["class"],
+            "attribute": "injectable",
+            "exactNameOnly": true
+        }),
+        json!({
+            "name": ["GetUser"],
+            "kind": ["class"],
+            "baseType": "MissingBase",
+            "exactNameOnly": true
+        }),
+    ];
+
+    for request in requests {
+        let args = parse_definition_args(&request).unwrap();
+        assert!(hint_wrong_kind(&index, &args).is_none(), "{}", request);
+    }
+}
+
+#[test]
 fn test_versioned_name_mismatch_suggested_but_not_auto_corrected() {
     let mut index = make_test_def_index();
     let def_idx = index.definitions.len() as u32;
@@ -4219,6 +4275,50 @@ fn test_hint_fn_file_has_defs_returns_some() {
 }
 
 #[test]
+fn test_cross_file_hint_respects_other_filters() {
+    let index = make_test_def_index();
+    let requests = [
+        json!({
+            "file": ["UserService.cs"],
+            "name": ["GetOrd"],
+            "exactNameOnly": true
+        }),
+        json!({
+            "file": ["UserService.cs"],
+            "name": ["GetOrder"],
+            "kind": ["class"],
+            "exactNameOnly": true
+        }),
+        json!({
+            "file": ["UserService.cs"],
+            "name": ["GetOrder"],
+            "parent": ["UserService"],
+            "exactNameOnly": true
+        }),
+        json!({
+            "file": ["UserService.cs"],
+            "name": ["GetOrder"],
+            "attribute": "injectable",
+            "exactNameOnly": true
+        }),
+    ];
+
+    for request in requests {
+        let args = parse_definition_args(&request).unwrap();
+        let hint = hint_file_has_defs_but_filters_narrow(&index, &args).unwrap();
+        assert!(!hint.contains("Found '"), "{}: {}", request, hint);
+    }
+
+    let args = parse_definition_args(&json!({
+        "file": ["UserService.cs"],
+        "name": ["GetOrder"],
+        "exactNameOnly": true
+    })).unwrap();
+    let hint = hint_file_has_defs_but_filters_narrow(&index, &args).unwrap();
+    assert!(hint.contains("Found 'GetOrder' in OrderService.cs"), "{}", hint);
+}
+
+#[test]
 fn test_hint_fn_file_has_defs_no_file_filter_returns_none() {
     let index = make_test_def_index();
     let args = parse_definition_args(&json!({"name": ["nonexistent"]})).unwrap();
@@ -4416,6 +4516,9 @@ fn test_hint_fn_content_not_defs_returns_some() {
     content_index.index.insert("inputschema".to_string(), vec![
         crate::Posting { file_id: 0, lines: vec![10] },
     ]);
+    content_index.index.insert("outputschema".to_string(), vec![
+        crate::Posting { file_id: 1, lines: vec![20] },
+    ]);
 
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
@@ -4430,6 +4533,20 @@ fn test_hint_fn_content_not_defs_returns_some() {
     assert!(result.is_some(), "Should return Some when name is in content but not defs");
     let hint = result.unwrap();
     assert!(hint.contains("xray_grep"), "Hint should suggest xray_grep");
+
+    let args = parse_definition_args(&json!({
+        "name": ["inputSchema", "outputSchema"]
+    })).unwrap();
+    let hint = hint_name_in_content_not_defs(&args, &ctx, Some(&content_guard)).unwrap();
+    assert!(hint.contains("inputSchema"), "{}", hint);
+    assert!(hint.contains("outputSchema"), "{}", hint);
+
+    let args = parse_definition_args(&json!({
+        "name": ["inputSchema", "missingSchema"]
+    })).unwrap();
+    let hint = hint_name_in_content_not_defs(&args, &ctx, Some(&content_guard)).unwrap();
+    assert!(hint.contains("Text content matches: 'inputSchema'"), "{}", hint);
+    assert!(!hint.contains("'missingSchema'"), "{}", hint);
 }
 
 #[test]
