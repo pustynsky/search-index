@@ -2682,6 +2682,23 @@ fn hint_unsupported_extension(
 }
 
 /// Hint A: Wrong kind — find what kinds exist for matching name/file.
+fn collect_hint_candidates<'a>(
+    index: &'a DefinitionIndex,
+    args: &DefinitionSearchArgs,
+) -> Option<Vec<(u32, &'a DefinitionEntry)>> {
+    let file_scope = args.file_filter_terms.as_ref()
+        .map(|_| ResolvedDefinitionFileScope::resolve(index, args));
+    let selection = collect_candidates_in_scope(index, args, file_scope.as_ref()).ok()?;
+    let mut results = apply_entry_filters_in_scope(
+        index,
+        &selection.indices,
+        args,
+        file_scope.is_some(),
+    );
+    apply_stats_filters(index, &mut results, args).ok()?;
+    Some(results)
+}
+
 fn hint_wrong_kind(
     index: &DefinitionIndex,
     args: &DefinitionSearchArgs,
@@ -2692,36 +2709,12 @@ fn hint_wrong_kind(
         return None;
     }
     let kind_str = args.kind_filter.as_ref().unwrap();
+    let mut relaxed_args = args.clone();
+    relaxed_args.kind_filter = None;
+    let candidates = collect_hint_candidates(index, &relaxed_args)?;
     let mut kind_counts: HashMap<&str, usize> = HashMap::new();
-
-    if let Some(ref name) = args.name_filter {
-        let terms: Vec<String> = name.split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect();
-        for (n, indices) in &index.name_index {
-            if terms.iter().any(|t| n.contains(t.as_str())) {
-                for &idx in indices {
-                    if let Some(def) = index.definitions.get(idx as usize) {
-                        if let Some(ref ff) = args.file_filter
-                            && !file_matches_filter(index, def.file_id, ff) {
-                                continue;
-                            }
-                        *kind_counts.entry(def.kind.as_str()).or_insert(0) += 1;
-                    }
-                }
-            }
-        }
-    } else if let Some(ref ff) = args.file_filter {
-        for (&file_id, def_indices) in &index.file_index {
-            if file_matches_filter(index, file_id, ff) {
-                for &idx in def_indices {
-                    if let Some(def) = index.definitions.get(idx as usize) {
-                        *kind_counts.entry(def.kind.as_str()).or_insert(0) += 1;
-                    }
-                }
-            }
-        }
+    for (_, definition) in candidates {
+        *kind_counts.entry(definition.kind.as_str()).or_insert(0) += 1;
     }
 
     if kind_counts.is_empty() {
@@ -2773,28 +2766,21 @@ fn hint_file_has_defs_but_filters_narrow(
 
     // Cross-file hint: check if name matches exist in OTHER files
     if let Some(ref name) = args.name_filter {
-        let terms: Vec<String> = name.split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect();
+        let mut relaxed_args = args.clone();
+        relaxed_args.file_filter = None;
+        relaxed_args.file_filter_terms = None;
+        relaxed_args.file_filter_raw.clear();
+        let candidates = collect_hint_candidates(index, &relaxed_args).unwrap_or_default();
 
         let mut cross_file_paths: Vec<String> = Vec::new();
-        for (index_name, def_indices) in &index.name_index {
-            if terms.iter().any(|t| index_name.contains(t.as_str())) {
-                for &def_idx in def_indices {
-                    if let Some(def) = index.definitions.get(def_idx as usize) {
-                        // Skip definitions that ARE in the file filter (already counted above)
-                        if !file_matches_filter(index, def.file_id, ff)
-                            && let Some(path) = index.files.get(def.file_id as usize) {
-                                // Extract just the filename for readability
-                                let short = path.rsplit(['/', '\\']).next().unwrap_or(path);
-                                if !cross_file_paths.contains(&short.to_string()) {
-                                    cross_file_paths.push(short.to_string());
-                                }
-                            }
+        for (_, definition) in candidates {
+            if !file_matches_filter(index, definition.file_id, ff)
+                && let Some(path) = index.files.get(definition.file_id as usize) {
+                    let short = path.rsplit(['/', '\\']).next().unwrap_or(path).to_string();
+                    if !cross_file_paths.contains(&short) {
+                        cross_file_paths.push(short);
                     }
                 }
-            }
         }
         cross_file_paths.sort();
         cross_file_paths.truncate(3);
@@ -2912,14 +2898,38 @@ fn hint_name_in_content_not_defs(
         return None;
     }
     let content_idx = content_idx?;
-    let lower = name.to_lowercase();
-    let postings = content_idx.index.get(&lower)?;
-    let file_count = postings.len();
+    let terms = requested_name_terms(args);
+    let display_terms = name.split(',')
+        .map(str::trim)
+        .filter(|term| !term.is_empty());
+    let matches: Vec<(&str, usize)> = terms.iter()
+        .zip(display_terms)
+        .filter_map(|(term, display)| content_idx.index.get(term).map(|postings| (display, postings.len())))
+        .collect();
+    if matches.is_empty() {
+        return None;
+    }
+    if terms.len() == 1 {
+        return Some(format!(
+            "'{}' not found as an AST definition name, but appears in {} files as text content. \
+             xray_definitions searches structural names (classes, methods, etc.), not arbitrary text. \
+             Use xray_grep terms='{}' for content search.",
+            name, matches[0].1, name
+        ));
+    }
+
+    let details = matches.iter()
+        .map(|(term, count)| format!("'{}' in {} file{}", term, count, if *count == 1 { "" } else { "s" }))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let grep_terms = matches.iter()
+        .map(|(term, _)| format!("'{}'", term))
+        .collect::<Vec<_>>()
+        .join(", ");
     Some(format!(
-        "'{}' not found as an AST definition name, but appears in {} files as text content. \
-         xray_definitions searches structural names (classes, methods, etc.), not arbitrary text. \
-         Use xray_grep terms='{}' for content search.",
-        name, file_count, name
+        "Requested names were not found as AST definition names. Text content matches: {}. \
+         Use xray_grep terms=[{}] for content search.",
+        details, grep_terms
     ))
 }
 

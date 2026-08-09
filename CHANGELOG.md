@@ -3,6 +3,8 @@
 
 ## 0.6.1 (2026-08-09)
 
+- **Corrected zero-result definition hints.** Wrong-kind and cross-file suggestions now preserve exact-name and remaining query filters, while multi-name content fallbacks report each matching term.
+
 - **Hardened standalone installer dependencies.** Public releases now download over HTTPS without requiring `gh`; Git-managed and Hidden setup validates the work tree and runtime filters before mutation and rolls back failures transactionally.
 
 - **Expanded installer project coverage and launch docs.** Detection retains rare supported project, build, resource, and manifest extensions, while the README and installation guide document regression-tested `cmd.exe` launch patterns.
