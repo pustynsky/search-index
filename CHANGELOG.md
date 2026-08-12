@@ -3,6 +3,8 @@
 
 ## 0.6.1 (2026-08-09)
 
+- **Fixed mixed substring and phrase OR searches.** Each term now keeps its own matching semantics before global ranking, counting, and pagination; phrase verification failures also report partial results.
+
 - **Disabled default MCP performance metrics.** The installer no longer adds `--metrics`, reducing response payloads for newly configured servers.
 
 - **Corrected zero-result definition hints.** Wrong-kind and cross-file suggestions now preserve exact-name and remaining query filters, while multi-name content fallbacks report each matching term.

@@ -2885,6 +2885,153 @@ fn test_multi_phrase_or_auto_switch() {
     cleanup_tmp(&tmp);
 }
 
+#[test]
+fn test_mixed_or_preserves_substring_semantics_per_term() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["private readonly", "connectionfactory"]
+    }));
+    assert!(!result.is_error, "Mixed OR should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let paths: Vec<&str> = output["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|file| file["path"].as_str())
+        .collect();
+
+    assert!(paths.iter().any(|path| path.ends_with("Controller.cs")),
+        "Phrase term should find Controller.cs: {:?}", paths);
+    assert!(paths.iter().any(|path| path.ends_with("Service.cs")),
+        "Substring term should find DatabaseConnectionFactory in Service.cs: {:?}", paths);
+    assert_eq!(output["summary"]["searchMode"], "mixed-or");
+    assert_eq!(output["execution"]["requestedMode"], "substring");
+    assert_eq!(output["execution"]["effectiveMode"], "mixed");
+    assert_eq!(output["execution"]["modeChanged"], true);
+
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn test_mixed_or_uses_normalized_reverse_path_lookup() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    {
+        let mut index = ctx.index.write().unwrap();
+        let path_to_id = index.files.iter().enumerate()
+            .map(|(file_id, path)| (crate::path_identity_key(std::path::Path::new(path)), file_id as u32))
+            .collect();
+        index.path_to_id = Some(path_to_id);
+    }
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["private readonly", "connectionfactory"]
+    }));
+    assert!(!result.is_error, "Mixed OR should use the normalized reverse lookup: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let paths = output["files"].as_array().unwrap();
+    assert!(paths.iter().any(|file| file["path"].as_str().unwrap().ends_with("Controller.cs")));
+    assert!(paths.iter().any(|file| file["path"].as_str().unwrap().ends_with("Service.cs")));
+
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn test_mixed_or_preserves_hebrew_substring_semantics() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    std::fs::write(
+        root.join("transcript.md"),
+        "אנחנו מגיעים לג'נרי קינדקס\nאתה ממלא בקטים במיינקש.\n",
+    ).unwrap();
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "md".to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(root.to_string_lossy().to_string())
+        .with_server_ext("md")
+        .with_index_base(root.join(".index"))
+        .build();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["ג'נרי קינדקס", "מיינקש"],
+        "file": ["transcript.md"]
+    }));
+    assert!(!result.is_error, "Hebrew mixed OR should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let lines = output["files"][0]["lines"].as_array().unwrap();
+    assert_eq!(lines, &vec![json!(1), json!(2)]);
+    assert_eq!(output["execution"]["effectiveMode"], "mixed");
+}
+
+#[test]
+fn test_mixed_or_phrase_read_error_is_partial() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    std::fs::remove_file(tmp.join("Controller.cs")).unwrap();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["private readonly", "connectionfactory"]
+    }));
+    assert!(!result.is_error, "Mixed OR should preserve partial results: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let paths = output["files"].as_array().unwrap();
+    assert!(paths.iter().any(|file| file["path"].as_str().unwrap().ends_with("Service.cs")));
+    assert_eq!(output["resultStatus"]["status"], "partial");
+    assert_eq!(output["resultStatus"]["complete"], false);
+    assert!(output["resultStatus"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason == "file_read_error"));
+
+    cleanup_tmp(&tmp);
+}
+
+
+#[test]
+fn test_mixed_or_count_only_and_pagination_use_merged_results() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let count_result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["private readonly", "connectionfactory"],
+        "countOnly": true
+    }));
+    assert!(!count_result.is_error, "Mixed count-only should not error: {}", count_result.content[0].text);
+    let count_output: Value = serde_json::from_str(&count_result.content[0].text).unwrap();
+    assert_eq!(count_output["summary"]["totalFiles"], 2);
+    assert!(count_output.get("files").is_none());
+    assert_eq!(count_output["execution"]["effectiveMode"], "mixed");
+
+    let page_result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["private readonly", "connectionfactory"],
+        "maxResults": 1
+    }));
+    assert!(!page_result.is_error, "Mixed pagination should not error: {}", page_result.content[0].text);
+    let page_output: Value = serde_json::from_str(&page_result.content[0].text).unwrap();
+    assert_eq!(page_output["summary"]["totalFiles"], 2);
+    assert_eq!(page_output["files"].as_array().unwrap().len(), 1);
+    assert!(page_output["resultStatus"]["page"]["continuationToken"].is_string());
+
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn test_mixed_and_returns_validation_error() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["private readonly", "connectionfactory"],
+        "mode": "and"
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("Mixed substring and phrase terms"));
+
+    cleanup_tmp(&tmp);
+}
+
 /// Multi-phrase OR: explicit phrase:true with comma-separated terms.
 #[test]
 fn test_multi_phrase_or_explicit_phrase() {

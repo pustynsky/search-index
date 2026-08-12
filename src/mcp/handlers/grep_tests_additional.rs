@@ -276,7 +276,7 @@ fn test_build_substring_response_count_only() {
     let result = build_substring_response(
         &results, &raw_terms, &matched_tokens, &warnings,
         1, 2, "or", &index, &ctx, &params,
-        None, &diag,
+        None, &diag, None,
     );
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -319,7 +319,7 @@ fn test_build_substring_response_normal() {
     let result = build_substring_response(
         &results, &raw_terms, &matched_tokens, &[],
         1, 1, "or", &index, &ctx, &params,
-        None, &SubstringSearchDiag::default(),
+        None, &SubstringSearchDiag::default(), None,
     );
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
