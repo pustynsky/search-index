@@ -1,14 +1,16 @@
 # Changelog
 
-- **Compact `xray_grep` responses by default.** Performance and index telemetry is now omitted unless the server runs with `--metrics`; result counts, scope, warnings, and correctness diagnostics remain available.
+## 0.6.2 (2026-08-12)
 
-## 0.6.1 (2026-08-09)
+- **Compact `xray_grep` responses by default.** Performance and index telemetry is now omitted unless the server runs with `--metrics`; result counts, scope, warnings, and correctness diagnostics remain available.
 
 - **Fixed mixed substring and phrase OR searches.** Each term now keeps its own matching semantics before global ranking, counting, and pagination; phrase verification failures also report partial results.
 
 - **Disabled default MCP performance metrics.** The installer no longer adds `--metrics`, reducing response payloads for newly configured servers.
 
 - **Corrected zero-result definition hints.** Wrong-kind and cross-file suggestions now preserve exact-name and remaining query filters, while multi-name content fallbacks report each matching term.
+
+## 0.6.1 (2026-08-09)
 
 - **Hardened standalone installer dependencies.** Public releases now download over HTTPS without requiring `gh`; Git-managed and Hidden setup validates the work tree and runtime filters before mutation and rolls back failures transactionally.
 
