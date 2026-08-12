@@ -296,6 +296,38 @@ fn test_summary_with_index_stats() {
 }
 
 #[test]
+fn test_strip_grep_metrics_preserves_phrase_correctness_fields() {
+    let mut output = json!({
+        "summary": {
+            "totalFiles": 0,
+            "phraseDetail": {
+                "tokenCount": 2,
+                "postingScanMs": "1.2",
+                "perToken": [{"token": "missing", "postings": 0}],
+                "missingTokens": ["missing"],
+                "staleCandidateFiles": 3,
+                "recoveredStaleFiles": 2,
+                "unresolvedStaleFiles": 1,
+                "readErrorFiles": 4,
+                "workerPanics": 0
+            }
+        }
+    });
+
+    strip_grep_metrics(&mut output);
+
+    assert_eq!(output["summary"]["totalFiles"], 0);
+    assert_eq!(output["summary"]["phraseDetail"], json!({
+        "missingTokens": ["missing"],
+        "staleCandidateFiles": 3,
+        "recoveredStaleFiles": 2,
+        "unresolvedStaleFiles": 1,
+        "readErrorFiles": 4,
+        "workerPanics": 0
+    }));
+}
+
+#[test]
 fn test_summary_with_read_errors() {
     let index = ContentIndex { read_errors: 3, lossy_file_count: 2, ..Default::default() };
     let ctx = HandlerContext::default();

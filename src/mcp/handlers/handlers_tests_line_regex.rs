@@ -200,7 +200,8 @@ fn line_regex_dir_filter_scopes_search() {
 
 #[test]
 fn line_regex_file_filter_scopes_search() {
-    let (ctx, tmp) = make_line_regex_ctx();
+    let (mut ctx, tmp) = make_line_regex_ctx();
+    ctx.metrics = true;
     // file=guide.md restricts to one specific file
     let result = handle_xray_grep(&ctx, &json!({
         "terms": ["^##"],
