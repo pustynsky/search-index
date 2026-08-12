@@ -146,7 +146,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "substring": {
                         "type": "boolean",
-                        "description": "Match within tokens (default: true). Auto-disabled for regex/phrase."
+                        "description": "Within-token matching; disabled by regex/phrase. Mixed OR plans per term; mixed AND unsupported."
                     },
                     "autoBalance": {
                         "type": "boolean",

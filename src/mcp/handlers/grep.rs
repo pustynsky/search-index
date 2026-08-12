@@ -636,6 +636,8 @@ fn grep_requested_mode(parsed: &ParsedGrepArgs) -> &'static str {
 fn effective_mode_family(effective_mode: &str) -> &str {
     if effective_mode.starts_with("substring") {
         "substring"
+    } else if effective_mode.starts_with("mixed") {
+        "mixed"
     } else if effective_mode.starts_with("phrase") {
         "phrase"
     } else if effective_mode.starts_with("lineRegex") {
@@ -3979,9 +3981,14 @@ fn build_substring_response(
     params: &GrepSearchParams,
     auto_balance_info: Option<&AutoBalanceInfo>,
     diag: &SubstringSearchDiag,
+    phrase_diag: Option<&PhraseSearchDiag>,
 ) -> ToolCallResult {
     let search_start = params.search_start;
-    let search_mode_label = format!("substring-{}", search_mode);
+    let search_mode_label = if search_mode.starts_with("mixed") {
+        search_mode.to_string()
+    } else {
+        format!("substring-{}", search_mode)
+    };
     let terms_value = json!(raw_terms);
 
     if params.count_only {
@@ -3998,8 +4005,16 @@ fn build_substring_response(
         if let Some(ab) = auto_balance_info {
             inject_auto_balance(&mut summary, ab);
         }
+        if let Some(phrase_diag) = phrase_diag {
+            summary["phraseDetail"] = phrase_diag.to_json();
+            inject_phrase_diagnostic_note(&mut summary, phrase_diag);
+            inject_phrase_verification_warnings(&mut summary, phrase_diag);
+        }
         apply_dir_auto_converted_note(&mut summary, params);
-        let result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
+        let mut result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
+        if let Some(phrase_diag) = phrase_diag {
+            mark_phrase_incomplete_result_status(&mut result_status, phrase_diag);
+        }
         let execution = build_grep_execution(params, &search_mode_label, None, false, Some(total_files), None);
         let response_finalize_start = ctx.metrics.then(Instant::now);
         let mut output = finalize_grep_output(
@@ -4083,15 +4098,23 @@ fn build_substring_response(
     if let Some(ab) = auto_balance_info {
         inject_auto_balance(&mut summary, ab);
     }
+    if let Some(phrase_diag) = phrase_diag {
+        summary["phraseDetail"] = phrase_diag.to_json();
+        inject_phrase_diagnostic_note(&mut summary, phrase_diag);
+        inject_phrase_verification_warnings(&mut summary, phrase_diag);
+    }
     apply_dir_auto_converted_note(&mut summary, params);
     let returned_occurrences = results.iter().map(|result| result.occurrences).sum();
-    let result_status = build_grep_result_status(
+    let mut result_status = build_grep_result_status(
         results.len(),
         returned_occurrences,
         total_files,
         total_occurrences,
         false,
     );
+    if let Some(phrase_diag) = phrase_diag {
+        mark_phrase_incomplete_result_status(&mut result_status, phrase_diag);
+    }
     let execution = build_grep_execution(params, &search_mode_label, None, false, Some(total_files), None);
     let response_finalize_start = ctx.metrics.then(Instant::now);
     let mut output = finalize_grep_output(
@@ -4145,16 +4168,34 @@ fn handle_substring_search(
         return ToolCallResult::error("No search terms provided".to_string());
     }
 
-    // Auto-switch to phrase mode when terms contain spaces or non-token characters
-    if let Some(result) =
-        auto_switch_to_phrase_if_needed(ctx, index, terms, &raw_terms, params, scope)
-    {
-        return result;
+    let phrase_term_count = raw_terms
+        .iter()
+        .filter(|term| has_non_token_chars(term))
+        .count();
+    let mixed_terms = phrase_term_count > 0 && phrase_term_count < raw_terms.len();
+
+    if !mixed_terms {
+        if let Some(result) =
+            auto_switch_to_phrase_if_needed(ctx, index, terms, &raw_terms, params, scope)
+        {
+            return result;
+        }
+    } else if params.mode_and {
+        return ToolCallResult::error(
+            "Mixed substring and phrase terms do not support mode='and' yet; split the query or choose phrase=true or lineRegex=true"
+                .to_string(),
+        );
     }
 
     let trigram_idx = &index.trigram;
     let total_docs = index.files.len() as f64;
-    let search_mode = if params.mode_and { "and" } else { "or" };
+    let search_mode = if mixed_terms {
+        "mixed-or"
+    } else if params.mode_and {
+        "and"
+    } else {
+        "or"
+    };
     if params.trigram_stale {
         debug!(
             terms_count = raw_terms.len(),
@@ -4176,10 +4217,56 @@ fn handle_substring_search(
     let mut count_only_files: HashMap<u32, CountOnlyFileEntry> = HashMap::new();
     let term_count = raw_terms.len();
     let mut count_only_term_occurrences = vec![0usize; term_count];
-    let lightweight_count_only = params.count_only;
+    let lightweight_count_only = params.count_only && !mixed_terms;
     let mut diag = SubstringSearchDiag::default();
+    let mut phrase_diag = PhraseSearchDiag::default();
+    let file_ids_by_path = (mixed_terms && index.path_to_id.is_none()).then(|| {
+        index.files.iter().enumerate()
+            .map(|(file_id, path)| (path.as_str(), file_id as u32))
+            .collect::<HashMap<_, _>>()
+    });
 
     for (term_idx, term) in raw_terms.iter().enumerate() {
+        if has_non_token_chars(term) {
+            let (phrase_matches, term_phrase_diag) =
+                match collect_phrase_matches(index, &terms[term_idx], params, scope) {
+                    Ok(result) => result,
+                    Err(error) => return ToolCallResult::error(error),
+                };
+            phrase_diag.merge_from(term_phrase_diag);
+            let phrase_idf = (total_docs / phrase_matches.len().max(1) as f64).ln().max(1.0);
+            for phrase_match in phrase_matches {
+                let Some(file_id) = index.path_to_id.as_ref()
+                    .and_then(|paths| paths.get(&crate::path_identity_key(
+                        std::path::Path::new(&phrase_match.file_path),
+                    )))
+                    .or_else(|| file_ids_by_path.as_ref()
+                        .and_then(|paths| paths.get(phrase_match.file_path.as_str())))
+                    .copied()
+                else {
+                    continue;
+                };
+                let occurrences = phrase_match.lines.len();
+                let entry = file_scores.entry(file_id).or_insert(FileScoreEntry {
+                    file_path: phrase_match.file_path,
+                    lines: Vec::new(),
+                    tf_idf: 0.0,
+                    occurrences: 0,
+                    terms_matched: 0,
+                    per_term_occurrences: Vec::new(),
+                });
+                entry.tf_idf += phrase_idf * occurrences as f64;
+                entry.occurrences += occurrences;
+                entry.lines.extend(phrase_match.lines);
+                if entry.per_term_occurrences.len() <= term_idx {
+                    entry.per_term_occurrences.resize(term_idx + 1, 0);
+                    entry.terms_matched += 1;
+                }
+                entry.per_term_occurrences[term_idx] += occurrences;
+            }
+            continue;
+        }
+
         let index_search_start = ctx.metrics.then(Instant::now);
         // When trigram is stale (rebuild skipped for narrow scope), fall back
         // to brute-force token matching to avoid false negatives from missing
@@ -4254,7 +4341,7 @@ fn handle_substring_search(
         return build_substring_response(
             &[], &raw_terms, &all_matched_tokens, &warnings,
             total_files, total_occurrences, search_mode, index, ctx, params,
-            auto_balance_info.as_ref(), &diag,
+            auto_balance_info.as_ref(), &diag, mixed_terms.then_some(&phrase_diag),
         );
     }
 
@@ -4289,7 +4376,7 @@ fn handle_substring_search(
     let result = build_substring_response(
         &results, &raw_terms, &all_matched_tokens, &warnings,
         total_files, total_occurrences, search_mode, index, ctx, params,
-        auto_balance_info.as_ref(), &diag,
+        auto_balance_info.as_ref(), &diag, mixed_terms.then_some(&phrase_diag),
     );
     finish_grep_page(result, page.as_ref(), &params.page_request)
 }
