@@ -1,5 +1,6 @@
 # Changelog
 
+- **Compact `xray_grep` responses by default.** Performance and index telemetry is now omitted unless the server runs with `--metrics`; result counts, scope, warnings, and correctness diagnostics remain available.
 
 ## 0.6.1 (2026-08-09)
 

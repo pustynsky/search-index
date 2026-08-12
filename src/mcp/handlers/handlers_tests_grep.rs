@@ -216,6 +216,7 @@ fn test_substring_search_trigram_dirty_triggers_rebuild() {
     };
     let ctx = HandlerContextBuilder::new()
         .with_content_index(content_index)
+        .with_metrics(true)
         .build();
     let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["httpcli"], "substring": true}));
     assert!(!result.is_error);
@@ -389,10 +390,11 @@ fn test_narrow_substring_treats_inflight_trigram_rebuild_as_stale() {
 
 #[test]
 fn test_wide_substring_waits_for_inflight_trigram_rebuild() {
-    let ctx = make_substring_ctx(
+    let mut ctx = make_substring_ctx(
         vec![("newneedle", 0, vec![1])],
         vec!["C:\\test\\Edited.cs"],
     );
+    ctx.metrics = true;
     {
         let mut idx = ctx.index.write().unwrap();
         idx.trigram = Default::default();
@@ -4077,7 +4079,8 @@ fn test_recommended_next_queries_keeps_line_regex_as_last_fallback() {
 
 #[test]
 fn test_phrase_missing_underscore_token_hints_alternatives() {
-    let (ctx, tmp) = make_e2e_substring_ctx();
+    let (mut ctx, tmp) = make_e2e_substring_ctx();
+    ctx.metrics = true;
     let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": ["Definitely_NotHere"],
         "phrase": true
@@ -4232,6 +4235,7 @@ fn test_xray_grep_line_regex_large_scan_reports_parallel_path() {
         .with_content_index(content_index)
         .with_server_dir(tmp_dir.to_string_lossy().to_string())
         .with_index_base(tmp_dir.join(".index"))
+        .with_metrics(true)
         .build();
 
     let result = dispatch_tool(&ctx, "xray_grep", &json!({
@@ -4314,6 +4318,7 @@ fn test_xray_grep_line_regex_prefilter_differential_parity() {
         .with_content_index(content_index)
         .with_server_dir(tmp_dir.to_string_lossy().to_string())
         .with_index_base(tmp_dir.join(".index"))
+        .with_metrics(true)
         .build();
 
     let query = json!({
@@ -4578,6 +4583,7 @@ fn test_xray_grep_line_regex_prefilter_or_mode_unions_candidates() {
         .with_content_index(content_index)
         .with_server_dir(tmp_dir.to_string_lossy().to_string())
         .with_index_base(tmp_dir.join(".index"))
+        .with_metrics(true)
         .build();
 
     let result = dispatch_tool(&ctx, "xray_grep", &json!({
@@ -4637,6 +4643,7 @@ fn test_xray_grep_line_regex_prefilter_and_mode_intersects_candidates() {
         .with_content_index(content_index)
         .with_server_dir(tmp_dir.to_string_lossy().to_string())
         .with_index_base(tmp_dir.join(".index"))
+        .with_metrics(true)
         .build();
 
     let result = dispatch_tool(&ctx, "xray_grep", &json!({
@@ -4699,6 +4706,7 @@ fn test_xray_grep_line_regex_prefilter_short_circuit_when_too_broad() {
         .with_content_index(content_index)
         .with_server_dir(tmp_dir.to_string_lossy().to_string())
         .with_index_base(tmp_dir.join(".index"))
+        .with_metrics(true)
         .build();
 
     let result = dispatch_tool(&ctx, "xray_grep", &json!({
@@ -4741,10 +4749,9 @@ fn test_xray_grep_line_regex_prefilter_short_circuit_when_too_broad() {
     cleanup_tmp(&tmp_dir);
 }
 
-/// AC-4 integration: `summary.literalPrefilter` is ALWAYS emitted for
-/// `lineRegex=true` searches — even when extraction fails.
+/// Metric-heavy lineRegex diagnostics stay opt-in.
 #[test]
-fn test_xray_grep_line_regex_prefilter_summary_field_always_present() {
+fn test_xray_grep_line_regex_omits_metrics_by_default() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -4777,17 +4784,25 @@ fn test_xray_grep_line_regex_prefilter_summary_field_always_present() {
         "unprefilterable lineRegex should not error: {}", result.content[0].text);
     let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
 
-    let prefilter = &out["summary"]["literalPrefilter"];
-    assert!(prefilter.is_object(),
-        "summary.literalPrefilter must always be present for lineRegex; got {}", out["summary"]);
-    assert_eq!(prefilter["used"].as_bool(), Some(false),
-        "unprefilterable pattern must report used=false; got {}", prefilter);
-    assert!(prefilter["totalFiles"].is_number(),
-        "totalFiles must always be present; got {}", prefilter);
-    assert!(prefilter["reason"].as_str().is_some(),
-        "reason must accompany used=false; got {}", prefilter);
-    assert!(prefilter["extractedFragments"].is_array(),
-        "extractedFragments must always be an array (empty when no extraction); got {}", prefilter);
+    for field in [
+        "indexFiles",
+        "indexTokens",
+        "searchTimeMs",
+        "indexLoadTimeMs",
+        "lineRegexScan",
+        "literalPrefilter",
+        "queryMs",
+        "waitForTrigramMs",
+        "trigramBuildMs",
+    ] {
+        assert!(out["summary"].get(field).is_none(),
+            "summary.{field} must be omitted without --metrics; got {}", out["summary"]);
+    }
+    assert!(out["summary"]["scope"].get("resolutionMs").is_none());
+    assert_eq!(out["summary"]["totalFiles"], 1);
+    assert_eq!(out["summary"]["totalOccurrences"], 1);
+    assert_eq!(out["execution"]["filesScanned"], 1);
+    assert_eq!(out["execution"]["filesConsidered"], 1);
 
     cleanup_tmp(&tmp_dir);
 }
@@ -4853,6 +4868,7 @@ fn test_xray_grep_prefilter_distributive_over_top_level_or_pure_literal() {
         .with_content_index(content_index)
         .with_server_dir(tmp_dir.to_string_lossy().to_string())
         .with_index_base(tmp_dir.join(".index"))
+        .with_metrics(true)
         .build();
 
     // Form A: single OR'd term.
@@ -4964,6 +4980,7 @@ fn test_xray_grep_prefilter_distributive_over_top_level_or_dotstar_blocked() {
         .with_content_index(content_index)
         .with_server_dir(tmp_dir.to_string_lossy().to_string())
         .with_index_base(tmp_dir.join(".index"))
+        .with_metrics(true)
         .build();
 
     let result_a = dispatch_tool(&ctx, "xray_grep", &json!({
@@ -5082,6 +5099,7 @@ fn test_xray_grep_literal_prefilter_scope_aware_counters_with_dir_scope() {
         .with_content_index(content_index)
         .with_server_dir(tmp_dir.to_string_lossy().to_string())
         .with_index_base(tmp_dir.join(".index"))
+        .with_metrics(true)
         .build();
 
     // Scoped query.
@@ -5191,6 +5209,7 @@ fn test_xray_grep_literal_prefilter_scope_aware_counters_omitted_when_unscoped()
         .with_content_index(content_index)
         .with_server_dir(tmp_dir.to_string_lossy().to_string())
         .with_index_base(tmp_dir.join(".index"))
+        .with_metrics(true)
         .build();
 
     let result = dispatch_tool(
@@ -5283,6 +5302,7 @@ fn test_xray_grep_literal_prefilter_scope_aware_counters_with_ext_scope() {
         .with_content_index(content_index)
         .with_server_dir(tmp_dir.to_string_lossy().to_string())
         .with_index_base(tmp_dir.join(".index"))
+        .with_metrics(true)
         .build();
 
     let result = dispatch_tool(

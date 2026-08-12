@@ -854,6 +854,51 @@ fn extract_clean_tokens_from_terms(terms: &Value) -> Vec<String> {
     out
 }
 
+const GREP_SUMMARY_METRIC_FIELDS: &[&str] = &[
+    "indexFiles",
+    "indexTokens",
+    "searchTimeMs",
+    "indexLoadTimeMs",
+    "lockWaitMs",
+    "lineRegexScan",
+    "literalPrefilter",
+    "indexSearchMs",
+    "scoringMs",
+    "rankingMs",
+    "previewReadMs",
+    "previewBuildMs",
+    "responseFinalizeMs",
+    "matchedTokenCount",
+    "postingEntriesChecked",
+    "uniqueMatchedFiles",
+];
+
+fn strip_grep_metrics(output: &mut Value) {
+    let Some(summary) = output.get_mut("summary").and_then(Value::as_object_mut) else {
+        return;
+    };
+    for field in GREP_SUMMARY_METRIC_FIELDS {
+        summary.remove(*field);
+    }
+
+    let mut remove_phrase_detail = false;
+    if let Some(detail) = summary.get_mut("phraseDetail").and_then(Value::as_object_mut) {
+        detail.retain(|field, _| matches!(
+            field.as_str(),
+            "missingTokens"
+                | "staleCandidateFiles"
+                | "recoveredStaleFiles"
+                | "unresolvedStaleFiles"
+                | "readErrorFiles"
+                | "workerPanics"
+        ));
+        remove_phrase_detail = detail.is_empty();
+    }
+    if remove_phrase_detail {
+        summary.remove("phraseDetail");
+    }
+}
+
 fn finalize_grep_output(
     mut output: Value,
     result_status: Value,
@@ -2021,7 +2066,11 @@ fn attach_trigram_query_timing(
     result: &mut ToolCallResult,
     query_elapsed: std::time::Duration,
     timing: Option<TrigramEnsureOutcome>,
+    include_metrics: bool,
 ) {
+    if !include_metrics {
+        return;
+    }
     let Some(timing) = timing else { return; };
     if result.is_error { return; }
     let Some(content) = result.content.first_mut() else { return; };
@@ -3129,6 +3178,7 @@ fn collect_grep_scope_coverage(
 fn apply_grep_scope_telemetry(
     result: &mut ToolCallResult,
     scope: &ResolvedFileScope,
+    include_metrics: bool,
 ) {
     let Some(text) = result.content.first_mut().map(|content| &mut content.text) else {
         return;
@@ -3147,13 +3197,20 @@ fn apply_grep_scope_telemetry(
         });
 
     if let Some(summary) = output.get_mut("summary").and_then(Value::as_object_mut) {
-        summary.insert("scope".to_string(), json!({
+        let mut scope_summary = json!({
             "requested": !scope.is_all(),
             "strategy": scope.strategy().as_str(),
             "indexFiles": scope.total_files(),
             "matchedFiles": scope.len(),
-            "resolutionMs": scope.resolution_duration().as_secs_f64() * 1000.0,
-        }));
+        });
+        if include_metrics {
+            scope_summary["resolutionMs"] =
+                json!(scope.resolution_duration().as_secs_f64() * 1000.0);
+        }
+        summary.insert("scope".to_string(), scope_summary);
+    }
+    if !include_metrics {
+        strip_grep_metrics(&mut output);
     }
 
     if let Some((Some(files_considered), Some(scheduled_files))) = line_regex_compat
@@ -3499,9 +3556,14 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         if parsed.invert {
             result = apply_invert(result, &index, &grep_params, &file_scope);
         }
-        apply_grep_scope_telemetry(&mut result, &file_scope);
+        apply_grep_scope_telemetry(&mut result, &file_scope, ctx.metrics);
         apply_grep_scope_coverage(&mut result, scope_coverage.as_ref());
-        attach_trigram_query_timing(&mut result, search_start.elapsed(), trigram_timing);
+        attach_trigram_query_timing(
+            &mut result,
+            search_start.elapsed(),
+            trigram_timing,
+            ctx.metrics,
+        );
         return result;
     }
 
@@ -3523,7 +3585,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         if parsed.invert {
             result = apply_invert(result, &index, &grep_params, &file_scope);
         }
-        apply_grep_scope_telemetry(&mut result, &file_scope);
+        apply_grep_scope_telemetry(&mut result, &file_scope, ctx.metrics);
         apply_grep_scope_coverage(&mut result, scope_coverage.as_ref());
         return result;
     }
@@ -3545,9 +3607,14 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         if parsed.invert {
             result = apply_invert(result, &index, &grep_params, &file_scope);
         }
-        apply_grep_scope_telemetry(&mut result, &file_scope);
+        apply_grep_scope_telemetry(&mut result, &file_scope, ctx.metrics);
         apply_grep_scope_coverage(&mut result, scope_coverage.as_ref());
-        attach_trigram_query_timing(&mut result, search_start.elapsed(), trigram_timing);
+        attach_trigram_query_timing(
+            &mut result,
+            search_start.elapsed(),
+            trigram_timing,
+            ctx.metrics,
+        );
         return result;
     }
 
@@ -3661,7 +3728,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     if parsed.invert {
         result = apply_invert(result, &index, &grep_params, &file_scope);
     }
-    apply_grep_scope_telemetry(&mut result, &file_scope);
+    apply_grep_scope_telemetry(&mut result, &file_scope, ctx.metrics);
     apply_grep_scope_coverage(&mut result, scope_coverage.as_ref());
     result
 }
