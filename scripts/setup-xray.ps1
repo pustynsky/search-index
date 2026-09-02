@@ -356,6 +356,46 @@ function Get-AutoSelectedExtensions {
     }
 }
 
+function Install-XrayBinaryWithRetry {
+    param(
+        [Parameter(Mandatory)] [string]$Downloaded,
+        [Parameter(Mandatory)] [string]$Destination
+    )
+
+    $Destination = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Destination)
+    $maxAttempts = 5
+    $deploymentError = $null
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $running = @(Get-Process -Name 'xray' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $Destination })
+        foreach ($proc in $running) {
+            try {
+                Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+                Write-Host "Stopped PID $($proc.Id)." -ForegroundColor DarkYellow
+            }
+            catch {
+                if (Get-Process -Id $proc.Id -ErrorAction SilentlyContinue) {
+                    throw "Failed to stop PID $($proc.Id): $($_.Exception.Message)"
+                }
+            }
+        }
+        $running | Wait-Process -Timeout 5 -ErrorAction SilentlyContinue
+
+        try {
+            Move-Item -LiteralPath $Downloaded -Destination $Destination -Force -ErrorAction Stop
+            return
+        }
+        catch [System.IO.IOException], [System.UnauthorizedAccessException] {
+            $deploymentError = $_
+            if ($attempt -lt $maxAttempts) {
+                Start-Sleep -Milliseconds (250 * $attempt)
+            }
+        }
+    }
+
+    throw "Cannot replace $Destination after $maxAttempts attempts. Last error: $($deploymentError.Exception.Message)"
+}
+
+
 function Read-YesNo {
     param(
         [string]$Prompt,
@@ -2315,9 +2355,9 @@ if (-not $SkipDownload) {
         # terminate the running processes first - either silently when the user
         # opts in via -KillRunning / -Force, or after an interactive prompt.
         try {
-            Move-Item $downloaded $xrayPath -Force -ErrorAction Stop
+            Move-Item -LiteralPath $downloaded -Destination $xrayPath -Force -ErrorAction Stop
         }
-        catch [System.IO.IOException] {
+        catch [System.IO.IOException], [System.UnauthorizedAccessException] {
             $running = @(Get-Process -Name 'xray' -ErrorAction SilentlyContinue)
             if ($running.Count -eq 0) {
                 Remove-Item $tempDir -Recurse -Force
@@ -2335,21 +2375,14 @@ if (-not $SkipDownload) {
                 exit 1
             }
 
-            foreach ($proc in $running) {
-                try {
-                    Stop-Process -Id $proc.Id -Force -ErrorAction Stop
-                    Write-Host "Stopped PID $($proc.Id)." -ForegroundColor DarkYellow
-                }
-                catch {
-                    Remove-Item $tempDir -Recurse -Force
-                    Write-Error "Failed to stop PID $($proc.Id): $($_.Exception.Message)"
-                    exit 1
-                }
+            try {
+                Install-XrayBinaryWithRetry -Downloaded $downloaded -Destination $xrayPath
             }
-
-            # Give Windows a moment to release the file handle.
-            Start-Sleep -Milliseconds 500
-            Move-Item $downloaded $xrayPath -Force
+            catch {
+                Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+                Write-Error $_.Exception.Message
+                exit 1
+            }
             Write-Host 'Note: MCP hosts that were using xray will need to restart it.' -ForegroundColor Yellow
         }
         Remove-Item $tempDir -Recurse -Force
