@@ -558,16 +558,16 @@ pub fn read_file_lossy(path: &std::path::Path) -> std::io::Result<(String, bool)
 /// Invalid surrogate pairs are replaced with U+FFFD.
 ///
 /// LIB-009: an odd-length input means the file was truncated or corrupted.
-/// `chunks_exact(2)` would silently drop the trailing byte, losing the last
+/// Splitting into 2-byte pairs could silently drop the trailing byte, losing the last
 /// code unit. Append a replacement character so downstream tokenisation sees
 /// the truncation rather than masking it.
 fn decode_utf16le(bytes: &[u8]) -> String {
-    let u16_iter = bytes.chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
+    let (pairs, remainder) = bytes.as_chunks::<2>();
+    let u16_iter = pairs.iter().map(|pair| u16::from_le_bytes(*pair));
     let mut s: String = char::decode_utf16(u16_iter)
         .map(|r| r.unwrap_or('\u{FFFD}'))
         .collect();
-    if !bytes.len().is_multiple_of(2) {
+    if !remainder.is_empty() {
         s.push('\u{FFFD}');
     }
     s
@@ -579,12 +579,12 @@ fn decode_utf16le(bytes: &[u8]) -> String {
 ///
 /// LIB-009: same trailing-byte handling as [`decode_utf16le`].
 fn decode_utf16be(bytes: &[u8]) -> String {
-    let u16_iter = bytes.chunks_exact(2)
-        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
+    let (pairs, remainder) = bytes.as_chunks::<2>();
+    let u16_iter = pairs.iter().map(|pair| u16::from_be_bytes(*pair));
     let mut s: String = char::decode_utf16(u16_iter)
         .map(|r| r.unwrap_or('\u{FFFD}'))
         .collect();
-    if !bytes.len().is_multiple_of(2) {
+    if !remainder.is_empty() {
         s.push('\u{FFFD}');
     }
     s

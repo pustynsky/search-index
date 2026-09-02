@@ -12,6 +12,8 @@
 
 - **Corrected zero-result definition hints.** Wrong-kind and cross-file suggestions now preserve exact-name and remaining query filters, while multi-name content fallbacks report each matching term.
 
+- **Updated UTF-16 decoding for current Clippy.** Byte-pair handling now uses slice chunks directly without changing decoding or truncated-tail behavior.
+
 ## 0.6.1 (2026-08-09)
 
 - **Hardened standalone installer dependencies.** Public releases now download over HTTPS without requiring `gh`; Git-managed and Hidden setup validates the work tree and runtime filters before mutation and rolls back failures transactionally.
