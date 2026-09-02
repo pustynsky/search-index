@@ -6,6 +6,8 @@
 
 - **Fixed mixed substring and phrase OR searches.** Each term now keeps its own matching semantics before global ranking, counting, and pagination; phrase verification failures also report partial results.
 
+- **Hardened installer updates of a running `xray.exe`.** If an MCP host restarts Xray while the installer replaces the binary, setup now stops the restarted process and retries instead of failing with "Cannot create a file when that file already exists."
+
 - **Disabled default MCP performance metrics.** The installer no longer adds `--metrics`, reducing response payloads for newly configured servers.
 
 - **Corrected zero-result definition hints.** Wrong-kind and cross-file suggestions now preserve exact-name and remaining query filters, while multi-name content fallbacks report each matching term.

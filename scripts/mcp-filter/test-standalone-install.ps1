@@ -43,7 +43,8 @@
     Exits 0 on all-pass, 1 on any failure.
 #>
 param(
-    [switch]$KeepTempDir
+    [switch]$KeepTempDir,
+    [switch]$BinaryRetryOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -885,6 +886,131 @@ function Get-DocumentedCmdInstallCommands {
             Where-Object { $_ -match '^powershell\.exe .*setup-xray\.ps1' })
 }
 
+function Test-XrayBinaryRetry {
+    Write-Host '== binary replacement retry ==' -ForegroundColor Cyan
+
+    $tokens = $null
+    $parseErrors = $null
+    $ast = [System.Management.Automation.Language.Parser]::ParseFile($canonicalSetup, [ref]$tokens, [ref]$parseErrors)
+    Assert-True 'setup script parses before retry test' ($parseErrors.Count -eq 0)
+    if ($parseErrors.Count -ne 0) { return }
+
+    $functionAst = $ast.Find({
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Install-XrayBinaryWithRetry'
+    }, $true)
+    Assert-True 'retry helper exists' ($null -ne $functionAst)
+    if ($null -eq $functionAst) { return }
+
+    . ([scriptblock]::Create($functionAst.Extent.Text))
+    $tempDir = Join-Path ([IO.Path]::GetTempPath()) ("xray-deploy-retry-" + [Guid]::NewGuid().ToString('N'))
+    $downloaded = Join-Path $tempDir 'downloaded.exe'
+    $destination = Join-Path $tempDir 'xray.exe'
+    $script:expectedDestination = $destination
+    $destinationArgument = 'child\..\xray.exe'
+    $script:moveAttempts = 0
+    $script:processEnumerations = 0
+    $script:stoppedIds = @()
+    $script:sleepDelays = @()
+    $script:alwaysFailMove = $false
+
+    function Get-Process {
+        [CmdletBinding()]
+        param([string]$Name, [int]$Id)
+
+        $script:processEnumerations++
+        @(
+            [pscustomobject]@{ Id = 100 + $script:processEnumerations; Path = $script:expectedDestination },
+            [pscustomobject]@{ Id = 999; Path = (Join-Path $tempDir 'other\xray.exe') }
+        )
+    }
+
+    function Stop-Process {
+        [CmdletBinding()]
+        param([int]$Id, [switch]$Force)
+        $script:stoppedIds += $Id
+    }
+
+    function Wait-Process {
+        [CmdletBinding()]
+        param(
+            [Parameter(ValueFromPipeline)] $InputObject,
+            [int]$Timeout
+        )
+        process { }
+    }
+
+    function Start-Sleep {
+        param([int]$Milliseconds)
+        $script:sleepDelays += $Milliseconds
+    }
+
+    function Move-Item {
+        [CmdletBinding()]
+        param(
+            [string]$LiteralPath,
+            [string]$Destination,
+            [switch]$Force
+        )
+
+        $script:moveAttempts++
+        if ($Destination -ne $script:expectedDestination) {
+            throw "Destination escaped the test fixture: $Destination"
+        }
+        if ($script:alwaysFailMove) {
+            throw [System.UnauthorizedAccessException]::new('Access denied.')
+        }
+        if ($script:moveAttempts -lt 3) {
+            throw [System.IO.IOException]::new('Cannot create a file when that file already exists.')
+        }
+        [IO.File]::Delete($Destination)
+        [IO.File]::Move($LiteralPath, $Destination)
+    }
+
+    try {
+        New-Item -ItemType Directory -Path $tempDir -Force | Out-Null
+        [IO.File]::WriteAllText($downloaded, 'new binary')
+        [IO.File]::WriteAllText($destination, 'old binary')
+
+        Push-Location $tempDir
+        try {
+            Install-XrayBinaryWithRetry -Downloaded $downloaded -Destination $destinationArgument
+        }
+        finally {
+            Pop-Location
+        }
+
+        Assert-True 'replacement normalizes the destination path' (-not (Test-Path -LiteralPath $downloaded))
+        Assert-True 'replacement retries after transient IO failures' ($script:moveAttempts -eq 3)
+        Assert-True 'replacement stops each restarted target process' (($script:stoppedIds -join ',') -eq '101,102,103')
+        Assert-True 'replacement does not stop another xray path' ($script:stoppedIds -notcontains 999)
+        Assert-True 'replacement uses incremental backoff' (($script:sleepDelays -join ',') -eq '250,500')
+        Assert-True 'replacement installs downloaded binary' (([IO.File]::ReadAllText($destination)) -eq 'new binary')
+
+        [IO.File]::WriteAllText($downloaded, 'newer binary')
+        $script:alwaysFailMove = $true
+        $script:moveAttempts = 0
+        $script:sleepDelays = @()
+        $failure = $null
+        try {
+            Install-XrayBinaryWithRetry -Downloaded $downloaded -Destination $destination
+        }
+        catch {
+            $failure = $_
+        }
+        Assert-True 'replacement retries access-denied failures five times' ($script:moveAttempts -eq 5)
+        Assert-True 'replacement stops after four backoffs' (($script:sleepDelays -join ',') -eq '250,500,750,1000')
+        Assert-True 'replacement reports the final failure' ($null -ne $failure -and $failure.Exception.Message -match 'after 5 attempts')
+    }
+    finally {
+        if ([IO.Directory]::Exists($tempDir)) {
+            [IO.Directory]::Delete($tempDir, $true)
+        }
+    }
+}
+
+
 function Invoke-CmdDocumentationInstall {
     Write-Host '== CMD documentation launcher ==' -ForegroundColor Cyan
 
@@ -1032,6 +1158,16 @@ function Invoke-CmdDocumentationInstall {
     }
 }
 
+Test-XrayBinaryRetry
+if ($BinaryRetryOnly) {
+    if ($script:failCount -gt 0) {
+        Write-Host "binary-retry: $($script:failCount) FAILED." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host 'binary-retry: ALL PASSED.' -ForegroundColor Green
+    exit 0
+}
+Write-Host ''
 Invoke-CmdDocumentationInstall
 Write-Host ''
 
