@@ -2,6 +2,10 @@
 
 ## 0.6.2 (2026-08-12)
 
+- **Clearer installer error when Git is missing.** Setup now reports that `git.exe` is unavailable on `PATH` separately from repository inspection failures and explains how to retry.
+
+- **Fixed tool responses waiting on indexes during startup.** `INDEX_BUILDING` responses and optional metrics now use nonblocking index reads, so a background write lock cannot stall readiness replies. `xray_info` also reports trigram status as `busy` when the content index cannot be read immediately.
+
 - **Compact `xray_grep` responses by default.** Performance and index telemetry is now omitted unless the server runs with `--metrics`; result counts, scope, warnings, and correctness diagnostics remain available.
 
 - **Fixed mixed substring and phrase OR searches.** Each term now keeps its own matching semantics before global ranking, counting, and pagination; phrase verification failures also report partial results.

@@ -2114,8 +2114,12 @@ $gitMetadataRoot = Find-GitMetadataRoot -StartPath $RepoPath
 $gitWorkTreeRoot = if ($gitCommand) { Get-GitWorkTreeRoot -RepoRoot $RepoPath } else { $null }
 $isGitRepo = $null -ne $gitWorkTreeRoot
 
+if (-not $Restore -and $gitMetadataRoot -and -not $gitCommand) {
+    Write-Error "Git metadata was found at $gitMetadataRoot, but git.exe is not installed or is not available on PATH. Install Git for Windows, open a new terminal, and retry. No files were changed."
+    exit 1
+}
 if (-not $Restore -and $gitMetadataRoot -and -not $isGitRepo) {
-    Write-Error "Git metadata was found at $gitMetadataRoot, but git could not inspect the work tree. Ensure git is on PATH and the repository is trusted (safe.directory), then retry. No files were changed."
+    Write-Error "Git metadata was found at $gitMetadataRoot, but git could not inspect the work tree. Ensure the repository is trusted (safe.directory), then retry. No files were changed."
     exit 1
 }
 if (-not $Restore -and $GitVisibility -eq 'Hidden' -and -not $isGitRepo) {
