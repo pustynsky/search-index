@@ -1149,13 +1149,13 @@ fn build_index_not_ready_response(ctx: &HandlerContext, phase: &'static str) -> 
     let files_so_far: usize = match phase {
         "content" => ctx
             .index
-            .read()
+            .try_read()
             .map(|i| i.live_file_count())
             .unwrap_or(0),
         "definition" => ctx
             .def_index
             .as_ref()
-            .and_then(|arc| arc.read().ok().map(|i| i.live_file_count()))
+            .and_then(|arc| arc.try_read().ok().map(|i| i.live_file_count()))
             .unwrap_or(0),
         _ => 0,
     };

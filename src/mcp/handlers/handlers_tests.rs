@@ -472,6 +472,64 @@ fn test_dispatch_grep_while_content_index_building() {
 }
 
 #[test]
+fn test_dispatch_index_building_does_not_wait_for_locked_indexes() {
+    for metrics in [false, true] {
+        for (tool, phase) in [
+            ("xray_definitions", "definition"),
+            ("xray_callers", "definition"),
+            ("xray_grep", "content"),
+            ("xray_info", ""),
+        ] {
+            let ctx = HandlerContext {
+                metrics,
+                content_ready: Arc::new(AtomicBool::new(false)),
+                def_ready: Arc::new(AtomicBool::new(false)),
+                def_index: Some(Arc::new(RwLock::new(Default::default()))),
+                ..make_empty_ctx()
+            };
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let result = std::thread::scope(|scope| {
+                let content_guard = ctx.index.write().unwrap();
+                let definition_guard = ctx.def_index.as_ref().unwrap().write().unwrap();
+                let request = scope.spawn(|| {
+                    sender.send(dispatch_tool(&ctx, tool, &json!({}))).unwrap();
+                });
+                let response = receiver.recv_timeout(std::time::Duration::from_secs(2));
+                drop(definition_guard);
+                drop(content_guard);
+                request.join().unwrap();
+                response.unwrap_or_else(|error| {
+                    panic!("{tool} with metrics={metrics} waited for a building index: {error}")
+                })
+            });
+
+            let body: Value = serde_json::from_str(&result.content[0].text).unwrap();
+            if tool == "xray_info" {
+                assert!(!result.is_error);
+                assert_eq!(body["trigram"]["status"], "busy");
+                let indexes = body["indexes"].as_array().unwrap();
+                for index_type in ["content", "definition"] {
+                    assert!(indexes.iter().any(|index| {
+                        index["type"] == index_type && index["status"] == "building"
+                    }));
+                }
+            } else {
+                assert!(result.is_error);
+                assert_eq!(body["error"], "INDEX_BUILDING");
+                assert_eq!(body["phase"], phase);
+                assert_eq!(body["filesIndexedSoFar"], 0);
+                assert!(body["hint"].as_str().unwrap().contains("xray_info"));
+            }
+            if metrics {
+                assert!(body["summary"]["totalTimeMs"].is_number());
+                assert!(body["summary"].get("indexFiles").is_none());
+                assert!(body["summary"].get("indexTokens").is_none());
+            }
+        }
+    }
+}
+
+#[test]
 fn test_dispatch_definitions_while_def_index_building() {
     let ctx = HandlerContext {
         def_ready: Arc::new(AtomicBool::new(false)),

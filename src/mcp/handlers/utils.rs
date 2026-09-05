@@ -992,6 +992,7 @@ pub(crate) enum TrigramReadiness {
     Ready,
     Dirty,
     Building,
+    Busy,
 }
 
 impl TrigramReadiness {
@@ -1000,6 +1001,7 @@ impl TrigramReadiness {
             Self::Ready => "ready",
             Self::Dirty => "dirty",
             Self::Building => "building",
+            Self::Busy => "busy",
         }
     }
 }
@@ -1094,14 +1096,20 @@ impl TrigramRebuildGate {
         &self,
         index: &std::sync::RwLock<crate::ContentIndex>,
     ) -> TrigramRuntimeSnapshot {
-        let index = index.read().unwrap_or_else(|error| error.into_inner());
+        let index = match index.try_read() {
+            Ok(index) => Some(index),
+            Err(std::sync::TryLockError::Poisoned(error)) => Some(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => None,
+        };
         let building = self.building.lock().unwrap_or_else(|error| error.into_inner());
         let status = if *building {
             TrigramReadiness::Building
-        } else if index.trigram_dirty {
-            TrigramReadiness::Dirty
         } else {
-            TrigramReadiness::Ready
+            match index {
+                Some(ref index) if index.trigram_dirty => TrigramReadiness::Dirty,
+                Some(_) => TrigramReadiness::Ready,
+                None => TrigramReadiness::Busy,
+            }
         };
         let telemetry = self.telemetry.lock().unwrap_or_else(|error| error.into_inner());
         TrigramRuntimeSnapshot {
@@ -3303,7 +3311,7 @@ pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start
             }
             summary["totalTimeMs"] = json!(total_time);
 
-            if let Ok(idx) = ctx.index.read() {
+            if let Ok(idx) = ctx.index.try_read() {
                 summary["indexFiles"] = json!(idx.live_file_count());
                 summary["indexTokens"] = json!(idx.index.len());
             }

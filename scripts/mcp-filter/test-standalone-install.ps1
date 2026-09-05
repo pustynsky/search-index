@@ -877,6 +877,39 @@ exit `$LASTEXITCODE
 }
 
 
+function Invoke-MissingGitFailure {
+    param(
+        [Parameter(Mandatory)] [string]$RuntimeLabel,
+        [Parameter(Mandatory)] [string]$RuntimeExe
+    )
+
+    $ErrorActionPreference = 'Continue'
+    Write-Host ("== {0}: missing Git dependency ==" -f $RuntimeLabel) -ForegroundColor Cyan
+
+    $repo = Join-Path ([IO.Path]::GetTempPath()) ("xray-no-git-repo-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $runtimePath = (Get-Command $RuntimeExe -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+    New-Item -ItemType Directory -Path (Join-Path $repo '.git') -Force | Out-Null
+
+    $oldPath = $env:PATH
+    try {
+        $env:PATH = [Environment]::SystemDirectory
+        $output = @(& $runtimePath -NoProfile -File $canonicalSetup -RepoPath $repo -InstallDir (Join-Path $repo 'install') -SkipDownload -EnableVSCode -Force 2>&1)
+        $exitCode = $LASTEXITCODE
+        $outputText = ((($output -join ' ') -replace '\x1b\[[0-9;]*m', '') -replace '[\r\n|]+', ' ') -replace '\s+', ' '
+
+        Assert-True "$RuntimeLabel : missing Git exits 1" ($exitCode -eq 1)
+        Assert-True "$RuntimeLabel : missing Git error names git.exe and PATH" ($outputText.Contains('git.exe is not installed or is not available on PATH'))
+        Assert-True "$RuntimeLabel : missing Git error gives install guidance" ($outputText.Contains('Install Git for Windows, open a new terminal, and retry'))
+        Assert-True "$RuntimeLabel : missing Git does not create MCP config" (-not ((Test-Path (Join-Path $repo '.vscode\mcp.json')) -or (Test-Path (Join-Path $repo '.mcp.json'))))
+        Assert-True "$RuntimeLabel : missing Git does not create install directory" (-not (Test-Path (Join-Path $repo 'install')))
+    }
+    finally {
+        $env:PATH = $oldPath
+        Remove-Item -Path $repo -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+
 function Get-DocumentedCmdInstallCommands {
     param([Parameter(Mandatory)] [string]$Path)
 
@@ -1174,6 +1207,8 @@ Write-Host ''
 # Round 1: current host runtime.
 $currentLabel = "PS $($PSVersionTable.PSVersion)"
 $currentExe = if ($PSVersionTable.PSVersion.Major -ge 6) { 'pwsh' } else { 'powershell.exe' }
+Invoke-MissingGitFailure -RuntimeLabel $currentLabel -RuntimeExe $currentExe
+Write-Host ''
 [void](Invoke-StandaloneInstall -RuntimeLabel $currentLabel -RuntimeExe $currentExe)
 Write-Host ''
 [void](Invoke-InMemoryInstall -RuntimeLabel $currentLabel -RuntimeExe $currentExe)
@@ -1192,6 +1227,8 @@ Write-Host ''
 if ($PSVersionTable.PSVersion.Major -ge 6) {
     $ps51 = Get-Command powershell.exe -ErrorAction SilentlyContinue
     if ($ps51) {
+        Write-Host ''
+        Invoke-MissingGitFailure -RuntimeLabel 'PS 5.1' -RuntimeExe 'powershell.exe'
         Write-Host ''
         [void](Invoke-StandaloneInstall -RuntimeLabel 'PS 5.1' -RuntimeExe 'powershell.exe')
         Write-Host ''
@@ -1214,6 +1251,8 @@ else {
     # Running under PS 5.1 already — try pwsh as the cross-runtime check.
     $pwsh = Get-Command pwsh -ErrorAction SilentlyContinue
     if ($pwsh) {
+        Write-Host ''
+        Invoke-MissingGitFailure -RuntimeLabel 'PS 7+' -RuntimeExe 'pwsh'
         Write-Host ''
         [void](Invoke-StandaloneInstall -RuntimeLabel 'PS 7+' -RuntimeExe 'pwsh')
         Write-Host ''
