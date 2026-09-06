@@ -327,7 +327,7 @@ pub(crate) fn try_intercept(
         }))));
     }
 
-    if let Some(line_num) = args.contains_line {
+    let result = if let Some(line_num) = args.contains_line {
         Some(handle_contains_line(
             &xml_defs,
             &source,
@@ -345,7 +345,8 @@ pub(crate) fn try_intercept(
             args,
             search_start,
             &warnings,
-        )) }
+        )) };
+    result.map(|result| finalize_xml_bodies(result, args, &source, &file_path, &xml_defs))
 }
 
 // ---------------------------------------------------------------------------
@@ -516,6 +517,52 @@ pub(crate) fn extract_file_extension(file_filter: &str) -> Option<String> {
 // containsLine path
 // ---------------------------------------------------------------------------
 
+fn finalize_xml_bodies(
+    result: ToolCallResult,
+    args: &DefinitionSearchArgs,
+    source: &str,
+    file_path: &str,
+    xml_defs: &[XmlDefinition],
+) -> ToolCallResult {
+    if !args.include_body || result.is_error { return result; }
+    let Ok(mut output) = serde_json::from_str::<Value>(&result.content[0].text) else { return result; };
+    let Some(definitions) = output.get_mut("definitions").and_then(Value::as_array_mut) else { return result; };
+    if let Some(target) = &args.body_target {
+        let excluded = args.exclude_patterns.matches(&file_path.replace('\\', "/").to_lowercase());
+        if excluded || definitions.len() != 1
+            || crate::path_identity_key(std::path::Path::new(file_path))
+                != crate::path_identity_key(std::path::Path::new(&args.file_filter_raw[0]))
+            || definitions[0]["lines"] != format!("{}-{}", target.start_line, target.end_line)
+        {
+            return ToolCallResult::error(json_to_string(&json!({"error": {
+                "code": "body_target_changed", "message": "Body target is missing, excluded, or ambiguous; restart the symbol lookup."
+            }})));
+        }
+    }
+    let mut cache = std::collections::HashMap::from([(file_path.to_string(), Some(super::utils::BodySource::new(source.to_string())))]);
+    let mut emitted = 0;
+    for obj in definitions {
+        let Some(definition) = xml_defs.iter().find(|definition| {
+            obj["name"] == definition.entry.name
+                && obj["lines"] == format!("{}-{}", definition.entry.line_start, definition.entry.line_end)
+        }) else { continue; };
+        if let Some(anchor) = args.contains_line { obj["bodyAnchorLine"] = json!(anchor); }
+        super::utils::inject_body_into_obj(
+            obj, file_path, definition.entry.line_start, definition.entry.line_end,
+            &mut cache, &mut emitted, args.max_body_lines, args.max_total_body_lines,
+            args.include_doc_comments, args.body_line_start, args.body_line_end,
+        );
+        if let Some(target) = &args.body_target
+            && obj["bodySourceHash"].as_str() != Some(target.source_hash.as_str())
+        {
+            return ToolCallResult::error(json_to_string(&json!({"error": {
+                "code": "body_source_changed", "message": "Source changed; restart the body read. Do not combine these fragments."
+            }})));
+        }
+    }
+    ToolCallResult::success(json_to_string(&output))
+}
+
 fn handle_contains_line(
     xml_defs: &[XmlDefinition],
     source: &str,
@@ -634,7 +681,13 @@ fn handle_name_filter(
     warnings: &[String],
 ) -> ToolCallResult {
     // Phase 1: classify matches
-    let matches = classify_matches(xml_defs, name, args.exact_name_only);
+    let mut matches = classify_matches(xml_defs, name, args.exact_name_only);
+    if let Some(target) = &args.body_target {
+        matches.retain(|matched| {
+            let definition = &xml_defs[matched.def_index].entry;
+            definition.line_start == target.start_line && definition.line_end == target.end_line
+        });
+    }
 
     // Phase 2: compute de-duplication set (name-matched indices).
     let name_matched: HashSet<usize> = matches

@@ -12,6 +12,7 @@ mod grep;
 pub(crate) mod token_regex;
 pub(crate) use grep::{start_warm_trigram_index, warm_trigram_index};
 pub(crate) mod utils;
+mod body_delivery;
 #[cfg(feature = "lang-xml")]
 mod xml_on_demand;
 
@@ -378,11 +379,22 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "bodyLineStart": {
                         "type": "integer",
-                        "description": "Filter body to start at this absolute file line number (1-based, inclusive). Use with bodyLineEnd to extract a precise slice from a large method body, avoiding response truncation. Example: containsLine=1335, bodyLineStart=1330, bodyLineEnd=1345 returns only 15 lines of the body."
+                        "description": "Body range start (absolute file line, 1-based, inclusive). Overrides anchor centering; pair with bodyLineEnd."
                     },
                     "bodyLineEnd": {
                         "type": "integer",
                         "description": "Filter body to end at this absolute file line number (1-based, inclusive). Use with bodyLineStart for precise body extraction."
+                    },
+                    "bodyTarget": {
+                        "type": "object",
+                        "description": "Versioned body continuation target returned by Xray. Requires one exact file/name and includeBody; incompatible with containsLine and list cursors.",
+                        "properties": {
+                            "sourceHash": { "type": "string", "pattern": "^sha256:[0-9a-fA-F]{64}$" },
+                            "startLine": { "type": "integer", "minimum": 1 },
+                            "endLine": { "type": "integer", "minimum": 1 }
+                        },
+                        "required": ["sourceHash", "startLine", "endLine"],
+                        "additionalProperties": false
                     },
                     "audit": {
                         "type": "boolean",
@@ -1357,8 +1369,14 @@ fn finalize_response(
         None => result,
     };
 
+    let transport_limit = match body_delivery::transport_limit() {
+        Ok(limit) => limit,
+        Err(error) => return error,
+    };
+    let result = body_delivery::prepare(result, tool_name, arguments);
+
     // Determine effective response budget:
-    // - xray_help: 32KB (static reference content)
+    // - xray_help: 48KB (static reference content)
     // - Multi-method callers: 32KB × N, capped at 128KB
     // - Any tool with includeBody=true: 64KB (source code is large)
     // - Everything else: default (16KB)
@@ -1396,6 +1414,10 @@ fn finalize_response(
         ctx.max_response_bytes
     };
 
+    let effective_max = transport_limit.map(|limit| {
+        if effective_max == 0 { limit } else { effective_max.min(limit) }
+    }).unwrap_or(effective_max);
+
     let result = if ctx.metrics {
         if tool_name == "xray_help" {
             utils::truncate_response_if_needed(result, effective_max)
@@ -1406,12 +1428,17 @@ fn finalize_response(
         utils::truncate_response_if_needed(result, effective_max)
     };
 
-    utils::render_guidance_prefix_for_policy_with_budget(
+    let result = utils::render_guidance_prefix_for_policy_with_budget(
         result,
         tool_name,
         include_policy_reminder,
         effective_max,
-    )
+    );
+    if transport_limit.is_some_and(|limit| result.content.iter().map(|content| content.text.len()).sum::<usize>() > limit) {
+        body_delivery::budget_error()
+    } else {
+        result
+    }
 }
 
 // ─── Small inline handlers ──────────────────────────────────────────

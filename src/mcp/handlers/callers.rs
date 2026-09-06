@@ -1542,7 +1542,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
     };
 
     // Mutable state for body injection (shared across recursive calls)
-    let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut file_cache: HashMap<String, Option<super::utils::BodySource>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
 
     let typescript_roots = if exact_root_definition.is_none() {
@@ -2119,7 +2119,7 @@ fn handle_multi_method_callers(
     // Shared mutable state across all methods:
     // - file_cache: reuse file reads across methods (optimization)
     // - total_body_lines_emitted: SHARED body budget (prevents response explosion)
-    let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut file_cache: HashMap<String, Option<super::utils::BodySource>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
     let mut total_nodes_all: usize = 0;
     let mut total_nodes_lower_bound_all: usize = 0;
@@ -3150,7 +3150,7 @@ struct CallerTreeBuilder<'a> {
     ctx: &'a CallerTreeContext<'a>,
     max_depth: usize,
     visited: HashSet<String>,
-    file_cache: HashMap<String, Option<String>>,
+    file_cache: HashMap<String, Option<super::utils::BodySource>>,
     total_body_lines_emitted: usize,
     root_accounted_callers: HashSet<String>,
     total_limit_hit: bool,
@@ -3673,7 +3673,7 @@ fn build_root_method_info(
     class_filter: Option<&str>,
     def_idx: &DefinitionIndex,
     root_definition: Option<u32>,
-    file_cache: &mut HashMap<String, Option<String>>,
+    file_cache: &mut HashMap<String, Option<super::utils::BodySource>>,
     total_body_lines_emitted: &mut usize,
     max_body_lines: usize,
     max_total_body_lines: usize,
@@ -4963,7 +4963,7 @@ struct CalleeTreeBuilder<'a> {
     ctx: &'a CallerTreeContext<'a>,
     max_depth: usize,
     visited: HashSet<String>,
-    file_cache: HashMap<String, Option<String>>,
+    file_cache: HashMap<String, Option<super::utils::BodySource>>,
     total_body_lines_emitted: usize,
     total_limit_hit: bool,
     per_level_dropped: usize,

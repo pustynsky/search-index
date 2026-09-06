@@ -50,6 +50,14 @@ pub(crate) const ALL_SORT_FIELDS: &[&str] = &[
 
 // ─── Parsed arguments struct ─────────────────────────────────────────
 
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct BodyTarget {
+    pub source_hash: String,
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
 /// Parsed and validated arguments for the xray_definitions tool.
 /// Extracted from raw JSON [`Value`] by [`parse_definition_args`].
 #[derive(Debug, Clone)]
@@ -70,6 +78,7 @@ pub(crate) struct DefinitionSearchArgs {
     pub max_total_body_lines: usize,
     pub body_line_start: Option<u32>,
     pub body_line_end: Option<u32>,
+    pub body_target: Option<BodyTarget>,
     pub audit: bool,
     pub audit_min_bytes: u64,
     pub cross_validate: bool,
@@ -228,6 +237,23 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
     let exact_name_only = args.get("exactNameOnly").and_then(|v| v.as_bool()).unwrap_or(false);
     let auto_correct = args.get("autoCorrect").and_then(|v| v.as_bool()).unwrap_or(true);
 
+    let body_target = args.get("bodyTarget").map(|value| {
+        serde_json::from_value::<BodyTarget>(value.clone()).map_err(|error| format!("Invalid bodyTarget: {error}"))
+    }).transpose()?;
+    if let Some(target) = &body_target {
+        let valid_hash = target.source_hash.strip_prefix("sha256:")
+            .is_some_and(|hash| hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        if !valid_hash || target.start_line == 0 || target.end_line < target.start_line {
+            return Err("bodyTarget requires a sha256 sourceHash and a valid definition line range".to_string());
+        }
+        if files.len() != 1 || names.len() != 1 || !exact_name_only || !include_body
+            || contains_line.is_some() || audit || use_regex
+            || args.get("offset").is_some() || args.get("continuationToken").is_some()
+        {
+            return Err("bodyTarget requires one file, one exact name, includeBody=true, and no containsLine, audit, regex, or list cursor".to_string());
+        }
+    }
+
     // Pre-compute filter patterns to avoid per-item allocations
     let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&exclude_dir);
     let file_filter_terms = file_filter.as_ref().map(|ff| {
@@ -260,6 +286,7 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         max_total_body_lines,
         body_line_start,
         body_line_end,
+        body_target,
         audit,
         audit_min_bytes,
         cross_validate,
@@ -507,6 +534,11 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
     };
 
     let total_results = results.len();
+    if parsed.body_target.is_some() && total_results != 1 {
+        return ToolCallResult::error(json_to_string(&json!({
+            "error": {"code": "body_target_changed", "message": "Body target is missing, excluded, or ambiguous; restart the symbol lookup."}
+        })));
+    }
 
     // 6a. Auto-correction: if 0 results, try kind/name correction before generating hints
     if total_results == 0
@@ -734,7 +766,7 @@ fn handle_contains_line_mode(
     };
 
     let mut containing_defs: Vec<Value> = Vec::new();
-    let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut file_cache: HashMap<String, Option<super::utils::BodySource>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
     let mut total_body_lines_available: usize = 0;
 
@@ -793,7 +825,7 @@ fn handle_contains_line_mode(
                     if i == 0 {
                         // Track available lines for innermost only (parents don't emit body)
                         total_body_lines_available += (def.line_end.saturating_sub(def.line_start) + 1) as usize;
-                        // Innermost definition (smallest range) — emit full body
+                        obj["bodyAnchorLine"] = json!(line_num);
                         inject_body_into_obj(
                             &mut obj, file_path, def.line_start, def.line_end,
                             &mut file_cache, &mut total_body_lines_emitted,
@@ -1224,6 +1256,13 @@ fn apply_entry_filters_in_scope<'a>(
         .filter_map(|&idx| {
             let def = index.definitions.get(idx as usize)?;
             let file_path = index.files.get(def.file_id as usize)?;
+            if let Some(target) = &args.body_target
+                && (def.line_start != target.start_line || def.line_end != target.end_line
+                    || crate::path_identity_key(std::path::Path::new(file_path))
+                        != crate::path_identity_key(std::path::Path::new(&args.file_filter_raw[0])))
+            {
+                return None;
+            }
 
             // Legacy callers can still pass global candidates. The handler
             // skips this path after ID-based file-scope intersection.
@@ -1800,7 +1839,7 @@ fn format_search_output(
     scope_telemetry: Option<&DefinitionScopeTelemetry>,
     page_request: &PageRequest,
 ) -> ToolCallResult {
-    let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut file_cache: HashMap<String, Option<super::utils::BodySource>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
     // Count total body lines available (before truncation) for size hint
     let total_body_lines_available: usize = if args.include_body {
@@ -1813,6 +1852,13 @@ fn format_search_output(
             &mut file_cache, &mut total_body_lines_emitted,
         )
     }).collect();
+    if let Some(target) = &args.body_target
+        && (defs_json.len() != 1 || defs_json[0]["bodySourceHash"].as_str() != Some(target.source_hash.as_str()))
+    {
+        return ToolCallResult::error(json_to_string(&json!({
+            "error": {"code": "body_source_changed", "message": "Source changed or cannot be read; restart the body read. Do not combine these fragments."}
+        })));
+    }
 
     // Cross-index enrichment: add usageCount from content index
     // (read through pre-acquired content guard — see lock order contract
@@ -1898,7 +1944,7 @@ fn format_definition_entry(
     def_idx: u32,
     def: &DefinitionEntry,
     args: &DefinitionSearchArgs,
-    file_cache: &mut HashMap<String, Option<String>>,
+    file_cache: &mut HashMap<String, Option<super::utils::BodySource>>,
     total_body_lines_emitted: &mut usize,
 ) -> Value {
     let file_path = index.files.get(def.file_id as usize)
