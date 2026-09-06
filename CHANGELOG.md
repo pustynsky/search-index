@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Stabilized stdio delivery tests across platforms.** Fixtures wait for the definition index and use canonical paths, including Windows 8.3 aliases.
+
 - **Definition file-scope diagnostics.** File-filtered searches and `containsLine` lookups now report missing files, full or partial `excludeDir` exclusions, and symbol misses in `summary.scopeDiagnostic`. Partial exclusions remain visible when no symbols match. Bounded excluded-file samples echo the supplied patterns; candidate counts describe file scope before symbol filters. Empty file scopes suppress name suggestions, while unmatched ordinary file filters retain nearest-file and unsupported-extension hints. Scope selection and diagnostics share one file-list pass. XML on-demand applies exclusions after sandbox validation and before reading content; unread candidate counts remain unknown. XML path resolution precedes incompatible-kind hints, so `missing.xml` with `kind=method` reports a resolution error. File/exclusion matching, public arguments, exact-name behavior, and result-status contracts are unchanged.
 
 - **Recoverable body delivery and bounded response text.** Optional `XRAY_TRANSPORT_MAX_BYTES` caps final UTF-8 response text, including guidance and metrics. Large bodies retain contiguous fragments with version-checked continuation arguments where replay is supported; restricted queries retain fragments with explicit continuation-unavailable metadata. Internal source bookkeeping is omitted from delivered JSON and its byte budget. `containsLine` centers body windows on the anchor unless an explicit range is supplied, including XML on-demand reads. List pages now include ready-to-run `nextArgs` tied to the final byte-fitted cursor.
