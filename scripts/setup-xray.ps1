@@ -248,6 +248,41 @@ function Normalize-ExtensionList {
             Sort-Object -Unique) -join ','
 }
 
+function Read-ExtensionSelection {
+    param([string]$Suggested)
+
+    $maxAttempts = 10
+    $useCustom = $false
+    for ($attempt = 0; $attempt -lt $maxAttempts; $attempt++) {
+        $answer = Read-Host 'Use the suggested extensions? [Y/n]'
+        if ([string]::IsNullOrWhiteSpace($answer) -or $answer.Trim() -match '^(y|yes)$') {
+            return $Suggested
+        }
+        if ($answer.Trim() -match '^(n|no)$') {
+            $useCustom = $true
+            break
+        }
+        Write-Host 'Answer y/yes, n/no, or press Enter to accept.' -ForegroundColor Yellow
+    }
+    if (-not $useCustom) {
+        throw 'No valid confirmation received. Re-run setup or supply -Extensions explicitly.'
+    }
+
+    for ($attempt = 0; $attempt -lt $maxAttempts; $attempt++) {
+        $userInput = Read-Host 'Enter extensions separated by commas (e.g. cs,sql,md)'
+        if ([string]::IsNullOrWhiteSpace($userInput) -or $userInput.Trim() -match '^(y|yes|n|no)$') {
+            Write-Host 'Enter an extension list, not a yes/no answer. For .y or .n files, include the dot.' -ForegroundColor Yellow
+            continue
+        }
+        $selected = Normalize-ExtensionList -Value $userInput
+        if ($selected) {
+            return $selected
+        }
+        Write-Host 'Enter at least one extension.' -ForegroundColor Yellow
+    }
+    throw 'No valid extension list received. Input may be closed. Re-run setup or supply -Extensions explicitly.'
+}
+
 function Test-WindowsExecutable {
     param([Parameter(Mandatory)] [string]$Path)
 
@@ -2456,13 +2491,7 @@ else {
         Write-Host 'Force enabled; accepting suggested extensions.' -ForegroundColor Yellow
     }
     else {
-        $userInput = Read-Host "`nAccept suggested extensions, or enter your own (comma-separated) [Enter = accept]"
-        if ([string]::IsNullOrWhiteSpace($userInput)) {
-            $selectedExts = $suggested
-        }
-        else {
-            $selectedExts = Normalize-ExtensionList -Value $userInput
-        }
+        $selectedExts = Read-ExtensionSelection -Suggested $suggested
     }
 
     if (-not $selectedExts) {

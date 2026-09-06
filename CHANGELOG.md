@@ -2,6 +2,8 @@
 
 ## 0.6.2 (2026-08-12)
 
+- **Separated installer extension confirmation from manual input.** Enter, `y`, or `yes` accepts the suggested list; `n` or `no` opens a separate extension prompt. Bare yes/no answers are retried during manual input; use `.y` or `.n` to select those extensions individually. Each prompt allows ten attempts, then stops with an error, including when input closes during manual entry. Piped custom lists now need a preceding `n`; automation can use `-Extensions` directly. `-Force` and `-Extensions` behavior is unchanged.
+
 - **Clearer installer error when Git is missing.** Setup now reports that `git.exe` is unavailable on `PATH` separately from repository inspection failures and explains how to retry.
 
 - **Fixed tool responses waiting on indexes during startup.** `INDEX_BUILDING` responses and optional metrics now use nonblocking index reads, so a background write lock cannot stall readiness replies. `xray_info` also reports trigram status as `busy` when the content index cannot be read immediately.
