@@ -11,7 +11,7 @@
 >
 > Net effect: **constructor / property / method / field injection through
 > interfaces work out of the box across every mainstream .NET DI
-> container** (Microsoft.Extensions.DependencyInjection, Autofac, Lamar,
+> container** (the built-in .NET container, Autofac, Lamar,
 > SimpleInjector, DryIoc, Ninject, Castle Windsor, Unity, MEF,
 > StrongInject, Pure.DI, Jab, Scrutor). Service-locator-style code
 > (`sp.GetRequiredService<T>()`, `scope.Resolve<T>()`, fluent factory
@@ -233,7 +233,7 @@ and is independent of `xray_callers` — useful as a pre-step to drive a
 xray does not model registrations. Use `xray_grep`:
 
 ```jsonc
-// Microsoft.Extensions.DependencyInjection
+// Built-in .NET container
 { "terms": ["AddSingleton<IFoo", "AddScoped<IFoo", "AddTransient<IFoo"] }
 
 // Autofac
