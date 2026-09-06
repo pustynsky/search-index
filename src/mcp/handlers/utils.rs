@@ -697,6 +697,7 @@ pub(crate) fn looks_like_file_path(path: &str) -> bool {
 pub(crate) struct ExcludePatterns {
     /// Pre-lowercased segment patterns: [("/test/", "test/"), ...]
     segments: Vec<(String, String)>,
+    original: Vec<String>,
 }
 
 impl ExcludePatterns {
@@ -707,16 +708,20 @@ impl ExcludePatterns {
             let lower = excl.to_lowercase();
             (format!("/{}/", lower), format!("{}/", lower))
         }).collect();
-        Self { segments }
+        Self { segments, original: exclude_dirs.to_vec() }
     }
 
     /// Check if a path matches any exclude pattern.
     /// `path_lower_normalized` MUST be pre-lowercased and use forward slashes.
     pub fn matches(&self, path_lower_normalized: &str) -> bool {
-        self.segments.iter().any(|(segment, at_start)| {
+        self.matching_patterns(path_lower_normalized).next().is_some()
+    }
+
+    pub(crate) fn matching_patterns<'a>(&'a self, path_lower_normalized: &'a str) -> impl Iterator<Item = &'a str> {
+        self.segments.iter().zip(&self.original).filter(move |((segment, at_start), _)| {
             path_lower_normalized.contains(segment.as_str())
-            || path_lower_normalized.starts_with(at_start.as_str())
-        })
+                || path_lower_normalized.starts_with(at_start.as_str())
+        }).map(|(_, original)| original.as_str())
     }
 
     pub fn is_empty(&self) -> bool {

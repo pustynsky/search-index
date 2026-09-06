@@ -49,6 +49,18 @@ impl ResolvedFileScope {
     where
         F: FnMut(&str) -> bool,
     {
+        Self::resolve_with_ids(files, has_execution_filter, exact_file_id, |_, path| predicate(path))
+    }
+
+    pub(crate) fn resolve_with_ids<F>(
+        files: &[String],
+        has_execution_filter: bool,
+        exact_file_id: Option<u32>,
+        mut predicate: F,
+    ) -> Self
+    where
+        F: FnMut(u32, &str) -> bool,
+    {
         let started = Instant::now();
         if !has_execution_filter {
             return Self {
@@ -63,15 +75,15 @@ impl ResolvedFileScope {
 
         let (file_ids, strategy) = if let Some(file_id) = exact_file_id {
             let file_ids = files.get(file_id as usize)
-                .filter(|path| predicate(path))
+                .filter(|path| predicate(file_id, path))
                 .map(|_| vec![file_id])
                 .unwrap_or_default();
             (file_ids, ScopeResolutionStrategy::ExactMap)
         } else {
             let file_ids = files.iter().enumerate()
-                .filter(|(_, path)| predicate(path))
-                .map(|(file_id, _)| {
-                    u32::try_from(file_id).expect("content index file_id exceeds u32")
+                .filter_map(|(file_id, path)| {
+                    let file_id = u32::try_from(file_id).expect("content index file_id exceeds u32");
+                    predicate(file_id, path).then_some(file_id)
                 })
                 .collect();
             (file_ids, ScopeResolutionStrategy::LinearScan)
@@ -291,6 +303,29 @@ mod tests {
         assert!(!scope.is_all());
         assert!(!scope.contains(0));
         assert_eq!(scope.skipped_by_scope(), 2);
+    }
+
+    #[test]
+    fn id_aware_resolver_visits_each_candidate_once() {
+        let files = paths(4);
+        for (exact_file_id, expected_visits, expected_selection, strategy) in [
+            (None, vec![0, 1, 2, 3], vec![0, 2], ScopeResolutionStrategy::LinearScan),
+            (Some(2), vec![2], vec![2], ScopeResolutionStrategy::ExactMap),
+            (Some(99), vec![], vec![], ScopeResolutionStrategy::ExactMap),
+        ] {
+            let mut visited = Vec::new();
+            let scope = ResolvedFileScope::resolve_with_ids(&files, true, exact_file_id, |file_id, path| {
+                assert_eq!(path, files[file_id as usize]);
+                visited.push(file_id);
+                file_id % 2 == 0
+            });
+            assert_eq!(visited, expected_visits);
+            assert_eq!(scope.iter_ids().collect::<Vec<_>>(), expected_selection);
+            assert_eq!(scope.strategy(), strategy);
+            for file_id in 0..files.len() as u32 {
+                assert_eq!(scope.contains(file_id), expected_selection.contains(&file_id));
+            }
+        }
     }
 
     #[test]
