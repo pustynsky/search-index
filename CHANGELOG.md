@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Executable scoped follow-up hints.** Definition discovery offers bounded, snapshot-bound reads of selected definitions with schema-shaped arrays and retained filters/budgets. Search alternatives explicitly report semantic changes; cross-tool hints preserve expressible restrictions or explain why no equivalent query exists. Byte-fitted pages drop optional hints when that retains strictly more result entries, keep hints on ties, and preserve or omit structured queries atomically.
+- **Executable scoped follow-up hints.** Definition discovery offers bounded, snapshot-bound reads of selected definitions with schema-shaped arrays and retained filters/budgets. Search alternatives explicitly report semantic changes; cross-tool hints preserve expressible restrictions or explain why no equivalent query exists. Byte-fitted pages drop optional hints when that retains strictly more result entries, keep hints on ties, and preserve or omit structured queries atomically. UTF-16 hint decoding uses fixed-size array chunks for Clippy compatibility.
 
 - **Optional hint snapshots are capped at 1 MiB (1,048,576 source bytes) per file.** Metadata-only discovery skips snapshot hints above this limit and reports `nextQueryUnavailable`; result metadata and explicit body reads remain available. Reads use a size precheck and a capped reader, with at most one extra byte to detect growth. The existing per-response file cache reuses snapshots and skipped reads across the first three selected definitions.
 
