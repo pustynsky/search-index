@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.0 (2026-09-06)
 
 - **Executable scoped follow-up hints.** Definition discovery offers bounded, snapshot-bound reads of selected definitions with schema-shaped arrays and retained filters/budgets. Search alternatives explicitly report semantic changes; cross-tool hints preserve expressible restrictions or explain why no equivalent query exists. Byte-fitted pages drop optional hints when that retains strictly more result entries, keep hints on ties, and preserve or omit structured queries atomically. UTF-16 hint decoding uses fixed-size array chunks for Clippy compatibility.
 
