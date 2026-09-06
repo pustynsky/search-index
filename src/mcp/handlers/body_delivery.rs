@@ -338,6 +338,336 @@ mod tests {
         (temp, ctx, path, lines)
     }
 
+    #[test]
+    fn executable_hints_select_overload_and_preserve_limits() {
+        let (_temp, ctx, path, _) = fixture(2, 50, 4);
+        let request = json!({
+            "file": [path], "name": ["Comp", "Absent"], "kind": ["function"],
+            "excludeDir": ["excluded"], "maxBodyLines": 3, "maxTotalBodyLines": 7,
+            "bodyLineStart": 55, "bodyLineEnd": 65, "includeUsageCount": true,
+        });
+        let result = dispatch_tool(&ctx, "xray_definitions", &request);
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output = payload(&result, 16384);
+        let hints = output["recommendedNextQueries"].as_array().unwrap();
+        assert_eq!(hints.len(), 2);
+        for hint in hints {
+            super::super::arg_validation::assert_generated_query("xray_definitions", &hint["args"]);
+        }
+        let next = &hints[1]["args"];
+        let schema = super::super::arg_validation::test_tool_schema("xray_definitions");
+        for key in ["file", "name", "kind"] {
+            let mut wrong = next.clone();
+            wrong[key] = wrong[key][0].clone();
+            assert!(!schema.is_valid(&wrong), "scalar {key} was accepted");
+        }
+        let mut wrong = next.clone();
+        wrong["bodyTarget"]["startLine"] = json!("51");
+        assert!(!schema.is_valid(&wrong));
+        assert_eq!(next["name"], json!(["Compute"]));
+        assert_eq!(next["file"], request["file"]);
+        assert_eq!(next["exactNameOnly"], true);
+        assert_eq!(next["autoCorrect"], false);
+        for key in ["kind", "excludeDir", "maxBodyLines", "maxTotalBodyLines", "bodyLineStart", "bodyLineEnd", "includeUsageCount"] {
+            assert_eq!(next[key], request[key], "{key}");
+        }
+        let read = dispatch_tool(&ctx, "xray_definitions", next);
+        assert!(!read.is_error, "{}", read.content[0].text);
+        let read = payload(&read, 16384);
+        assert_eq!(read["definitions"].as_array().unwrap().len(), 1);
+        assert_eq!(read["definitions"][0]["lines"], "51-100");
+        assert_eq!(read["definitions"][0]["bodyStartLine"], 55);
+        assert_eq!(read["definitions"][0]["body"].as_array().unwrap().len(), 3);
+        assert!(read.get("recommendedNextQueries").is_none());
+        assert!(read["definitions"][0].get("bodyContinuation").is_some());
+        super::super::arg_validation::assert_generated_query("xray_definitions", &read["definitions"][0]["bodyContinuation"]["nextArgs"]);
+    }
+
+    #[test]
+    fn executable_hints_preserve_regex_discovery_and_all_definition_filters() {
+        let (_temp, ctx, path, _) = fixture(1, 30, 3);
+        {
+            let mut index = ctx.def_index.as_ref().unwrap().write().unwrap();
+            index.definitions[0].parent = Some("Container".to_string());
+            index.definitions[0].attributes = vec!["Marker".to_string()];
+            index.definitions[0].base_types = vec!["Base".to_string()];
+            index.attribute_index.insert("marker".to_string(), vec![0]);
+            index.base_type_index.insert("base".to_string(), vec![0]);
+            index.code_stats.insert(0, crate::definitions::CodeStats {
+                cyclomatic_complexity: 5, cognitive_complexity: 5, max_nesting_depth: 3,
+                param_count: 3, return_count: 3, call_count: 5, lambda_count: 1,
+            });
+        }
+        for names in [json!(["^Comp.*$"]), json!(["Comp", "Absent"])] {
+            let regex = names[0].as_str().unwrap().starts_with('^');
+            let request = json!({
+                "file": [path, "missing.rs"], "name": names, "regex": regex,
+                "kind": ["function", "method"], "parent": ["Container", "Other"],
+                "attribute": "Marker", "baseType": "Base", "baseTypeTransitive": true,
+                "excludeDir": ["excluded"], "minComplexity": 2, "minCognitive": 2,
+                "minNesting": 2, "minParams": 2, "minReturns": 2, "minCalls": 2,
+                "sortBy": "cognitiveComplexity", "includeCodeStats": true, "includeUsageCount": true,
+                "bodyLineStart": 5, "bodyLineEnd": 25, "includeDocComments": false,
+                "maxBodyLines": 4, "maxTotalBodyLines": 6, "maxResults": 2,
+                "autoCorrect": false,
+            });
+            let found = dispatch_tool(&ctx, "xray_definitions", &request);
+            assert!(!found.is_error, "{}", found.content[0].text);
+            let found = payload(&found, 16384);
+            assert_eq!(found["definitions"].as_array().unwrap().len(), 1, "{found}");
+            assert_eq!(found["resultStatus"]["request"]["exactNameOnly"], false);
+            let next = &found["recommendedNextQueries"][0]["args"];
+            super::super::arg_validation::assert_generated_query("xray_definitions", next);
+            assert_eq!(next["file"], json!([path]));
+            assert_eq!(next["name"], json!(["Compute"]));
+            assert_eq!(next["parent"], json!(["Container"]));
+            assert_eq!(next["kind"], json!(["function"]));
+            assert!(next.get("regex").is_none());
+            for key in ["attribute", "baseType", "baseTypeTransitive", "excludeDir", "minComplexity",
+                "minCognitive", "minNesting", "minParams", "minReturns", "minCalls", "sortBy", "includeCodeStats",
+                "includeUsageCount", "bodyLineStart", "bodyLineEnd", "includeDocComments", "maxBodyLines", "maxTotalBodyLines", "maxResults"] {
+                assert_eq!(next[key], request[key], "{key}");
+            }
+            let read = dispatch_tool(&ctx, "xray_definitions", next);
+            assert!(!read.is_error, "{}", read.content[0].text);
+            let read = payload(&read, 16384);
+            assert_eq!(read["definitions"].as_array().unwrap().len(), 1);
+            assert_eq!(read["definitions"][0]["parent"], "Container");
+            assert_eq!(read["definitions"][0]["bodyStartLine"], 5);
+            assert_eq!(read["definitions"][0]["body"].as_array().unwrap().len(), 4);
+            let mut with_docs = next.clone();
+            with_docs["includeDocComments"] = json!(true);
+            let read = dispatch_tool(&ctx, "xray_definitions", &with_docs);
+            assert!(!read.is_error, "{}", read.content[0].text);
+            let read = payload(&read, 16384);
+            assert_eq!(read["definitions"][0]["bodyContinuation"]["nextArgs"]["includeDocComments"], true);
+        }
+    }
+
+    #[test]
+    fn executable_hints_duplicate_basenames_and_ambiguous_ranges() {
+        let (_temp, ctx, path, _) = fixture(1, 10, 1);
+        let nested = std::path::Path::new(&path).parent().unwrap().join("nested").join("sample.rs");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "// nested\n".repeat(10)).unwrap();
+        let nested = crate::clean_path(&nested.to_string_lossy());
+        {
+            let mut index = ctx.def_index.as_ref().unwrap().write().unwrap();
+            index.files.push(nested.clone());
+            let mut duplicate = index.definitions[0].clone();
+            duplicate.file_id = 1;
+            index.definitions.push(duplicate);
+            index.name_index.get_mut("compute").unwrap().push(1);
+            index.kind_index.get_mut(&DefinitionKind::Function).unwrap().push(1);
+            index.file_index.insert(1, vec![1]);
+            index.path_to_id.insert(crate::path_identity_key(std::path::Path::new(&nested)), 1);
+        }
+        let request = json!({"file": ["sample.rs"], "name": ["Comp"]});
+        let result = dispatch_tool(&ctx, "xray_definitions", &request);
+        assert!(!result.is_error);
+        let output = payload(&result, 16384);
+        let hints = output["recommendedNextQueries"].as_array().unwrap();
+        assert_eq!(hints.len(), 2);
+        for hint in hints {
+            let args = &hint["args"];
+            super::super::arg_validation::assert_generated_query("xray_definitions", args);
+            assert!(args.get("maxBodyLines").is_none());
+            let read = dispatch_tool(&ctx, "xray_definitions", args);
+            assert!(!read.is_error, "{}", read.content[0].text);
+            let read = payload(&read, 16384);
+            assert_eq!(read["definitions"].as_array().unwrap().len(), 1);
+            assert_eq!(read["definitions"][0]["file"], args["file"][0]);
+        }
+        {
+            let mut index = ctx.def_index.as_ref().unwrap().write().unwrap();
+            let mut duplicate = index.definitions[0].clone();
+            duplicate.parent = Some("Nested".to_string());
+            index.definitions.push(duplicate);
+            index.name_index.get_mut("compute").unwrap().push(2);
+            index.kind_index.get_mut(&DefinitionKind::Function).unwrap().push(2);
+            index.file_index.get_mut(&0).unwrap().push(2);
+        }
+        let result = dispatch_tool(&ctx, "xray_definitions", &json!({"file": [path], "name": ["Comp"]}));
+        let output = payload(&result, 16384);
+        assert!(output.get("recommendedNextQueries").is_none());
+        assert!(output["nextQueryUnavailable"].as_str().unwrap().contains("ambiguous"));
+        let summary = dispatch_tool(&ctx, "xray_definitions", &json!({"file": [path], "maxResults": 1}));
+        let summary = payload(&summary, 16384);
+        assert!(summary.get("autoSummary").is_some());
+        assert!(summary.get("recommendedNextQueries").is_none());
+    }
+
+    #[test]
+    fn executable_hints_transport_prefix_metrics_and_bound() {
+        struct PrefixReset(Option<bool>);
+        impl Drop for PrefixReset {
+            fn drop(&mut self) { super::super::utils::set_guidance_prefix_override_for_test(self.0); }
+        }
+        for prefix in [false, true] {
+            let _reset = PrefixReset(super::super::utils::set_guidance_prefix_override_for_test(Some(prefix)));
+            for metrics in [false, true] {
+                for limit in [4096, 8192, 16384] {
+                    let (_temp, mut ctx, path, _) = fixture(5, 20, 8);
+                    ctx.metrics = metrics;
+                    with_transport_limit(limit, || {
+                        let result = dispatch_tool(&ctx, "xray_definitions", &json!({
+                            "file": [path], "name": ["Comp"], "excludeDir": ["excluded"], "maxBodyLines": 3,
+                        }));
+                        assert!(!result.is_error, "{}", result.content[0].text);
+                        let output = payload(&result, limit);
+                        if metrics {
+                            assert_eq!(output["summary"]["responseBytes"].as_u64().unwrap() as usize, result.content[0].text.len());
+                        }
+                        let hints = output.get("recommendedNextQueries").and_then(Value::as_array);
+                        if limit >= 8192 { assert!(hints.is_some(), "{output}"); }
+                        if let Some(hints) = hints {
+                            assert!(hints.len() <= 3);
+                            for hint in hints {
+                                let args = &hint["args"];
+                                super::super::arg_validation::assert_generated_query("xray_definitions", args);
+                                let read = dispatch_tool(&ctx, "xray_definitions", args);
+                                assert!(!read.is_error, "{}", read.content[0].text);
+                                let read = payload(&read, limit);
+                                assert_eq!(read["definitions"].as_array().unwrap().len(), 1);
+                                assert_eq!(read["definitions"][0]["lines"], format!("{}-{}", args["bodyTarget"]["startLine"], args["bodyTarget"]["endLine"]));
+                            }
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn executable_hints_cross_tool_selected_file_dispatch() {
+        let (_temp, mut ctx, path, _) = fixture(1, 10, 1);
+        let root = std::path::Path::new(&path).parent().unwrap();
+        ctx.index_base = root.join(".index");
+        let content = crate::build_content_index(&crate::ContentIndexArgs {
+            dir: root.to_string_lossy().to_string(), ext: "rs".to_string(), threads: 1, ..Default::default()
+        }).unwrap();
+        ctx.index = Arc::new(RwLock::new(content));
+        for (tool, args) in [
+            ("xray_grep", json!({"terms": ["line"], "dir": path, "excludeDir": ["excluded"]})),
+            ("xray_fast", json!({"pattern": ["sample.rs"], "dir": root.to_string_lossy(), "ext": ["rs"]})),
+        ] {
+            let result = dispatch_tool(&ctx, tool, &args);
+            assert!(!result.is_error, "{}", result.content[0].text);
+            let output = payload(&result, 16384);
+            let next = &output["summary"]["nextStepQuery"];
+            assert_eq!(next["args"]["file"], json!([path]), "{output}");
+            assert_eq!(next["semanticsChanged"], true);
+            super::super::arg_validation::assert_generated_query("xray_definitions", &next["args"]);
+            let found = dispatch_tool(&ctx, "xray_definitions", &next["args"]);
+            assert!(!found.is_error, "{}", found.content[0].text);
+            let found = payload(&found, 16384);
+            let read_args = &found["recommendedNextQueries"][0]["args"];
+            super::super::arg_validation::assert_generated_query("xray_definitions", read_args);
+            let read = dispatch_tool(&ctx, "xray_definitions", read_args);
+            assert!(!read.is_error, "{}", read.content[0].text);
+            let read = payload(&read, 16384);
+            assert_eq!(read["definitions"].as_array().unwrap().len(), 1);
+            assert_eq!(read["definitions"][0]["name"], "Compute");
+            assert_eq!(read["definitions"][0]["file"], path);
+        }
+    }
+
+    #[test]
+    fn executable_hints_caller_read_scope_drops_root_page_limit() {
+        let expected = json!({
+            "excludeDir": ["excluded"], "maxBodyLines": 12, "maxTotalBodyLines": 24,
+            "includeDocComments": true, "bodyLineStart": 2, "bodyLineEnd": 10,
+        });
+        for root_limit in [0, 1, 100] {
+            let mut original = expected.clone();
+            original["method"] = json!(["Compute"]);
+            original["maxResults"] = json!(root_limit);
+            let scope = super::super::definitions::caller_read_scope(&original).unwrap();
+            assert_eq!(scope, expected);
+            assert!(scope.get("maxResults").is_none());
+        }
+    }
+
+    #[test]
+    fn executable_hints_metadata_source_limit_preserves_results() {
+        let (_temp, ctx, path, _) = fixture(1, 1, 1);
+        let limit = super::super::definitions::MAX_HINT_SOURCE_BYTES;
+        assert_eq!(limit, 1_048_576);
+        let request = json!({"file": [path], "name": ["Compute"]});
+        let expected = payload(&dispatch_tool(&ctx, "xray_definitions", &request), 16384)["definitions"].clone();
+        for size in [limit - 1, limit, limit + 1, 5 * limit] {
+            let mut bytes = vec![b'x'; size];
+            bytes[1] = b'\n';
+            std::fs::write(&path, bytes).unwrap();
+            let result = dispatch_tool(&ctx, "xray_definitions", &request);
+            assert!(!result.is_error, "{}", result.content[0].text);
+            let output = payload(&result, 16384);
+            assert_eq!(output["definitions"], expected, "size={size}");
+            assert_eq!(output["summary"]["returned"], 1);
+            if size <= limit {
+                assert_eq!(output["recommendedNextQueries"].as_array().unwrap().len(), 1);
+                assert!(output.get("nextQueryUnavailable").is_none());
+            } else {
+                assert!(output.get("recommendedNextQueries").is_none());
+                let reason = output["nextQueryUnavailable"].as_str().unwrap();
+                assert!(reason.contains("1 MiB (1048576 bytes) optional hint source limit"), "{reason}");
+            }
+            let mut read_args = request.clone();
+            read_args["includeBody"] = json!(true);
+            let read = dispatch_tool(&ctx, "xray_definitions", &read_args);
+            assert!(!read.is_error, "{}", read.content[0].text);
+            assert_eq!(payload(&read, 16384)["definitions"][0]["body"], json!(["x"]));
+        }
+    }
+
+    #[test]
+    fn executable_hints_metadata_source_limit_reuses_file_cache() {
+        let (_temp, ctx, path, _) = fixture(2, 1, 1);
+        let index = ctx.def_index.as_ref().unwrap().read().unwrap();
+        let mut cache = std::collections::HashMap::new();
+        let first = super::super::definitions::selected_definition_read(
+            &json!({}), &index, &index.definitions[0], &mut cache,
+        );
+        assert!(first.is_some());
+        std::fs::remove_file(&path).unwrap();
+        let second = super::super::definitions::selected_definition_read(
+            &json!({}), &index, &index.definitions[1], &mut cache,
+        );
+        assert!(second.is_some());
+        assert_eq!(cache.len(), 1);
+
+        std::fs::write(&path, vec![b'x'; super::super::definitions::MAX_HINT_SOURCE_BYTES + 1]).unwrap();
+        cache.clear();
+        assert!(super::super::definitions::selected_definition_read(
+            &json!({}), &index, &index.definitions[0], &mut cache,
+        ).is_none());
+        std::fs::write(&path, "first\nsecond\n").unwrap();
+        assert!(super::super::definitions::selected_definition_read(
+            &json!({}), &index, &index.definitions[1], &mut cache,
+        ).is_none());
+        assert_eq!(cache.len(), 1);
+        cache.clear();
+        assert!(super::super::definitions::selected_definition_read(
+            &json!({}), &index, &index.definitions[1], &mut cache,
+        ).is_some());
+    }
+
+    #[test]
+    fn executable_hints_metadata_snapshot_change_and_missing_source() {
+        let (_temp, ctx, path, _) = fixture(1, 10, 1);
+        let request = json!({"file": [path], "name": ["Compute"]});
+        let output = payload(&dispatch_tool(&ctx, "xray_definitions", &request), 16384);
+        let next = &output["recommendedNextQueries"][0]["args"];
+        std::fs::write(&path, "// changed\n".repeat(10)).unwrap();
+        let read = dispatch_tool(&ctx, "xray_definitions", next);
+        assert!(read.is_error);
+        assert_eq!(payload(&read, 16384)["error"]["code"], "body_source_changed");
+        std::fs::remove_file(&path).unwrap();
+        let output = payload(&dispatch_tool(&ctx, "xray_definitions", &request), 16384);
+        assert!(output.get("recommendedNextQueries").is_none());
+        assert!(output.get("nextQueryUnavailable").is_some());
+    }
+
     fn payload(result: &ToolCallResult, limit: usize) -> Value {
         assert!(result.content.iter().map(|content| content.text.len()).sum::<usize>() <= limit);
         let text = &result.content[0].text;

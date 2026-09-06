@@ -63,6 +63,7 @@ windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
+jsonschema = { version = "0.33", default-features = false }
 proptest = "1"
 tempfile = "3"
 

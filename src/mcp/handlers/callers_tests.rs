@@ -1480,11 +1480,73 @@ fn test_callers_template_navigation_next_step_hint_points_to_result_file() {
 
     assert_eq!(v["summary"]["templateNavigation"].as_bool(), Some(true));
     assert!(hint.contains("Template-navigation result"), "hint should identify template-navigation: {}", hint);
-    assert!(
-        hint.contains("xray_definitions includeBody=true file=[\"src/OrderController.ts\"]"),
-        "hint should point at first template result file: {}",
-        hint
-    );
+    assert!(hint.contains("No equivalent xray_definitions query"), "{hint}");
+    assert!(v["summary"].get("nextStepQuery").is_none());
+}
+
+#[test]
+fn executable_hints_callers_selected_component_and_ambiguous_basename() {
+    for ambiguous in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(temp.path());
+        let selected = root.join("feature").join("component.ts");
+        let other = root.join("legacy").join("component.ts");
+        for path in [&selected, &other] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "// component source\n".repeat(100)).unwrap();
+        }
+        let selected = crate::clean_path(&selected.to_string_lossy());
+        let mut index = make_def_index(vec![
+            class_def(0, "ParentComponent", vec![]),
+            class_def(1, if ambiguous { "ParentComponent" } else { "OtherComponent" }, vec![]),
+        ], HashMap::new());
+        index.root = crate::clean_path(&root.to_string_lossy());
+        index.files = vec![selected.clone(), crate::clean_path(&other.to_string_lossy())];
+        for (position, path) in index.files.iter().enumerate() {
+            index.path_to_id.insert(crate::path_identity_key(std::path::Path::new(path)), position as u32);
+        }
+        index.template_children.insert(0, vec!["child-component".to_string()]);
+        index.template_parents.insert("child-component".to_string(), vec![0]);
+        index.selector_index.insert("parent-component".to_string(), vec![0]);
+        let mut ctx = make_ctx_with_idx(index);
+        ctx.server_ext = "ts".to_string();
+        ctx.def_extensions = vec!["ts".to_string()];
+        ctx.workspace = std::sync::Arc::new(std::sync::RwLock::new(super::super::WorkspaceBinding::pinned(crate::clean_path(&root.to_string_lossy()))));
+        let request = serde_json::json!({
+            "method": ["child-component"], "direction": "up", "excludeDir": ["excluded"],
+            "maxBodyLines": 4, "maxTotalBodyLines": 6, "bodyLineStart": 2, "bodyLineEnd": 8,
+        });
+        let result = super::super::dispatch_tool(&ctx, "xray_callers", &request);
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        if ambiguous {
+            assert!(output["summary"].get("nextStepQuery").is_none(), "{output}");
+            assert!(output["summary"]["nextStepHint"].as_str().unwrap().contains("do not identify one"));
+            continue;
+        }
+        let args = &output["summary"]["nextStepQuery"]["args"];
+        super::super::arg_validation::assert_generated_query("xray_definitions", args);
+        assert_eq!(args["file"], serde_json::json!([selected]));
+        assert_eq!(args["name"], serde_json::json!(["ParentComponent"]));
+        assert_eq!(args["kind"], serde_json::json!(["class"]));
+        for key in ["excludeDir", "maxBodyLines", "maxTotalBodyLines", "bodyLineStart", "bodyLineEnd"] {
+            assert_eq!(args[key], request[key], "{key}");
+        }
+        let read = super::super::dispatch_tool(&ctx, "xray_definitions", args);
+        assert!(!read.is_error, "{}", read.content[0].text);
+        let read: serde_json::Value = serde_json::from_str(&read.content[0].text).unwrap();
+        assert_eq!(read["definitions"].as_array().unwrap().len(), 1);
+        assert_eq!(read["definitions"][0]["file"], selected);
+        assert_eq!(read["definitions"][0]["bodyStartLine"], 2);
+        for (key, value) in [("ext", serde_json::json!(["ts"])), ("excludeFile", serde_json::json!(["absent"])), ("productionOnly", serde_json::json!(true))] {
+            let mut restricted = request.clone();
+            restricted[key] = value;
+            let result = super::super::dispatch_tool(&ctx, "xray_callers", &restricted);
+            let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+            assert!(output["summary"].get("nextStepQuery").is_none(), "{output}");
+            assert!(output["summary"]["nextStepHint"].as_str().unwrap().contains("No equivalent"));
+        }
+    }
 }
 
 #[test]
@@ -2097,11 +2159,8 @@ fn test_callers_template_navigation_next_step_hint_uses_repo_relative_path_with_
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     let hint = v["summary"]["nextStepHint"].as_str().unwrap();
 
-    assert!(
-        hint.contains("xray_definitions includeBody=true file=[\"src/features/OrderController.ts\"]"),
-        "hint should use the parent component's repo-relative path: {}",
-        hint
-    );
+    assert!(hint.contains("No equivalent xray_definitions query"), "{hint}");
+    assert!(v["summary"].get("nextStepQuery").is_none());
     assert!(
         !hint.contains("file=[\"OrderController.ts\"]"),
         "basename-only hint would be ambiguous: {}",

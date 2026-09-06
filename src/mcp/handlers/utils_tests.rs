@@ -418,16 +418,48 @@ fn test_inject_response_guidance_grep_parser_active_file_hint() {
         "summary": {"totalFiles": 1}
     }).to_string());
 
-    let result = inject_response_guidance(result, "xray_grep", &ctx.server_ext, &ctx);
+    let result = inject_response_guidance_with_args(result, "xray_grep", &ctx.server_ext, &ctx,
+        Some(&json!({"terms": ["Service"], "excludeDir": ["excluded"]})));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    let hint = output["summary"]["nextStepHint"].as_str().unwrap();
-    assert!(hint.contains("xray_definitions file=[\"src/UserService.cs\"]"), "{hint}");
-    assert!(hint.contains("no includeBody"), "{hint}");
-    assert!(hint.contains("xray_definitions file=[\"src/UserService.cs\"] name=[\"<symbol>\"] includeBody=true maxBodyLines=0"), "{hint}");
+    let query = &output["summary"]["nextStepQuery"];
+    super::super::arg_validation::assert_generated_query("xray_definitions", &query["args"]);
+    assert_eq!(query["args"]["excludeDir"], json!(["excluded"]));
+    assert_eq!(query["args"]["includeBody"], false);
+    assert!(query["args"].get("maxBodyLines").is_none());
+    assert_eq!(query["semanticsChanged"], true);
 }
 
 #[test]
-fn test_inject_response_guidance_grep_sql_hint() {
+fn test_inject_response_guidance_grep_sql_hint_requires_active_parser() {
+    for active in [false, true] {
+        let ctx = HandlerContext {
+            server_ext: "sql".to_string(),
+            def_extensions: if active { vec!["sql".to_string()] } else { vec![] },
+            ..Default::default()
+        };
+        let result = ToolCallResult::success(json!({
+            "files": [{"path": "db/usp_Compute.sql", "occurrences": 1}],
+            "summary": {"totalFiles": 1},
+        }).to_string());
+        let args = json!({"terms": ["Compute"], "file": ["db/usp_Compute.sql"], "excludeDir": ["excluded"]});
+        let result = inject_response_guidance_with_args(result, "xray_grep", &ctx.server_ext, &ctx, Some(&args));
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        if active {
+            let query = &output["summary"]["nextStepQuery"];
+            assert_eq!(query["tool"], "xray_definitions");
+            assert_eq!(query["args"]["excludeDir"], args["excludeDir"]);
+            assert_eq!(query["args"]["includeBody"], false);
+            assert!(query["args"]["file"][0].as_str().unwrap().ends_with("db/usp_Compute.sql"));
+            assert_eq!(query["semanticsChanged"], true);
+            super::super::arg_validation::assert_generated_query("xray_definitions", &query["args"]);
+        } else {
+            assert!(output["summary"].get("nextStepQuery").is_none());
+        }
+    }
+}
+
+#[test]
+fn test_inject_response_guidance_grep_without_invocation_args() {
     let ctx = HandlerContext {
         server_ext: "sql".to_string(),
         def_extensions: vec!["sql".to_string()],
@@ -441,9 +473,8 @@ fn test_inject_response_guidance_grep_sql_hint() {
     let result = inject_response_guidance(result, "xray_grep", &ctx.server_ext, &ctx);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let hint = output["summary"]["nextStepHint"].as_str().unwrap();
-    assert!(hint.contains("kind=[\"storedProcedure\"]"), "{hint}");
-    assert!(hint.contains("body header"), "{hint}");
-    assert!(hint.contains("signature is a summary"), "{hint}");
+    assert!(hint.contains("No equivalent query"), "{hint}");
+    assert!(output["summary"].get("nextStepQuery").is_none());
 }
 
 #[test]
@@ -462,9 +493,23 @@ fn test_inject_response_guidance_grep_html_selector_with_ts_hint() {
     let result = inject_response_guidance_with_args(result, "xray_grep", &ctx.server_ext, &ctx, Some(&args));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let hint = output["summary"]["nextStepHint"].as_str().unwrap();
-    assert!(hint.contains("Angular selector"), "{hint}");
-    assert!(hint.contains("xray_callers method=[\"app-foo\"] direction='up'"), "{hint}");
-    assert!(!hint.contains("xray_definitions file=[\"src/foo.component.html\"]"), "{hint}");
+    assert!(hint.contains("No equivalent xray_callers query"), "{hint}");
+    assert!(output["summary"].get("nextStepQuery").is_none());
+}
+
+#[test]
+fn test_inject_response_guidance_untranslatable_exclusion() {
+    let ctx = HandlerContext { def_extensions: vec!["rs".to_string()], ..Default::default() };
+    for args in [json!({"terms": ["Compute"], "exclude": ["generated"]}),
+        json!({"terms": ["Compute"], "file": ["sample.rs"], "invert": true})] {
+        let result = ToolCallResult::success(json!({
+            "files": [{"path": "src/sample.rs", "occurrences": 1}], "summary": {}
+        }).to_string());
+        let result = inject_response_guidance_with_args(result, "xray_grep", "rs", &ctx, Some(&args));
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(output["summary"]["nextStepHint"].as_str().unwrap().contains("No equivalent"));
+        assert!(output["summary"].get("nextStepQuery").is_none());
+    }
 }
 
 #[test]
@@ -519,12 +564,14 @@ fn test_inject_response_guidance_fast_parser_active_file_hint() {
         "summary": {"totalMatches": 1}
     }).to_string());
 
-    let result = inject_response_guidance(result, "xray_fast", &ctx.server_ext, &ctx);
+    let result = inject_response_guidance_with_args(result, "xray_fast", &ctx.server_ext, &ctx,
+        Some(&json!({"pattern": ["lib.rs"]})));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    let hint = output["summary"]["nextStepHint"].as_str().unwrap();
-    assert!(hint.contains("xray_definitions file=[\"src/lib.rs\"]"), "{hint}");
-    assert!(hint.contains("list its symbols"), "{hint}");
-    assert!(hint.contains("xray_definitions file=[\"src/lib.rs\"] name=[\"<symbol>\"] includeBody=true maxBodyLines=0"), "{hint}");
+    let query = &output["summary"]["nextStepQuery"];
+    super::super::arg_validation::assert_generated_query("xray_definitions", &query["args"]);
+    assert_eq!(query["args"]["includeBody"], false);
+    assert!(query["args"]["file"][0].as_str().unwrap().ends_with("src/lib.rs"));
+    assert!(query["args"].get("maxBodyLines").is_none());
 }
 
 
@@ -2333,6 +2380,64 @@ fn test_recoverable_page_truncation_advances_by_actual_prefix() {
     assert_eq!(truncated["resultStatus"]["page"]["nextOffset"], 4 + returned);
     assert!(truncated["resultStatus"]["page"]["continuationToken"].as_str().is_some());
     assert!(serde_json::to_vec(&truncated).unwrap().len() <= 1_600, "{truncated:#}");
+}
+
+#[test]
+fn test_recoverable_page_hint_priority_at_fixed_16k_budget() {
+    let budget = 16 * 1024;
+    for (entry_bytes, hint_bytes, compact_wins) in [(2_000, 4_000, true), (10_000, 100, false)] {
+        let page_request = PageRequest {
+            offset: 4,
+            node_offset: None,
+            requested: true,
+            workspace_generation: 7,
+            index_epoch: 7,
+            query_fingerprint: "a".repeat(64),
+        };
+        let definitions: Vec<Value> = (0..10).map(|index| json!({
+            "name": format!("Definition{index}"),
+            "signature": "x".repeat(entry_bytes),
+        })).collect();
+        let mut status = build_result_status(
+            "partial", false, true, false, "index_map",
+            vec!["max_results_limit".to_string()],
+        );
+        attach_page_status(&mut status, "definitions", &page_request, definitions.len(), 30);
+        let query = json!({
+            "tool": "xray_definitions",
+            "args": { "file": ["src/example.rs"], "containsLine": 1, "includeBody": true },
+            "reason": "x".repeat(hint_bytes),
+        });
+        let output = json!({
+            "definitions": definitions,
+            "summary": { "returned": 10, "nextStepQuery": query, "nextStepHint": "Read selected definition." },
+            "recommendedNextQueries": [query],
+            "resultStatus": status,
+        });
+        let mut bare = output.clone();
+        bare.as_object_mut().unwrap().remove("recommendedNextQueries");
+        bare["summary"].as_object_mut().unwrap().remove("nextStepQuery");
+        bare["summary"].as_object_mut().unwrap().remove("nextStepHint");
+        let original_bytes = measure_json_size(&output);
+        let fitted = try_fit_recoverable_page(&output, "definitions", budget, &[], original_bytes).unwrap();
+        let bare_fitted = try_fit_recoverable_page(&bare, "definitions", budget, &[], original_bytes).unwrap();
+        let returned = fitted["definitions"].as_array().unwrap().len();
+        assert_eq!(returned, bare_fitted["definitions"].as_array().unwrap().len());
+        assert_eq!(fitted["definitions"].as_array().unwrap().as_slice(), &output["definitions"].as_array().unwrap()[..returned]);
+        assert!(measure_json_size(&fitted) <= budget);
+        assert_eq!(fitted["resultStatus"]["page"]["nextOffset"], 4 + returned);
+        if compact_wins {
+            assert!(returned > 1);
+            assert!(fitted.get("recommendedNextQueries").is_none());
+            assert!(fitted["summary"].get("nextStepQuery").is_none());
+            assert!(fitted["summary"].get("nextStepHint").is_none());
+        } else {
+            assert_eq!(returned, 1);
+            assert_eq!(fitted["recommendedNextQueries"], output["recommendedNextQueries"]);
+            assert_eq!(fitted["summary"]["nextStepQuery"], query);
+            assert_eq!(fitted["summary"]["nextStepHint"], output["summary"]["nextStepHint"]);
+        }
+    }
 }
 
 #[test]

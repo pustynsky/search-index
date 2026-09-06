@@ -211,6 +211,10 @@ Partial bodies provide `bodyContinuation.beforeArgs` and/or `nextArgs` for `xray
 
 Paginated lists provide `resultStatus.page.nextArgs`, including the original query and the final continuation token after byte fitting. Use it with the same tool and stop when it is absent. Unknown argument names must be corrected before Xray can generate ready-to-run continuation arguments.
 
+Definition discovery can return up to three `recommendedNextQueries` with `operation: "readSelectedDefinition"`. Each reads one selected file/name/kind/parent using `exactNameOnly=true`, `autoCorrect=false`, and a snapshot-bound `bodyTarget`. Applicable filters, ranges, enrichment, and body budgets are retained; the original discovery query is unchanged. Ambiguous identities or unavailable snapshots do not produce an exact read. Body continuation takes priority over optional hints.
+
+Cross-tool navigation uses `summary.nextStepQuery` when the selected target and original restrictions can be represented. Otherwise, the hint explains why no equivalent query was generated. Search alternatives, including punctuation cleanup, token intersection, and literal source-line matching, carry `semanticsChanged: true` outside `args`; they are not equivalent rewrites. Execute only the nested `args` object with its named tool. All hints count toward the final transport limit and may be omitted to preserve result delivery.
+
 ## Architecture overview
 
 The engine uses three independent index types and a git history cache:

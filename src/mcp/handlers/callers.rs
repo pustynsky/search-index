@@ -419,25 +419,27 @@ fn template_navigation_next_step_hint(
     def_idx: &DefinitionIndex,
     method_name: &str,
     direction: &str,
-) -> Option<String> {
+    args: &Value,
+) -> (String, Option<Value>) {
     let Some(first_node) = template_results.first() else {
         let relation = if direction == "down" { "child components" } else { "parent templates" };
-        return Some(format!(
-            "Template-navigation result: no Angular {} found for '{}'. Check the selector/class with xray_definitions.",
+        return (format!(
+            "Template-navigation result: no Angular {} found for '{}'; no selected component is available for an exact read.",
             relation,
             method_name,
-        ));
+        ), None);
     };
-    match template_navigation_source_file(first_node, def_idx) {
-        Some(file) => Some(format!(
-            "Template-navigation result: nodes are Angular component parents/children, not method callers. Read source: xray_definitions includeBody=true file=[\"{}\"].",
-            file,
-        )),
-        None => Some(
-            "Template-navigation result: nodes are Angular component parents/children, not method callers. Use xray_definitions to inspect the returned component class."
-                .to_string(),
-        ),
-    }
+    let scope = match super::definitions::caller_read_scope(args) {
+        Ok(scope) => scope,
+        Err(reason) => return (format!("Template-navigation result: {reason}"), None),
+    };
+    let query = template_navigation_source_definition(first_node, def_idx)
+        .and_then(|def| super::definitions::selected_definition_read(&scope, def_idx, def, &mut std::collections::HashMap::new()));
+    let Some(query) = query else {
+        return ("Template-navigation result: the returned class and file do not identify one readable definition within the 1 MiB (1048576 bytes) optional hint source limit; no exact source-read query was generated.".to_string(), None);
+    };
+    ("Template-navigation result: nodes are Angular component parents/children, not method callers. summary.nextStepQuery reads the selected component definition.".to_string(),
+        Some(json!({"tool": "xray_definitions", "args": query, "operation": "readSelectedDefinition"})))
 }
 
 fn template_navigation_hint_path(file_path: &str, def_idx: &DefinitionIndex) -> String {
@@ -695,7 +697,7 @@ fn record_angular_component_resolution_reasons(
     }
 }
 
-fn template_navigation_source_file(node: &Value, def_idx: &DefinitionIndex) -> Option<String> {
+fn template_navigation_source_definition<'a>(node: &Value, def_idx: &'a DefinitionIndex) -> Option<&'a DefinitionEntry> {
     let class_name = node
         .get("class")
         .and_then(|v| v.as_str())
@@ -706,10 +708,12 @@ fn template_navigation_source_file(node: &Value, def_idx: &DefinitionIndex) -> O
         .filter(|s| !s.is_empty());
     let def_indices = def_idx.name_index.get(&class_name.to_lowercase())?;
 
+    let mut selected = None;
     for &def_index in def_indices {
         let Some(def) = def_idx.definitions.get(def_index as usize) else {
             continue;
         };
+        if def.kind != crate::definitions::DefinitionKind::Class { continue; }
         let Some(file_path) = def_idx.files.get(def.file_id as usize) else {
             continue;
         };
@@ -726,10 +730,11 @@ fn template_navigation_source_file(node: &Value, def_idx: &DefinitionIndex) -> O
             }
         }
 
-        return Some(template_navigation_hint_path(file_path, def_idx));
+        if selected.is_some() { return None; }
+        selected = Some(def);
     }
 
-    None
+    selected
 }
 
 
@@ -1428,12 +1433,6 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
 
     if template_navigation_requested {
         let search_elapsed = search_start.elapsed();
-        let next_step_hint = template_navigation_next_step_hint(
-            &template_results,
-            &def_idx,
-            &method_name,
-            direction,
-        );
         let total_template_roots = template_results.len();
         let total_template_nodes = count_tree_nodes(&template_results);
         let template_resolution_reasons: Vec<_> =
@@ -1443,14 +1442,16 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             &page_request,
             max_results,
         );
+        let (next_step_hint, next_step_query) = template_navigation_next_step_hint(
+            &template_results, &def_idx, &method_name, direction, args,
+        );
         let mut summary = json!({
             "totalNodes": total_template_nodes,
             "templateNavigation": true,
             "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
         });
-        if let Some(hint) = next_step_hint {
-            summary["nextStepHint"] = json!(hint);
-        }
+        summary["nextStepHint"] = json!(next_step_hint);
+        if let Some(query) = next_step_query { summary["nextStepQuery"] = query; }
         inject_branch_warning(&mut summary, ctx);
         inject_index_degraded(&mut summary, def_idx.worker_panics);
         let template_node_count = count_tree_nodes(&template_results);

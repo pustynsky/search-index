@@ -1406,10 +1406,13 @@ fn test_response_truncation_triggers_on_large_result() {
         "Expected responseTruncated=true for 500-file response");
     assert!(output["summary"]["truncationReason"].as_str().is_some(),
         "Expected truncationReason in summary");
-    assert!(output["summary"]["hint"].as_str().is_some(),
-        "Expected hint in summary");
+    assert!(output["resultStatus"]["page"]["continuationToken"].as_str().is_some(),
+        "Expected a recoverable page cursor");
 
     let files_arr = output["files"].as_array().unwrap();
+    assert!(!files_arr.is_empty());
+    assert_eq!(output["resultStatus"]["page"]["returned"], files_arr.len());
+    assert_eq!(output["resultStatus"]["page"]["nextOffset"], files_arr.len());
     assert!(files_arr.len() < 500,
         "Expected files array to be truncated from 500, got {}", files_arr.len());
 
@@ -4010,6 +4013,74 @@ fn test_recommended_next_queries_orders_count_first_when_partial_and_expensive()
         "slot 2 MUST be the lineRegex fallback (last priority — only when \
          punctuation IS the search intent). Got: {:?}", suggestions[2]);
 
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn executable_hints_grep_preserve_scope_and_validate_schema() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let root = crate::canonicalize_test_root(&tmp);
+    let request = json!({
+        "terms": ["using System;", "Execute("], "mode": "or", "dir": root.to_string_lossy(),
+        "file": ["Service.cs", "Controller.cs"], "excludeDir": ["excluded"], "exclude": ["absent"],
+        "ext": ["cs"], "maxResults": 1, "showLines": true, "contextLines": 1,
+        "autoBalance": false, "maxOccurrencesPerTerm": 3,
+    });
+    let result = dispatch_tool(&ctx, "xray_grep", &request);
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hints = output["recommendedNextQueries"].as_array().unwrap();
+    assert_eq!(hints.len(), 3);
+    for (position, hint) in hints.iter().enumerate() {
+        let args = &hint["args"];
+        super::arg_validation::assert_generated_query("xray_grep", args);
+        for key in ["dir", "file", "ext", "excludeDir", "exclude", "maxResults", "contextLines", "autoBalance", "maxOccurrencesPerTerm"] {
+            assert_eq!(args[key], request[key], "{key}: {hint}");
+        }
+        assert!(args.get("semanticsChanged").is_none());
+        if position > 0 { assert_eq!(hint["semanticsChanged"], true); }
+        let read = dispatch_tool(&ctx, "xray_grep", args);
+        assert!(!read.is_error, "{hint}: {}", read.content[0].text);
+    }
+    assert_eq!(hints[0]["args"]["terms"], request["terms"]);
+    assert_eq!(hints[0]["args"]["mode"], "or");
+    let schema = super::arg_validation::test_tool_schema("xray_grep");
+    let mut wrong = hints[0]["args"].clone();
+    wrong["terms"] = json!("using System;");
+    assert!(!schema.is_valid(&wrong));
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn executable_hints_regex_alternatives_are_not_equivalent() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let request = json!({
+        "terms": ["^using$", "^system$"], "regex": true, "mode": "or",
+        "file": ["Service.cs", "Controller.cs"], "excludeDir": ["excluded"],
+        "exclude": ["absent"], "ext": ["cs"], "maxResults": 1,
+    });
+    let result = dispatch_tool(&ctx, "xray_grep", &request);
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hints = output["recommendedNextQueries"].as_array().unwrap();
+    assert_eq!(hints.len(), 3);
+    for hint in hints {
+        let args = &hint["args"];
+        super::arg_validation::assert_generated_query("xray_grep", args);
+        for key in ["terms", "mode", "file", "excludeDir", "exclude", "ext", "maxResults"] {
+            assert_eq!(args[key], request[key], "{key}");
+        }
+        let result = dispatch_tool(&ctx, "xray_grep", args);
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let result: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        if args["countOnly"] == true {
+            assert_eq!(args["regex"], true);
+        } else {
+            assert_eq!(hint["semanticsChanged"], true);
+            assert!(args.get("regex").is_none());
+            assert_eq!(result["summary"]["totalFiles"], 0, "{hint}: {result}");
+        }
+    }
     cleanup_tmp(&tmp);
 }
 
