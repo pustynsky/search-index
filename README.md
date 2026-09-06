@@ -1,6 +1,6 @@
 # Xray — code intelligence engine
 
-[![VirusTotal](https://badges.cssnr.com/vt/pustynsky/xray/xray.exe?v=0.7.0)](https://www.virustotal.com/gui/file/6c24f7d6cfa5405f482254a4bfdc37458ebd6015600060f278323fed3409eebc)
+[![VirusTotal](https://badges.cssnr.com/vt/pustynsky/xray/xray.exe?v=0.8.0)](https://www.virustotal.com/gui/file/c81343dc9a794e4134e18e555e60408c549f7f69c8a9e6c9bb551c83b9b77343)
 
 _Scanned by VirusTotal — no threats found._
 
