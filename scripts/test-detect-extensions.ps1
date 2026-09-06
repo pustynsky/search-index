@@ -124,35 +124,70 @@ function Invoke-InstallerFixture {
         [Parameter(Mandatory)] [string]$Install,
         [switch]$Force,
         [switch]$AcceptSuggestion,
+        [string[]]$Responses,
+        [switch]$AllowFailure,
         [string]$Extensions
     )
 
     $pwshPath = (Get-Process -Id $PID).Path
-    $processArgs = @(
-        '-NoLogo', '-NoProfile', '-File', $ScriptPath,
-        '-RepoPath', $Repo,
-        '-InstallDir', $Install,
-        '-SkipDownload',
-        '-EnableVSCode',
-        '-GitVisibility', 'Visible'
-    )
-    if ($Force) { $processArgs += '-Force' }
-    if ($Extensions) { $processArgs += @('-Extensions', $Extensions) }
-
-    if ($AcceptSuggestion) {
-        $output = @('' | & $pwshPath @processArgs 2>&1)
+    $parameters = @{
+        RepoPath = $Repo
+        InstallDir = $Install
+        SkipDownload = $true
+        EnableVSCode = $true
+        GitVisibility = 'Visible'
     }
-    else {
-        $output = @(& $pwshPath @processArgs 2>&1)
+    if ($Force) { $parameters.Force = $true }
+    if ($Extensions) { $parameters.Extensions = $Extensions }
+    $payload = @{ ScriptPath = $ScriptPath; Parameters = $parameters } | ConvertTo-Json -Compress
+    $payloadBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
+    $launchCode = @'
+$ErrorActionPreference = 'Stop'
+$invocation = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__PAYLOAD__')) | ConvertFrom-Json
+$parameters = @{}
+foreach ($property in $invocation.Parameters.PSObject.Properties) { $parameters[$property.Name] = $property.Value }
+& $invocation.ScriptPath @parameters
+exit $LASTEXITCODE
+'@.Replace('__PAYLOAD__', $payloadBase64)
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $pwshPath
+    $startInfo.Arguments = '-NoLogo -NoProfile -OutputFormat Text -EncodedCommand ' + [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($launchCode))
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardInput = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    $started = $false
+    try {
+        $started = $process.Start()
+        if (-not $started) { throw 'Could not start installer fixture process' }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if ($AcceptSuggestion) { $process.StandardInput.WriteLine('') }
+        foreach ($response in $Responses) { $process.StandardInput.WriteLine($response) }
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit(30000)) {
+            throw "Installer fixture timed out after 30 seconds: $Repo (responses: $($Responses -join ', '))"
+        }
+        $exitCode = $process.ExitCode
+        $output = @($stdoutTask.GetAwaiter().GetResult(), $stderrTask.GetAwaiter().GetResult())
     }
-    $exitCode = $LASTEXITCODE
-    if ($exitCode -ne 0) {
+    finally {
+        if ($started -and -not $process.HasExited) {
+            $process.Kill()
+            $null = $process.WaitForExit(5000)
+        }
+        $process.Dispose()
+    }
+    if ($exitCode -ne 0 -and -not $AllowFailure) {
         throw "setup-xray.ps1 exited $exitCode`n$($output -join "`n")"
     }
 
     return [PSCustomObject]@{
+        ExitCode = $exitCode
         Output = $output
-        Config = Get-Content -Path (Join-Path $Repo '.vscode/mcp.json') -Raw | ConvertFrom-Json
+        Config = if ($exitCode -eq 0) { Get-Content -Path (Join-Path $Repo '.vscode/mcp.json') -Raw | ConvertFrom-Json } else { $null }
     }
 }
 
@@ -184,7 +219,7 @@ if ($parseErrors -and $parseErrors.Count -gt 0) {
     Write-Error "Parse errors in setup-xray.ps1: $($parseErrors -join '; ')"
     exit 1
 }
-foreach ($functionName in @('Get-DetectedExtensions', 'Get-AutoSelectedExtensions')) {
+foreach ($functionName in @('Get-DetectedExtensions', 'Get-AutoSelectedExtensions', 'Normalize-ExtensionList', 'Read-ExtensionSelection')) {
     $functionAst = $ast.Find({
             param($node)
             $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
@@ -428,6 +463,10 @@ try {
     $explicitResult = Invoke-InstallerFixture -ScriptPath $scriptPath -Repo $fixture.Repo -Install $fixture.Install -Force -Extensions 'ts'
     $explicitState = Get-ConfiguredExtensionState -Config $explicitResult.Config
     Assert-Equal -Actual $explicitState.ExtensionList -Expected 'ts' -Label 'T12 explicit Extensions remains authoritative'
+
+    $explicitAnswerResult = Invoke-InstallerFixture -ScriptPath $scriptPath -Repo $fixture.Repo -Install $fixture.Install -Force -Extensions 'y,n'
+    $explicitAnswerState = Get-ConfiguredExtensionState -Config $explicitAnswerResult.Config
+    Assert-Equal -Actual $explicitAnswerState.ExtensionList -Expected 'n,y' -Label 'T12 explicit Extensions does not interpret yes/no answers'
 }
 finally { Remove-TempDir $fixture.Root }
 
@@ -469,6 +508,76 @@ try {
     Assert-Equal -Actual ([bool]($thresholdOnlyOutput -match 'Structural exceptions \(detected below threshold\): \(none\)')) -Expected $true -Label 'T14 empty structural bucket is explicit'
 }
 finally { Remove-TempDir $fixture.Root }
+
+$dialogCases = @(
+    @{ Label = 'Enter'; Answers = @(''); Expected = 'cs,md'; ManualPrompts = 0 },
+    @{ Label = 'whitespace Enter'; Answers = @('   '); Expected = 'cs,md'; ManualPrompts = 0 },
+    @{ Label = 'trimmed y'; Answers = @(' Y '); Expected = 'cs,md'; ManualPrompts = 0 },
+    @{ Label = 'yes'; Answers = @('YES'); Expected = 'cs,md'; ManualPrompts = 0 },
+    @{ Label = 'n then custom'; Answers = @('n', ' .CS, sql,MD,cs '); Expected = 'cs,md,sql'; ManualPrompts = 1 },
+    @{ Label = 'no then single-character extensions'; Answers = @(' NO ', 'r,c,h'); Expected = 'c,h,r'; ManualPrompts = 1 },
+    @{ Label = 'invalid confirmation'; Answers = @('cs,sql', 'maybe', 'yes'); Expected = 'cs,md'; ManualPrompts = 0 },
+    @{ Label = 'invalid manual entries'; Answers = @('n', '', ' ', 'Y', ' N ', 'yes', 'NO', ',.,', '.y,.n'); Expected = 'n,y'; ManualPrompts = 8 },
+    @{ Label = 'explicit .y'; Answers = @('no', '.y'); Expected = 'y'; ManualPrompts = 1 },
+    @{ Label = 'explicit .n'; Answers = @('no', '.n'); Expected = 'n'; ManualPrompts = 1 }
+)
+foreach ($dialogCase in $dialogCases) {
+    & {
+        param($Case)
+        $answers = [Collections.Generic.Queue[string]]::new()
+        $prompts = [Collections.Generic.List[string]]::new()
+        foreach ($answer in $Case.Answers) { $answers.Enqueue($answer) }
+        function Read-Host {
+            param([string]$Prompt)
+            $prompts.Add($Prompt)
+            if ($answers.Count -eq 0) { throw "Unexpected prompt: $Prompt" }
+            return $answers.Dequeue()
+        }
+
+        $actual = Read-ExtensionSelection -Suggested 'cs,md'
+        Assert-Equal -Actual $actual -Expected $Case.Expected -Label "T15 $($Case.Label) selects expected list"
+        Assert-Equal -Actual $answers.Count -Expected 0 -Label "T15 $($Case.Label) consumes expected answers"
+        $manualPrompts = @($prompts | Where-Object { $_ -like 'Enter extensions*' })
+        Assert-Equal -Actual $manualPrompts.Count -Expected $Case.ManualPrompts -Label "T15 $($Case.Label) uses separate manual prompt"
+    } $dialogCase
+}
+
+$installerDialogCases = @(
+    @{ Label = 'y'; Answers = @('y'); Expected = 'cshtml,csproj,props,targets,ts' },
+    @{ Label = 'yes'; Answers = @('yes'); Expected = 'cshtml,csproj,props,targets,ts' },
+    @{ Label = 'n then custom'; Answers = @('n', ' C,.h, r,c '); Expected = 'c,h,r' },
+    @{ Label = 'invalid answers then explicit dots'; Answers = @('maybe', 'NO', '', 'y', 'n', ',.,', '.y,.n'); Expected = 'n,y' }
+)
+foreach ($dialogCase in $installerDialogCases) {
+    $fixture = New-InstallerFixture
+    try {
+        Add-InstallerSelectionFiles -Repo $fixture.Repo
+        $dialogResult = Invoke-InstallerFixture -ScriptPath $scriptPath -Repo $fixture.Repo -Install $fixture.Install -Responses $dialogCase.Answers
+        $dialogState = Get-ConfiguredExtensionState -Config $dialogResult.Config
+        Assert-Equal -Actual $dialogState.ExtensionList -Expected $dialogCase.Expected -Label "T16 $($dialogCase.Label) writes selected extensions"
+        Assert-Equal -Actual $dialogState.ExtFlagCount -Expected 1 -Label "T16 $($dialogCase.Label) writes one --ext argument"
+    }
+    finally { Remove-TempDir $fixture.Root }
+}
+
+$incompleteDialogCases = @(
+    @{ Label = 'n then EOF'; Answers = @('n'); Message = 'No valid extension list received' },
+    @{ Label = 'n then invalid input and EOF'; Answers = @('n', 'y'); Message = 'No valid extension list received' },
+    @{ Label = 'exhausted confirmation attempts'; Answers = @('maybe') * 10; Message = 'No valid confirmation received' }
+)
+foreach ($dialogCase in $incompleteDialogCases) {
+    $fixture = New-InstallerFixture
+    try {
+        Add-InstallerSelectionFiles -Repo $fixture.Repo
+        $dialogResult = Invoke-InstallerFixture -ScriptPath $scriptPath -Repo $fixture.Repo -Install $fixture.Install -Responses $dialogCase.Answers -AllowFailure
+        $diagnostic = ((($dialogResult.Output -join ' ') -replace '\x1b\[[0-9;]*m', '') -replace '[\r\n|]+', ' ') -replace '\s+', ' '
+        Assert-Equal -Actual $dialogResult.ExitCode -Expected 1 -Label "T17 $($dialogCase.Label) exits with error"
+        Assert-Equal -Actual $diagnostic.Contains($dialogCase.Message) -Expected $true -Label "T17 $($dialogCase.Label) explains failure"
+        Assert-Equal -Actual (Test-Path (Join-Path $fixture.Repo '.vscode/mcp.json')) -Expected $false -Label "T17 $($dialogCase.Label) leaves VS Code unconfigured"
+        Assert-Equal -Actual (Test-Path (Join-Path $fixture.Repo '.mcp.json')) -Expected $false -Label "T17 $($dialogCase.Label) leaves CLI unconfigured"
+    }
+    finally { Remove-TempDir $fixture.Root }
+}
 
 # ---------------------------------------------------------------
 Write-Host ""
