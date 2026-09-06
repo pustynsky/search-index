@@ -1635,7 +1635,7 @@ fn test_inject_body_with_doc_comments_csharp() {
     let file_str = file_path.to_string_lossy().to_string();
 
     let mut obj = json!({});
-    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut cache: HashMap<String, Option<BodySource>> = HashMap::new();
     let mut total = 0usize;
 
     // line_start=6 (1-based, [Authorize] line), line_end=10
@@ -1670,7 +1670,7 @@ fn test_inject_body_without_doc_comments_flag() {
     let file_str = file_path.to_string_lossy().to_string();
 
     let mut obj = json!({});
-    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut cache: HashMap<String, Option<BodySource>> = HashMap::new();
     let mut total = 0usize;
 
     // line_start=4, line_end=6, include_doc_comments=false
@@ -2804,7 +2804,7 @@ fn test_inject_body_with_doc_comments_jsdoc() {
     let file_str = file_path.to_string_lossy().to_string();
 
     let mut obj = json!({});
-    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut cache: HashMap<String, Option<BodySource>> = HashMap::new();
     let mut total = 0usize;
 
     // line_start=7 (export async function), line_end=9
@@ -2825,6 +2825,72 @@ fn test_inject_body_with_doc_comments_jsdoc() {
 // ─── bodyLineStart / bodyLineEnd tests ──────────────────────────────
 
 #[test]
+fn test_inject_body_reuses_source_snapshot_and_hash() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("snapshot.rs");
+    std::fs::write(&path, "first\nsecond\n").unwrap();
+    let path = path.to_str().unwrap();
+    let mut cache = HashMap::new();
+    let mut emitted = 0;
+    let mut first = json!({});
+    inject_body_into_obj(&mut first, path, 1, 1, &mut cache, &mut emitted, 0, 0, false, None, None);
+    std::fs::write(path, "changed\nchanged\n").unwrap();
+    let mut second = json!({});
+    inject_body_into_obj(&mut second, path, 2, 2, &mut cache, &mut emitted, 0, 0, false, None, None);
+    assert_eq!(cache.len(), 1);
+    assert_eq!(first["body"], json!(["first"]));
+    assert_eq!(second["body"], json!(["second"]));
+    assert_eq!(first["bodySourceHash"], second["bodySourceHash"]);
+    assert_eq!(emitted, 2);
+}
+
+#[test]
+fn test_inject_body_anchor_window() {
+    let content = (1..=100).map(|line| format!("line {line}")).collect::<Vec<_>>().join("\n");
+    for (anchor, per_body, total_limit, expected_start, expected_end) in [
+        (50, 8, 0, 47, 54),
+        (10, 8, 0, 10, 17),
+        (90, 8, 0, 83, 90),
+        (50, 1, 0, 50, 50),
+        (50, 8, 3, 49, 51),
+        (50, 0, 0, 10, 90),
+    ] {
+        let mut cache = HashMap::from([("anchor.rs".to_string(), Some(BodySource::new(content.clone())))]);
+        let mut obj = json!({"bodyAnchorLine": anchor});
+        let mut total = 0;
+        inject_body_into_obj(
+            &mut obj, "anchor.rs", 10, 90, &mut cache, &mut total,
+            per_body, total_limit, false, None, None,
+        );
+        assert_eq!(obj["bodyStartLine"], expected_start);
+        assert_eq!(obj["bodyEndLine"], expected_end);
+        assert_eq!(obj["bodyAnchorVisible"], true);
+        assert_eq!(obj["body"][0], format!("line {expected_start}"));
+        assert_eq!(obj["body"].as_array().unwrap().last().unwrap(), &json!(format!("line {expected_end}")));
+        assert_eq!(total, (expected_end - expected_start + 1) as usize);
+        assert_eq!(obj["bodyComplete"], expected_start == 10 && expected_end == 90);
+    }
+}
+
+#[test]
+fn test_inject_body_anchor_explicit_range_wins() {
+    let content = (1..=100).map(|line| format!("line {line}")).collect::<Vec<_>>().join("\n");
+    let mut cache = HashMap::from([("anchor.rs".to_string(), Some(BodySource::new(content)))]);
+    let mut obj = json!({"bodyAnchorLine": 50});
+    let mut total = 0;
+    inject_body_into_obj(
+        &mut obj, "anchor.rs", 10, 90, &mut cache, &mut total,
+        8, 0, false, Some(20), Some(25),
+    );
+    assert_eq!(obj["bodyStartLine"], 20);
+    assert_eq!(obj["bodyEndLine"], 25);
+    assert_eq!(obj["bodyAnchorVisible"], false);
+    assert_eq!(obj["bodyAnchorReason"], "outside_requested_range");
+    assert_eq!(obj["bodyComplete"], false);
+    assert_eq!(obj["bodyRangeComplete"], true);
+}
+
+#[test]
 fn test_inject_body_body_line_range_filter() {
     // Create a 10-line file
     let dir = tempfile::tempdir().unwrap();
@@ -2835,7 +2901,7 @@ fn test_inject_body_body_line_range_filter() {
 
     // Method spans lines 3-8 (1-based)
     let mut obj = json!({});
-    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut cache: HashMap<String, Option<BodySource>> = HashMap::new();
     let mut total = 0usize;
 
     // Request only lines 5-7 from the body
@@ -2862,7 +2928,7 @@ fn test_inject_body_body_line_start_only() {
 
     // Method spans lines 2-9, request bodyLineStart=6 (no end)
     let mut obj = json!({});
-    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut cache: HashMap<String, Option<BodySource>> = HashMap::new();
     let mut total = 0usize;
 
     inject_body_into_obj(
@@ -2887,7 +2953,7 @@ fn test_inject_body_body_line_end_only() {
 
     // Method spans lines 2-9, request bodyLineEnd=5 (no start)
     let mut obj = json!({});
-    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut cache: HashMap<String, Option<BodySource>> = HashMap::new();
     let mut total = 0usize;
 
     inject_body_into_obj(
@@ -2912,7 +2978,7 @@ fn test_inject_body_body_line_range_outside_method() {
 
     // Method spans lines 3-5, request lines 7-9 (completely outside)
     let mut obj = json!({});
-    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut cache: HashMap<String, Option<BodySource>> = HashMap::new();
     let mut total = 0usize;
 
     inject_body_into_obj(
@@ -2935,7 +3001,7 @@ fn test_inject_body_body_line_range_with_none_is_full_body() {
 
     // Method spans lines 3-8, no body line filter
     let mut obj = json!({});
-    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut cache: HashMap<String, Option<BodySource>> = HashMap::new();
     let mut total = 0usize;
 
     inject_body_into_obj(

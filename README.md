@@ -201,6 +201,16 @@ xray serve --dir C:\Projects --ext cs --watch --definitions
 
 For end-user setup (download binary, configure Copilot Chat / Roo Code / Cline) see the [Installation guide](docs/installation.md). For the tools API, JSON-RPC schemas, and protocol details see the [MCP server guide](docs/mcp-guide.md).
 
+### Response delivery
+
+Set `XRAY_TRANSPORT_MAX_BYTES` in the MCP server environment when a client needs a hard response-text limit. For example, `16384` caps the combined UTF-8 text blocks, including guidance and metrics, at 16 KiB. The value must be an integer of at least 512. It is read when finalizing each response; unset leaves the existing per-tool budgets in place. This is a text-content limit, not a limit on the surrounding JSON-RPC envelope. If useful content cannot fit, Xray returns a compact error instead of claiming a complete result.
+
+With `includeBody=true`, `containsLine` centers the available body window on the requested line. Explicit `bodyLineStart`/`bodyLineEnd` ranges take precedence. `bodyStartLine` and `bodyEndLine` describe the actual delivered fragment; `bodyAnchorVisible` reports whether it contains the anchor. `bodyComplete` covers the whole definition (and requested doc comments), while `bodyRangeComplete` covers only the requested range.
+
+Partial bodies provide `bodyContinuation.beforeArgs` and/or `nextArgs` for `xray_definitions`. Pass these argument objects unchanged. They target one exact source file and definition range through `bodyTarget`, with a SHA-256 hash of the decoded file snapshot used for the read. A changed source or missing/ambiguous definition requires a fresh lookup. Cross-tool filters that cannot be represented by `xray_definitions` produce `bodyContinuationUnavailable` instead of a broader query.
+
+Paginated lists provide `resultStatus.page.nextArgs`, including the original query and the final continuation token after byte fitting. Use it with the same tool and stop when it is absent. Unknown argument names must be corrected before Xray can generate ready-to-run continuation arguments.
+
 ## Architecture overview
 
 The engine uses three independent index types and a git history cache:

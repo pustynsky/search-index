@@ -1956,14 +1956,10 @@ pub(crate) fn render_guidance_prefix_for_policy_with_budget(
     }
 
     if !prefix_enabled {
-        let (output, force_error) = if has_response_bytes || has_estimated_tokens {
-            fit_guidance_output(
-                output,
-                max_bytes,
-                0,
-                has_response_bytes,
-                has_estimated_tokens,
-            )
+        let (output, force_error) = if has_response_bytes || has_estimated_tokens
+            || super::body_delivery::has_body_reads(&output)
+        {
+            fit_guidance_output(output, max_bytes, 0, has_response_bytes, has_estimated_tokens)
         } else {
             (output, false)
         };
@@ -2088,6 +2084,7 @@ fn serialize_guidance_response(
     has_response_bytes: bool,
     has_estimated_tokens: bool,
 ) -> String {
+    super::body_delivery::finalize_metadata(&mut output);
     let render = |output: &Value| {
         let json_suffix = json_to_string(output);
         guidance_prefix.map_or_else(
@@ -2129,7 +2126,7 @@ fn serialize_guidance_response(
 
 /// Measure the JSON-serialized size of a Value in bytes.
 fn measure_json_size(output: &Value) -> usize {
-    serde_json::to_string(output).map(|s| s.len()).unwrap_or(0)
+    super::body_delivery::delivered_size(output)
 }
 
 /// Phase 1: Cap per-file line metadata while preserving a bounded `lineContent` preview.
@@ -2627,6 +2624,11 @@ fn fit_call_tree_node_page(
                 "queryFingerprint": query_fingerprint,
             });
             let page = &mut status["page"];
+            if let Some(query) = output.pointer("/resultStatus/page/queryArgs")
+                .or_else(|| output.pointer("/resultStatus/page/nextArgs"))
+            {
+                page["queryArgs"] = query.clone();
+            }
             if end < records.len() {
                 page["nextOffset"] = json!(end);
                 page["continuationToken"] = json!(call_tree_node_continuation_token(
@@ -3160,7 +3162,12 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
         return output;
     }
 
-    phase_strip_body_fields(&mut output, &mut reasons);
+    if super::body_delivery::has_body_reads(&output) {
+        super::body_delivery::fit_body_fragments(&mut output, max_bytes);
+        reasons.push("byte-fitted body fragments".to_string());
+    } else {
+        phase_strip_body_fields(&mut output, &mut reasons);
+    }
     if measure_json_size(&output) <= max_bytes && !node_page_requested {
         inject_truncation_metadata(&mut output, &reasons, initial_size);
         return output;
@@ -3229,6 +3236,8 @@ fn inject_truncation_metadata(output: &mut Value, reasons: &[String], original_b
         summary["hint"] = json!(hint);
     }
     mark_result_status_response_truncated(output, reasons);
+    super::body_delivery::refresh_page_args(output);
+    super::body_delivery::refresh_accounting(output);
 }
 
 /// Apply response size truncation to a ToolCallResult (no metrics injection).
@@ -3337,13 +3346,26 @@ pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start
 
 // ─── Body injection helper ──────────────────────────────────────────
 
+#[derive(Clone)]
+pub(crate) struct BodySource {
+    content: String,
+    source_hash: String,
+}
+
+impl BodySource {
+    pub(crate) fn new(content: String) -> Self {
+        let source_hash = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+        Self { content, source_hash }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn inject_body_into_obj(
     obj: &mut Value,
     file_path: &str,
     line_start: u32,
     line_end: u32,
-    file_cache: &mut HashMap<String, Option<String>>,
+    file_cache: &mut HashMap<String, Option<BodySource>>,
     total_body_lines_emitted: &mut usize,
     max_body_lines: usize,
     max_total_body_lines: usize,
@@ -3351,112 +3373,111 @@ pub(crate) fn inject_body_into_obj(
     body_line_start: Option<u32>,
     body_line_end: Option<u32>,
 ) {
-    // Check total budget
-    if max_total_body_lines > 0 && *total_body_lines_emitted >= max_total_body_lines {
-        obj["bodyOmitted"] = json!("total body lines budget exceeded");
-        return;
+    obj["bodyComplete"] = json!(false);
+    obj["bodyRangeComplete"] = json!(false);
+    obj["bodyFile"] = json!(file_path);
+    if obj.get("bodyAnchorLine").is_some() {
+        obj["bodyAnchorVisible"] = json!(false);
+        obj["bodyAnchorReason"] = json!("body_unavailable");
     }
+    let content_opt = file_cache.entry(file_path.to_string()).or_insert_with(|| {
+        crate::read_file_lossy(std::path::Path::new(file_path)).ok().map(|(content, _)| BodySource::new(content))
+    });
+    let Some(source) = content_opt.as_ref() else {
+        obj["bodyError"] = json!("failed to read file");
+        return;
+    };
+    let lines: Vec<&str> = source.content.lines().collect();
+    let definition_start = (line_start as usize).saturating_sub(1);
+    let definition_end = line_end as usize;
+    let available_start = if include_doc_comments && definition_start <= lines.len() {
+        find_doc_comment_start(&lines, definition_start)
+    } else {
+        definition_start
+    };
+    let requested_start = body_line_start.map(|line| (line as usize).saturating_sub(1))
+        .unwrap_or(available_start).max(available_start);
+    let requested_end = body_line_end.map(|line| line as usize).unwrap_or(definition_end).min(definition_end);
+    obj["bodyDefinitionStartLine"] = json!(line_start);
+    obj["bodyDefinitionEndLine"] = json!(line_end);
+    obj["bodyAvailableStartLine"] = json!(available_start + 1);
+    obj["bodyRequestedStartLine"] = json!(requested_start + 1);
+    obj["bodyRequestedEndLine"] = json!(requested_end);
+    obj["bodySourceHash"] = json!(source.source_hash);
+    let explicit_range = body_line_start.is_some() || body_line_end.is_some();
+    obj["bodyExplicitRange"] = json!(explicit_range);
+    if definition_end > lines.len() {
+        obj["bodyWarning"] = json!(format!(
+            "definition claims line_end={} but file has only {} lines (stale index?)", line_end, lines.len(),
+        ));
+    }
+    let range_end = requested_end.min(lines.len());
+    let available = range_end.saturating_sub(requested_start);
+    let remaining = if max_total_body_lines == 0 { usize::MAX } else {
+        max_total_body_lines.saturating_sub(*total_body_lines_emitted)
+    };
+    let limit = if max_body_lines == 0 { remaining } else { max_body_lines.min(remaining) };
+    let count = available.min(limit);
+    let anchor = obj.get("bodyAnchorLine").and_then(Value::as_u64).map(|line| line as usize);
+    let offset = if !explicit_range && count > 0 {
+        anchor.filter(|line| *line > requested_start && *line <= range_end)
+            .map(|line| line.saturating_sub(requested_start + 1)
+                .saturating_sub((count - 1) / 2).min(available - count))
+            .unwrap_or(0)
+    } else { 0 };
+    let start = requested_start + offset;
+    obj["bodyStartLine"] = json!(start + 1);
+    obj["body"] = if count == 0 { json!([]) } else { json!(lines[start..start + count]) };
+    if available == 0 {
+        obj["bodyOmitted"] = json!("requested range has no available body lines");
+    } else if count == 0 {
+        obj["bodyOmitted"] = json!("total body lines budget exceeded");
+    }
+    refresh_body_metadata(obj);
+    *total_body_lines_emitted += count;
+}
 
-    // Read file via cache (use read_file_lossy to handle non-UTF-8 files
-    // like Windows-1252 encoded content — BUG #6 fix)
-    let content_opt = file_cache
-        .entry(file_path.to_string())
-        .or_insert_with(|| {
-            crate::read_file_lossy(std::path::Path::new(file_path))
-                .ok()
-                .map(|(content, _lossy)| content)
-        })
-        .clone();
-
-    match content_opt {
-        None => {
-            obj["bodyError"] = json!("failed to read file");
-        }
-        Some(content) => {
-            let lines_vec: Vec<&str> = content.lines().collect();
-            let total_file_lines = lines_vec.len();
-
-            // 1-based to 0-based
-            let mut start_idx = (line_start as usize).saturating_sub(1);
-            let mut end_idx = (line_end as usize).min(total_file_lines);
-
-            // Apply body line range filter (absolute file line numbers, 1-based)
-            // This narrows the body to only the lines within [bodyLineStart, bodyLineEnd],
-            // intersected with the definition's own line range.
-            if let Some(bls) = body_line_start {
-                start_idx = start_idx.max((bls as usize).saturating_sub(1));
-            }
-            if let Some(ble) = body_line_end {
-                end_idx = end_idx.min(ble as usize);
-            }
-
-            // Ensure start doesn't exceed end after line range filtering
-            if start_idx > end_idx {
-                obj["bodyStartLine"] = json!(start_idx + 1);
-                obj["body"] = json!(Vec::<&str>::new());
-                return;
-            }
-
-            // Stale data check
-            if line_end as usize > total_file_lines {
-                obj["bodyWarning"] = json!(format!(
-                    "definition claims line_end={} but file has only {} lines (stale index?)",
-                    line_end, total_file_lines
-                ));
-            }
-
-            // Expand upward to capture doc comments if requested.
-            // Skip doc comment expansion when bodyLineStart is set — the user
-            // wants a precise line range, so we respect their explicit start.
-            let doc_comment_lines = if include_doc_comments && start_idx > 0 && body_line_start.is_none() {
-                let doc_start = find_doc_comment_start(&lines_vec, start_idx);
-                let count = start_idx - doc_start;
-                start_idx = doc_start;
-                count
+pub(crate) fn refresh_body_metadata(obj: &mut Value) {
+    let Some(body) = obj.get("body").and_then(Value::as_array) else { return; };
+    let count = body.len() as u64;
+    let start = obj["bodyStartLine"].as_u64().unwrap_or(1);
+    let end = start.saturating_add(count).saturating_sub(1);
+    let definition_start = obj["bodyDefinitionStartLine"].as_u64().unwrap_or(start);
+    let definition_end = obj["bodyDefinitionEndLine"].as_u64().unwrap_or(end);
+    let available_start = obj["bodyAvailableStartLine"].as_u64().unwrap_or(definition_start);
+    let requested_start = obj["bodyRequestedStartLine"].as_u64().unwrap_or(start);
+    let requested_end = obj["bodyRequestedEndLine"].as_u64().unwrap_or(end);
+    let complete = count > 0 && start <= available_start && end >= definition_end;
+    let range_complete = count > 0 && start <= requested_start && end >= requested_end;
+    obj["bodyEndLine"] = if count > 0 { json!(end) } else { Value::Null };
+    obj["bodyComplete"] = json!(complete);
+    obj["bodyRangeComplete"] = json!(range_complete);
+    if range_complete {
+        obj.as_object_mut().unwrap().remove("bodyTruncated");
+        obj.as_object_mut().unwrap().remove("totalBodyLines");
+    } else {
+        obj["bodyTruncated"] = json!(true);
+        obj["totalBodyLines"] = json!(requested_end.saturating_add(1).saturating_sub(requested_start));
+    }
+    let doc_lines = definition_start.saturating_sub(start).min(count);
+    if doc_lines > 0 {
+        obj["docCommentLines"] = json!(doc_lines);
+    } else {
+        obj.as_object_mut().unwrap().remove("docCommentLines");
+    }
+    if let Some(anchor) = obj.get("bodyAnchorLine").and_then(Value::as_u64) {
+        let visible = count > 0 && anchor >= start && anchor <= end;
+        obj["bodyAnchorVisible"] = json!(visible);
+        if visible {
+            obj.as_object_mut().unwrap().remove("bodyAnchorReason");
+        } else {
+            obj["bodyAnchorReason"] = json!(if obj["bodyExplicitRange"] == true && (anchor < requested_start || anchor > requested_end) {
+                "outside_requested_range"
+            } else if anchor < available_start || anchor > definition_end {
+                "outside_definition"
             } else {
-                0
-            };
-
-            let body_lines: Vec<&str> = if start_idx < total_file_lines {
-                lines_vec[start_idx..end_idx].to_vec()
-            } else {
-                vec![]
-            };
-
-            let total_body_lines_in_def = body_lines.len();
-
-            // Calculate remaining budget
-            let remaining_budget = if max_total_body_lines == 0 {
-                usize::MAX
-            } else {
-                max_total_body_lines.saturating_sub(*total_body_lines_emitted)
-            };
-
-            // Effective max per definition
-            let effective_max = if max_body_lines == 0 {
-                remaining_budget
-            } else {
-                max_body_lines.min(remaining_budget)
-            };
-
-            let truncated = total_body_lines_in_def > effective_max;
-            let lines_to_emit = if truncated { effective_max } else { total_body_lines_in_def };
-
-            let body_array: Vec<&str> = body_lines[..lines_to_emit].to_vec();
-
-            obj["bodyStartLine"] = json!(start_idx + 1);
-            obj["body"] = json!(body_array);
-
-            if doc_comment_lines > 0 {
-                obj["docCommentLines"] = json!(doc_comment_lines);
-            }
-
-            if truncated {
-                obj["bodyTruncated"] = json!(true);
-                obj["totalBodyLines"] = json!(total_body_lines_in_def);
-            }
-
-            *total_body_lines_emitted += lines_to_emit;
+                "body_line_budget"
+            });
         }
     }
 }
