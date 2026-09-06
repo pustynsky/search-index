@@ -740,7 +740,47 @@ fn build_grep_result_status(
     status
 }
 
-fn add_grep_next_queries(output: &mut Value, terms: &Value, params: &GrepSearchParams) {
+#[derive(serde::Serialize)]
+struct GrepFollowUpArgs {
+    #[serde(flatten)]
+    scope: serde_json::Map<String, Value>,
+    terms: Vec<String>,
+}
+
+enum GrepFollowUpMode {
+    CleanTokens,
+    LiteralLines,
+    LineRegex,
+    LiteralPhrase,
+}
+
+impl GrepFollowUpArgs {
+    fn new(original: &Value, terms: Vec<String>) -> Self {
+        let mut scope = original.as_object().cloned().unwrap_or_default();
+        for key in ["terms", "offset", "continuationToken"] { scope.remove(key); }
+        Self { scope, terms }
+    }
+
+    fn alternative(original: &Value, terms: Vec<String>, mode: GrepFollowUpMode) -> Self {
+        let mut query = Self::new(original, terms);
+        for key in ["regex", "phrase", "lineRegex", "substring"] { query.scope.remove(key); }
+        match mode {
+            GrepFollowUpMode::LiteralLines => {
+                query.terms = query.terms.iter().map(|term| regex::escape(term)).collect();
+                query.scope.insert("lineRegex".to_string(), json!(true));
+            }
+            GrepFollowUpMode::LineRegex => { query.scope.insert("lineRegex".to_string(), json!(true)); }
+            GrepFollowUpMode::LiteralPhrase => { query.scope.insert("phrase".to_string(), json!(true)); }
+            GrepFollowUpMode::CleanTokens => {
+                query.scope.insert("substring".to_string(), json!(true));
+                if query.terms.len() >= 2 { query.scope.insert("mode".to_string(), json!("and")); }
+            }
+        }
+        query
+    }
+}
+
+fn add_grep_next_queries(output: &mut Value, original: &Value) {
     let is_partial = output
         .get("resultStatus")
         .and_then(|status| status.get("status"))
@@ -751,75 +791,53 @@ fn add_grep_next_queries(output: &mut Value, terms: &Value, params: &GrepSearchP
         .and_then(|execution| execution.get("costClass"))
         .and_then(Value::as_str)
         == Some("expensive");
-    if !is_partial && !is_expensive {
+    let regex_alternatives = original.get("regex").and_then(Value::as_bool) == Some(true)
+        && original.get("lineRegex").and_then(Value::as_bool) != Some(true)
+        && original.get("terms").and_then(Value::as_array).is_some_and(|terms|
+            terms.iter().filter_map(Value::as_str).any(|term| term.contains([' ', '^', '$'])));
+    if !is_partial && !is_expensive && !regex_alternatives {
         return;
     }
 
+    let Some(terms) = original.get("terms").and_then(Value::as_array) else { return; };
+    let terms: Vec<String> = terms.iter().filter_map(Value::as_str).map(str::to_string).collect();
     let mut suggestions = Vec::new();
-    if is_partial {
+    if is_partial && original.get("invert").and_then(Value::as_bool) != Some(true) {
+        let mut query = GrepFollowUpArgs::new(original, terms.clone());
+        query.scope.insert("countOnly".to_string(), json!(true));
         suggestions.push(json!({
             "tool": "xray_grep",
-            "args": { "terms": terms, "countOnly": true },
-            "reason": "get exhaustive counts before claiming completeness",
+            "args": query,
+            "reason": "Count matches in the original scope and search mode; inspect coverage before claiming completeness.",
         }));
     }
-    if is_expensive && params.requested_mode == "substring" {
-        // Two suggestions, in priority order — the user has been auto-switched
-        // from substring to phrase mode (~100x slower) because their terms
-        // carried tokenizer-stripping characters (spaces, punctuation,
-        // brackets, generics, namespace separators, ...).
-        //
-        // 1. Drop the punctuation, AND-intersect the surviving clean tokens.
-        //    This is the right answer for the OVERWHELMINGLY common case:
-        //    the user pasted a method/type signature like
-        //    `DeleteAsync(IEnumerable<CatalogIndexDocumentBase>` or
-        //    `commandType: CommandType.StoredProcedure` looking for callers /
-        //    references — they don't actually need the punctuation, they need
-        //    the IDENTIFIERS to co-occur on the same file. Substring + AND on
-        //    the cleaned tokens delivers that at substring-search cost
-        //    (typically <1ms) instead of phrase-search cost (~100ms+).
-        // 2. lineRegex=true — retained as a fallback for the case where the
-        //    punctuation IS the intent (regex anchors `^`/`$`, exact bracket
-        //    structure for templates, raw operator strings like `=>`, etc.).
-        //
-        // Tokens come from the SAME `crate::tokenize` algorithm the content
-        // index uses, with `min_len=2` so single-character noise (`i`, `a`,
-        // `T`) does not pollute the suggestion. Order is preserved (first
-        // occurrence wins) so the suggestion remains stable across runs and
-        // human-readable: agents that reproduce the suggestion verbatim get
-        // the same text every time.
-        let clean_tokens = extract_clean_tokens_from_terms(terms);
+    if is_expensive && output.pointer("/execution/requestedMode").and_then(Value::as_str) == Some("substring") {
+        let clean_tokens = extract_clean_tokens_from_terms(&json!(terms));
         if !clean_tokens.is_empty() {
-            let mut args = serde_json::Map::new();
-            args.insert("terms".to_string(), json!(clean_tokens));
-            // mode="and" is meaningful only with 2+ tokens; for a single
-            // surviving token AND vs OR is identical, so omit the field to
-            // keep the suggestion minimal.
-            if clean_tokens.len() >= 2 {
-                args.insert("mode".to_string(), json!("and"));
-            }
-            // Propagate the active extension scope so the suggestion is a
-            // drop-in replacement for the user's original query (same files
-            // would be considered).
-            if !params.ext_filter.is_empty() {
-                args.insert("ext".to_string(), json!(params.ext_filter));
-            }
-            let reason = if clean_tokens.len() >= 2 {
-                "drop punctuation and intersect clean tokens — substring AND-search is ~100x faster than the auto-switched phrase mode"
-            } else {
-                "drop punctuation — substring search on the cleaned token is ~100x faster than the auto-switched phrase mode"
-            };
             suggestions.push(json!({
                 "tool": "xray_grep",
-                "args": Value::Object(args),
-                "reason": reason,
+                "args": GrepFollowUpArgs::alternative(original, clean_tokens, GrepFollowUpMode::CleanTokens),
+                "semanticsChanged": true,
+                "reason": "Alternative search: drop punctuation and intersect surviving tokens. This changes the match set, not just execution cost.",
             }));
         }
         suggestions.push(json!({
             "tool": "xray_grep",
-            "args": { "terms": terms, "lineRegex": true },
-            "reason": "make raw-line matching explicit when punctuation or anchors matter",
+            "args": GrepFollowUpArgs::alternative(original, terms.clone(), GrepFollowUpMode::LiteralLines),
+            "semanticsChanged": true,
+            "reason": "Alternative search: match escaped literals on case-sensitive source lines instead of indexed tokens or phrases.",
         }));
+    }
+    if regex_alternatives {
+        for (mode, reason) in [
+            (GrepFollowUpMode::LineRegex, "Alternative search: apply regex to case-sensitive source lines, not indexed tokens; anchors and whitespace change meaning."),
+            (GrepFollowUpMode::LiteralPhrase, "Alternative search: treat the regex patterns as literal phrases; regex operators no longer have special meaning."),
+        ] {
+            suggestions.push(json!({
+                "tool": "xray_grep", "args": GrepFollowUpArgs::alternative(original, terms.clone(), mode),
+                "semanticsChanged": true, "reason": reason,
+            }));
+        }
     }
     if !suggestions.is_empty() {
         output["recommendedNextQueries"] = json!(suggestions);
@@ -903,7 +921,7 @@ fn finalize_grep_output(
     mut output: Value,
     result_status: Value,
     execution: Value,
-    terms: &Value,
+    _terms: &Value,
     params: &GrepSearchParams,
 ) -> Value {
     let mut ordered = serde_json::Map::new();
@@ -917,7 +935,6 @@ fn finalize_grep_output(
     }
     output = Value::Object(ordered);
     output = super::utils::attach_result_status(output, result_status);
-    add_grep_next_queries(&mut output, terms, params);
     if params.files_only {
         apply_files_only(&mut output);
     }
@@ -3424,6 +3441,18 @@ fn token_regex_strategy_override(args: &Value) -> TokenRegexStrategyOverride {
 
 
 pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+    let mut result = search_grep(ctx, args);
+    if !result.is_error && super::arg_validation::check_unknown_args("xray_grep", args).is_none()
+        && let Some(content) = result.content.first_mut()
+        && let Ok(mut output) = serde_json::from_str::<Value>(&content.text)
+    {
+        add_grep_next_queries(&mut output, args);
+        content.text = json_to_string(&output);
+    }
+    result
+}
+
+fn search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let parsed = match parse_grep_args(args, &ctx.server_dir()) {
         Ok(p) => p,
         Err(e) => return e,

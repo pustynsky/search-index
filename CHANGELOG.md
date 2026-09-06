@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Executable scoped follow-up hints.** Definition discovery offers bounded, snapshot-bound reads of selected definitions with schema-shaped arrays and retained filters/budgets. Search alternatives explicitly report semantic changes; cross-tool hints preserve expressible restrictions or explain why no equivalent query exists. Byte-fitted pages drop optional hints when that retains strictly more result entries, keep hints on ties, and preserve or omit structured queries atomically. UTF-16 hint decoding uses fixed-size array chunks for Clippy compatibility.
+
+- **Optional hint snapshots are capped at 1 MiB (1,048,576 source bytes) per file.** Metadata-only discovery skips snapshot hints above this limit and reports `nextQueryUnavailable`; result metadata and explicit body reads remain available. Reads use a size precheck and a capped reader, with at most one extra byte to detect growth. The existing per-response file cache reuses snapshots and skipped reads across the first three selected definitions.
+
+- **Cross-tool scope limits remain explicit.** Angular selector matches in a selected template file deliberately receive an explanation only: `xray_callers` cannot preserve the grep file scope, so no broader template-navigation query is generated. Caller-to-definition reads omit `maxResults` because caller roots and definitions use different count units; source-read budgets and expressible exclusions are retained.
+
 - **Stabilized stdio delivery tests across platforms.** Fixtures wait for the definition index and use canonical paths, including Windows 8.3 aliases.
 
 - **Definition file-scope diagnostics.** File-filtered searches and `containsLine` lookups now report missing files, full or partial `excludeDir` exclusions, and symbol misses in `summary.scopeDiagnostic`. Partial exclusions remain visible when no symbols match. Bounded excluded-file samples echo the supplied patterns; candidate counts describe file scope before symbol filters. Empty file scopes suppress name suggestions, while unmatched ordinary file filters retain nearest-file and unsupported-extension hints. Scope selection and diagnostics share one file-list pass. XML on-demand applies exclusions after sandbox validation and before reading content; unread candidate counts remain unknown. XML path resolution precedes incompatible-kind hints, so `missing.xml` with `kind=method` reports a resolution error. File/exclusion matching, public arguments, exact-name behavior, and result-status contracts are unchanged.

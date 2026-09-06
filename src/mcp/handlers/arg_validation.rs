@@ -181,6 +181,21 @@ pub(crate) fn check_unknown_args(tool_name: &str, args: &Value) -> Option<Unknow
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_tool_schema(tool_name: &str) -> jsonschema::Validator {
+    let schema = super::tool_definitions_with_runtime(&["rs".to_string(), "ts".to_string(), "cs".to_string()], true)
+        .into_iter().find(|tool| tool.name == tool_name).unwrap().input_schema;
+    jsonschema::validator_for(&schema).unwrap()
+}
+
+#[cfg(test)]
+pub(crate) fn assert_generated_query(tool_name: &str, args: &Value) {
+    assert!(check_unknown_args(tool_name, args).is_none(), "{tool_name}: {args}");
+    let schema = test_tool_schema(tool_name);
+    let errors: Vec<_> = schema.iter_errors(args).map(|error| error.to_string()).collect();
+    assert!(errors.is_empty(), "{tool_name}: {args}: {errors:?}");
+}
+
 fn build_hint(unknown_key: &str, allowed: &HashSet<String>) -> String {
     // 1. Alias table — prefer explicit hint.
     if let Some(alias) = alias_table().get(unknown_key)

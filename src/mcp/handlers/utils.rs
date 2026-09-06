@@ -1389,6 +1389,10 @@ struct ResponseGuidanceContext<'a> {
 }
 
 fn next_step_hint(context: &ResponseGuidanceContext<'_>) -> Option<String> {
+    if matches!(context.output.pointer("/summary/scopeDiagnostic/reason").and_then(Value::as_str),
+        Some("fully_excluded" | "file_not_found")) {
+        return Some("Resolve summary.scopeDiagnostic within the original restrictions before choosing another query.".to_string());
+    }
     match context.tool_name {
         "xray_grep" => grep_or_fast_next_step(context, "grep")
             .or_else(|| Some("Next: narrow content results with xray_grep filters, or use xray_definitions when a parser-active target file is known".to_string())),
@@ -1404,44 +1408,61 @@ fn next_step_hint(context: &ResponseGuidanceContext<'_>) -> Option<String> {
     }
 }
 
-fn grep_or_fast_next_step(context: &ResponseGuidanceContext<'_>, source: &str) -> Option<String> {
-    let path = top_result_path(context.output)?;
-    let extension = extension_for_path(path)?;
-    let definition_parser_active = definition_parser_active(context.handler_ctx, &extension);
-    if !definition_parser_active {
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileSymbolQuery {
+    file: [String; 1],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    exclude_dir: Option<Vec<String>>,
+    include_body: bool,
+    auto_correct: bool,
+}
+
+fn selected_file_symbol_query(context: &ResponseGuidanceContext<'_>) -> Result<Option<Value>, &'static str> {
+    let Some(path) = top_result_path(context.output) else { return Ok(None); };
+    let Some(extension) = extension_for_path(path) else { return Ok(None); };
+    if !definition_parser_active(context.handler_ctx, &extension) {
         if extension == "html" && has_typescript_parser(context.handler_ctx)
-            && let Some(selector) = selector_from_invocation_args(context.invocation_args) {
-                return Some(format!(
-                    "Template hint: if this is an Angular selector, run xray_callers method=[\"{}\"] direction='up' to find parent components.",
-                    selector
-                ));
+            && selector_from_invocation_args(context.invocation_args).is_some() {
+            return Err("No equivalent xray_callers query can retain the selected template file scope; no template-navigation query was generated.");
         }
-        return None;
+        return Ok(None);
     }
-
-    let hint_path = workspace_relative_hint_path(path, context.handler_ctx);
-    let mut hint = match source {
-        "fast" => format!(
-            "Next: xray_definitions file=[\"{hint_path}\"] (no includeBody) to list its symbols, then xray_definitions file=[\"{hint_path}\"] name=[\"<symbol>\"] includeBody=true maxBodyLines=0 for the chosen body."
-        ),
-        _ => format!(
-            "Next: xray_definitions file=[\"{hint_path}\"] (no includeBody) to list symbols, then xray_definitions file=[\"{hint_path}\"] name=[\"<symbol>\"] includeBody=true maxBodyLines=0 to read the target body."
-        ),
+    let Some(args) = context.invocation_args else {
+        return Err("No equivalent query was generated because the original restrictions are unavailable.");
     };
-
-    if extension == "sql" && definition_parser_active {
-        hint.push_str(" SQL hint: kind=[\"storedProcedure\"] returns SP bodies; verify parameters from the body header (signature is a summary).")
+    if super::arg_validation::check_unknown_args(context.tool_name, args).is_some()
+        || args.get("exclude").and_then(Value::as_array).is_some_and(|items| !items.is_empty())
+        || args.get("invert").and_then(Value::as_bool) == Some(true) {
+        return Err("No equivalent xray_definitions query can retain these search restrictions; no cross-tool query was generated.");
     }
+    let exclude_dir = args.get("excludeDir").and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).map(str::to_string).collect());
+    let path = std::path::Path::new(path);
+    let file = if path.is_absolute() { path.to_path_buf() } else {
+        std::path::Path::new(&context.handler_ctx.server_dir()).join(path)
+    };
+    let query = FileSymbolQuery {
+        file: [crate::clean_path(&file.to_string_lossy())], exclude_dir,
+        include_body: false, auto_correct: false,
+    };
+    Ok(Some(json!({
+        "tool": "xray_definitions", "args": query,
+        "operation": "inspectSelectedFile", "semanticsChanged": true,
+        "reason": "List symbols in this selected file, not content matches or file-name matches. Select a definition before reading its body.",
+    })))
+}
 
-    if extension == "html" && has_typescript_parser(context.handler_ctx)
-        && let Some(selector) = selector_from_invocation_args(context.invocation_args) {
-            hint.push_str(&format!(
-                " Template hint: if this is an Angular selector, run xray_callers method=[\"{}\"] direction='up' to find parent components.",
-                selector
-            ));
+fn grep_or_fast_next_step(context: &ResponseGuidanceContext<'_>, _source: &str) -> Option<String> {
+    let path = top_result_path(context.output)?;
+    match selected_file_symbol_query(context) {
+        Ok(Some(_)) => Some(format!(
+            "Next: summary.nextStepQuery lists symbols in '{}'; select a definition before reading its body.",
+            workspace_relative_hint_path(path, context.handler_ctx),
+        )),
+        Ok(None) => None,
+        Err(reason) => Some(reason.to_string()),
     }
-
-    Some(hint)
 }
 
 fn top_result_path(output: &Value) -> Option<&str> {
@@ -1626,6 +1647,7 @@ pub(crate) fn inject_response_guidance_with_args(
         );
     }
 
+    let mut context_query = None;
     let context_hint = if output.pointer("/summary/nextStepHint").is_none() {
         let guidance_context = ResponseGuidanceContext {
             tool_name,
@@ -1633,12 +1655,16 @@ pub(crate) fn inject_response_guidance_with_args(
             handler_ctx: ctx,
             invocation_args,
         };
+        if !was_error && matches!(tool_name, "xray_grep" | "xray_fast") {
+            context_query = selected_file_symbol_query(&guidance_context).ok().flatten();
+        }
         next_step_hint(&guidance_context)
     } else {
         None
     };
 
     if let Some(summary) = output.get_mut("summary").and_then(|v| v.as_object_mut()) {
+        if let Some(query) = context_query { summary.insert("nextStepQuery".to_string(), query); }
         summary.insert("policyReminder".to_string(), json!(build_policy_reminder(indexed_ext)));
         if let Some(hint) = context_hint {
             // Tool handlers may set a more specific nextStepHint; use the generic
@@ -2893,6 +2919,19 @@ fn try_fit_recoverable_page(
         let supports_continuation = candidate["resultStatus"]["page"]["unit"] == "files"
             && candidate["resultStatus"]["page"]["queryFingerprint"].is_string()
             && candidate["resultStatus"]["page"]["continuationToken"].is_string();
+        if compact_hint {
+            let removed_queries = candidate.as_object_mut()
+                .and_then(|object| object.remove("recommendedNextQueries")).is_some();
+            let removed_navigation = candidate.get_mut("summary").and_then(Value::as_object_mut)
+                .is_some_and(|summary| {
+                    let removed = summary.remove("nextStepQuery").is_some();
+                    if removed { summary.remove("nextStepHint"); }
+                    removed
+                });
+            if removed_queries || removed_navigation {
+                candidate_reasons.push("omitted optional follow-up queries".to_string());
+            }
+        }
         if array_key == "files" && compact_hint {
             let removed_execution = candidate
                 .as_object_mut()
@@ -3012,12 +3051,14 @@ fn try_fit_recoverable_page(
         best_keep
     };
 
-    let best_keep = find_best(false).map(|keep| (keep, false)).or_else(|| {
-        (array_key == "files")
-            .then(|| find_best(true))
-            .flatten()
-            .map(|keep| (keep, true))
-    });
+    let hinted_keep = find_best(false);
+    let compact_keep = find_best(true);
+    let best_keep = match (hinted_keep, compact_keep) {
+        (Some(hinted), Some(compact)) if compact > hinted => Some((compact, true)),
+        (Some(hinted), _) => Some((hinted, false)),
+        (None, Some(compact)) => Some((compact, true)),
+        (None, None) => None,
+    };
     best_keep.map(|(keep, compact_hint)| build_candidate(keep, compact_hint))
 }
 
@@ -3358,6 +3399,11 @@ pub(crate) struct BodySource {
 }
 
 impl BodySource {
+    pub(crate) fn hash_for_range(&self, start: u32, end: u32) -> Option<String> {
+        (start > 0 && end >= start && self.content.lines().nth(end as usize - 1).is_some())
+            .then(|| self.source_hash.clone())
+    }
+
     pub(crate) fn new(content: String) -> Self {
         let source_hash = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
         Self { content, source_hash }

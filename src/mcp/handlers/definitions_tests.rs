@@ -6,6 +6,33 @@ use crate::definitions::DefinitionKind;
 // ─── kind_priority tests ─────────────────────────────────────────
 
 #[test]
+fn test_executable_hints_source_encoding_matches_existing_reader() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("source.rs");
+    let text = "fn Compute() {} // \u{03bb}\u{1f642}\n";
+    let mut utf8_bom = vec![0xef, 0xbb, 0xbf];
+    utf8_bom.extend_from_slice(text.as_bytes());
+    let mut utf16_le = vec![0xff, 0xfe];
+    let mut utf16_be = vec![0xfe, 0xff];
+    for unit in text.encode_utf16() {
+        utf16_le.extend_from_slice(&unit.to_le_bytes());
+        utf16_be.extend_from_slice(&unit.to_be_bytes());
+    }
+    let mut utf16_odd = utf16_le.clone();
+    utf16_odd.push(0x61);
+    for bytes in [
+        text.as_bytes().to_vec(), utf8_bom, utf16_le, utf16_be, utf16_odd,
+        vec![b'x', 0xff, b'\n'], vec![0xfe, 0xff, 0xd8, 0x00, 0x61],
+    ] {
+        std::fs::write(&path, bytes).unwrap();
+        let expected = super::super::utils::BodySource::new(crate::read_file_lossy(&path).unwrap().0);
+        let actual = read_hint_source(&path).unwrap();
+        assert_eq!(actual.hash_for_range(1, 1), expected.hash_for_range(1, 1));
+        assert!(actual.hash_for_range(1, 1).is_some());
+    }
+}
+
+#[test]
 fn test_kind_priority_class_returns_0() {
     assert_eq!(kind_priority(&DefinitionKind::Class), 0);
 }
@@ -4032,7 +4059,7 @@ fn test_auto_summary_counts_by_kind() {
 }
 
 #[test]
-fn test_auto_summary_hint_contains_concrete_names() {
+fn test_auto_summary_requires_selection_without_broadening_scope() {
     let index = make_auto_summary_test_index();
     let args = parse_definition_args(&json!({"file": ["Services/"], "maxResults": 1})).unwrap();
 
@@ -4048,9 +4075,9 @@ fn test_auto_summary_hint_contains_concrete_names() {
     let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     let hint = output["autoSummary"]["hint"].as_str().unwrap();
 
-    // Hint should mention file= and name= with concrete values
-    assert!(hint.contains("file="), "hint should suggest file= filter: {}", hint);
-    assert!(hint.contains("name="), "hint should suggest name= filter: {}", hint);
+    assert!(hint.contains("No individual definition was selected"), "{hint}");
+    assert!(hint.contains("original scope and exclusions"), "{hint}");
+    assert!(output.get("recommendedNextQueries").is_none());
 }
 
 #[test]

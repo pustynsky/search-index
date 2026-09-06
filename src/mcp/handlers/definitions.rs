@@ -50,7 +50,7 @@ pub(crate) const ALL_SORT_FIELDS: &[&str] = &[
 
 // ─── Parsed arguments struct ─────────────────────────────────────────
 
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct BodyTarget {
     pub source_hash: String,
@@ -62,6 +62,7 @@ pub(crate) struct BodyTarget {
 /// Extracted from raw JSON [`Value`] by [`parse_definition_args`].
 #[derive(Debug, Clone)]
 pub(crate) struct DefinitionSearchArgs {
+    pub original_args: Value,
     pub name_filter: Option<String>,
     pub kind_filter: Option<String>,
     pub attribute_filter: Option<String>,
@@ -270,6 +271,7 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
     });
 
     Ok(DefinitionSearchArgs {
+        original_args: args.clone(),
         name_filter,
         kind_filter,
         attribute_filter,
@@ -1861,70 +1863,119 @@ fn push_unique_query(queries: &mut Vec<Value>, query: Value) {
     }
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SelectedDefinitionRead {
+    #[serde(flatten)]
+    scope: serde_json::Map<String, Value>,
+    file: [String; 1],
+    name: [String; 1],
+    kind: [String; 1],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    parent: Option<[String; 1]>,
+    exact_name_only: bool,
+    auto_correct: bool,
+    include_body: bool,
+    body_target: BodyTarget,
+}
+
+impl SelectedDefinitionRead {
+    pub(crate) fn new(original: &Value, file: &str, def: &DefinitionEntry, source_hash: String) -> Self {
+        let mut scope = original.as_object().cloned().unwrap_or_default();
+        for key in ["file", "name", "kind", "parent", "exactNameOnly", "autoCorrect", "includeBody",
+            "bodyTarget", "regex", "containsLine", "offset", "continuationToken", "audit", "auditMinBytes", "crossValidate"] {
+            scope.remove(key);
+        }
+        Self {
+            scope, file: [file.to_string()], name: [def.name.clone()], kind: [def.kind.as_str().to_string()],
+            parent: def.parent.as_ref().map(|parent| [parent.clone()]),
+            exact_name_only: true, auto_correct: false, include_body: true,
+            body_target: BodyTarget { source_hash, start_line: def.line_start, end_line: def.line_end },
+        }
+    }
+}
+
+pub(crate) fn caller_read_scope(original: &Value) -> Result<Value, &'static str> {
+    if super::arg_validation::check_unknown_args("xray_callers", original).is_some()
+        || ["excludeFile", "ext"].iter().any(|key| original.get(*key).and_then(Value::as_array).is_some_and(|items| !items.is_empty()))
+        || original.get("productionOnly").and_then(Value::as_bool) == Some(true) {
+        return Err("No equivalent xray_definitions query can retain these caller restrictions; no source-read query was generated.");
+    }
+    let mut scope = json!({});
+    for key in ["excludeDir", "maxBodyLines", "maxTotalBodyLines", "includeDocComments", "bodyLineStart", "bodyLineEnd"] {
+        if let Some(value) = original.get(key) { scope[key] = value.clone(); }
+    }
+    Ok(scope)
+}
+
+pub(crate) const MAX_HINT_SOURCE_BYTES: usize = 1024 * 1024;
+
+fn read_hint_source(path: &std::path::Path) -> Option<super::utils::BodySource> {
+    use std::io::Read as _;
+
+    let file = std::fs::File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() || metadata.len() > MAX_HINT_SOURCE_BYTES as u64 { return None; }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    file.take((MAX_HINT_SOURCE_BYTES + 1) as u64).read_to_end(&mut bytes).ok()?;
+    if bytes.len() > MAX_HINT_SOURCE_BYTES { return None; }
+    let content = if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
+        let little_endian = bytes[0] == 0xff;
+        let units = bytes[2..].as_chunks::<2>().0.iter().map(|pair| {
+            if little_endian { u16::from_le_bytes([pair[0], pair[1]]) }
+            else { u16::from_be_bytes([pair[0], pair[1]]) }
+        });
+        let mut content: String = char::decode_utf16(units)
+            .map(|decoded| decoded.unwrap_or(char::REPLACEMENT_CHARACTER)).collect();
+        if bytes.len() % 2 != 0 { content.push(char::REPLACEMENT_CHARACTER); }
+        content
+    } else {
+        String::from_utf8_lossy(bytes.strip_prefix(&[0xef, 0xbb, 0xbf]).unwrap_or(&bytes)).into_owned()
+    };
+    Some(super::utils::BodySource::new(content))
+}
+
+pub(crate) fn selected_definition_read(
+    original: &Value,
+    index: &DefinitionIndex,
+    def: &DefinitionEntry,
+    file_cache: &mut HashMap<String, Option<super::utils::BodySource>>,
+) -> Option<Value> {
+    let file = index.files.get(def.file_id as usize)?;
+    let file_identity = crate::path_identity_key(std::path::Path::new(file));
+    let duplicates = index.name_index.get(&def.name.to_lowercase())?.iter()
+        .filter_map(|position| index.definitions.get(*position as usize))
+        .filter(|candidate| candidate.kind == def.kind && candidate.line_start == def.line_start && candidate.line_end == def.line_end
+            && index.files.get(candidate.file_id as usize).is_some_and(|path| crate::path_identity_key(std::path::Path::new(path)) == file_identity))
+        .take(2).count();
+    if duplicates != 1 || def.name.contains(',') { return None; }
+    let source = file_cache.entry(file.clone()).or_insert_with(|| read_hint_source(std::path::Path::new(file)));
+    let source_hash = source.as_ref()?.hash_for_range(def.line_start, def.line_end)?;
+    Some(json!(SelectedDefinitionRead::new(original, file, def, source_hash)))
+}
+
 fn add_definitions_next_queries(
     output: &mut Value,
     args: &DefinitionSearchArgs,
-    result_status: &Value,
-    suggestions: &[Value],
+    index: &DefinitionIndex,
+    results: &[(u32, &DefinitionEntry)],
+    file_cache: &mut HashMap<String, Option<super::utils::BodySource>>,
 ) {
+    if args.include_body || super::arg_validation::check_unknown_args("xray_definitions", &args.original_args).is_some() {
+        return;
+    }
     let mut queries = Vec::new();
-    let complete = result_status
-        .get("complete")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-
-    if !args.include_body || !complete {
-        if let Some(ref name) = args.name_filter {
-            push_unique_query(
-                &mut queries,
-                json!({
-                    "tool": "xray_definitions",
-                    "args": {
-                        "name": name,
-                        "includeBody": true,
-                        "maxBodyLines": 0,
-                        "exactNameOnly": true,
-                        "autoCorrect": false,
-                    },
-                    "reason": "verify exact semantics with full bodies",
-                }),
-            );
-        }
-        if let Some(ref file) = args.file_filter {
-            push_unique_query(
-                &mut queries,
-                json!({
-                    "tool": "xray_definitions",
-                    "args": {
-                        "file": file,
-                        "includeBody": true,
-                        "maxBodyLines": 0,
-                    },
-                    "reason": "inspect complete definitions in the scoped file or directory",
-                }),
-            );
-        }
+    for (_, def) in results.iter().take(3) {
+        let Some(query) = selected_definition_read(&args.original_args, index, def, file_cache) else {
+            output["nextQueryUnavailable"] = json!("A selected definition is ambiguous, has no readable source snapshot for its range, or exceeds the 1 MiB (1048576 bytes) optional hint source limit; no exact read query was generated for it.");
+            continue;
+        };
+        push_unique_query(&mut queries, json!({
+            "tool": "xray_definitions", "args": query,
+            "operation": "readSelectedDefinition",
+            "reason": "Read this selected definition; the discovery query is unchanged.",
+        }));
     }
-
-    for suggestion in suggestions.iter().take(3) {
-        if let Some(name) = suggestion.get("name").and_then(Value::as_str) {
-            push_unique_query(
-                &mut queries,
-                json!({
-                    "tool": "xray_definitions",
-                    "args": {
-                        "name": name,
-                        "exactNameOnly": true,
-                        "autoCorrect": false,
-                        "includeBody": true,
-                        "maxBodyLines": 0,
-                    },
-                    "reason": "suggested exact-name follow-up",
-                }),
-            );
-        }
-    }
-
     if !queries.is_empty() {
         output["recommendedNextQueries"] = Value::Array(queries);
     }
@@ -2024,7 +2075,6 @@ fn format_search_output(
         reasons.push(json!("versioned_name_exact_miss"));
     }
 
-    let suggested_for_queries = suggestions.clone();
     let mut output = if suggestions.is_empty() {
         json!({
             "definitions": defs_json,
@@ -2038,7 +2088,7 @@ fn format_search_output(
         })
     };
     if !empty_file_scope {
-        add_definitions_next_queries(&mut output, args, &result_status, &suggested_for_queries);
+        add_definitions_next_queries(&mut output, args, index, results, &mut file_cache);
     }
     let output = attach_result_status(output, result_status);
 
@@ -3261,19 +3311,7 @@ fn build_auto_summary_with_scope(
         })
     }).collect();
 
-    // Build contextual hint
-    let hint = if let Some((largest_dir, largest_data)) = sorted_groups.first() {
-        let top_name = largest_data.containers.iter()
-            .max_by_key(|(_, lc)| *lc)
-            .map(|(n, _)| n.as_str())
-            .unwrap_or("...");
-        format!(
-            "Use file='{}' to explore the largest group, or name='{}' for a specific class",
-            largest_dir, top_name
-        )
-    } else {
-        "Narrow with file or name filter".to_string()
-    };
+    let hint = "No individual definition was selected. Refine the discovery query within its original scope and exclusions before choosing an exact read.";
 
     let active_definitions: usize = index.file_index.values().map(|v| v.len()).sum();
     let mut summary = json!({
@@ -3309,13 +3347,6 @@ fn build_auto_summary_with_scope(
             "hint": hint,
         },
         "summary": summary,
-        "recommendedNextQueries": [
-            {
-                "tool": "xray_definitions",
-                "args": { "file": file_filter_base, "maxResults": 100 },
-                "reason": "narrow the auto-summary to a smaller file or directory scope"
-            }
-        ]
     });
     let output = attach_result_status(output, result_status);
 
