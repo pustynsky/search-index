@@ -2,7 +2,7 @@ use std::collections::{BTreeSet, VecDeque};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use serde_json::{Value, json};
 
 struct Server {
@@ -50,6 +50,22 @@ impl Server {
                 assert!(reply.get("error").is_none(), "{reply}");
                 return reply["result"].clone();
             }
+        }
+    }
+
+    fn wait_for_definitions(&mut self, limit: usize) {
+        let started = Instant::now();
+        loop {
+            let info = self.call("xray_info", json!({}), limit, false);
+            let indexes = info["indexes"].as_array().expect("missing indexes");
+            let definition = indexes.iter().find(|index| index["type"] == "definition")
+                .unwrap_or_else(|| panic!("missing definition index: {info}"));
+            if definition.get("status").is_none() {
+                return;
+            }
+            assert_eq!(definition["status"], "building", "{info}");
+            assert!(started.elapsed() < Duration::from_secs(60), "definition index timeout: {info}");
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -101,17 +117,19 @@ fn collect_fragment(entry: &Value, source: &[String], seen: &mut BTreeSet<usize>
 #[test]
 fn body_delivery_stdio_env_budget_anchor_and_continuation() {
     let temp = tempfile::tempdir().unwrap();
-    let path = temp.path().join("sample.rs");
+    let root = code_xray::canonicalize_test_root(temp.path());
+    let path = root.join("sample.rs");
     let mut source = vec!["fn small() {}".to_string(), "fn deliver() {".to_string()];
     source.extend((3..=182).map(|line| format!("    // line {line}: {}", "\u{03bb}\"\\".repeat(40))));
     source.push("}".to_string());
     std::fs::write(&path, source.join("\n")).unwrap();
     let limit = 8192;
-    let mut server = Server::start(temp.path(), &limit.to_string());
+    let mut server = Server::start(&root, &limit.to_string());
+    server.wait_for_definitions(limit);
     let first = server.call("xray_definitions", json!({"file": [path], "containsLine": 90,
         "includeBody": true, "maxBodyLines": 0, "maxTotalBodyLines": 0}), limit, false);
     let anchor = &first["containingDefinitions"][0];
-    assert_eq!(anchor["bodyAnchorLine"], 90);
+    assert_eq!(anchor["bodyAnchorLine"], 90, "{first}");
     assert_eq!(anchor["bodyAnchorVisible"], true);
     assert_eq!(anchor["bodyComplete"], false);
     assert_eq!(anchor["bodyRangeComplete"], false);
@@ -145,7 +163,8 @@ fn body_delivery_stdio_env_budget_anchor_and_continuation() {
 #[test]
 fn body_delivery_stdio_invalid_env_is_structured() {
     let temp = tempfile::tempdir().unwrap();
-    let mut server = Server::start(temp.path(), "511");
+    let root = code_xray::canonicalize_test_root(temp.path());
+    let mut server = Server::start(&root, "511");
     let output = server.call("xray_help", json!({}), 512, true);
     assert_eq!(output["error"]["code"], "invalid_transport_max_bytes");
     assert_eq!(output["error"]["parameter"], "XRAY_TRANSPORT_MAX_BYTES");

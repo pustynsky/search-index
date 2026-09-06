@@ -5727,6 +5727,14 @@ fn test_contains_line_exclude_dir_is_applied_during_scope_resolution() {
     assert_eq!(output["summary"]["candidateDefinitionsBeforeFileScope"], 4);
     assert_eq!(output["summary"]["candidateDefinitionsAfterFileScope"], 2);
     assert_eq!(output["summary"]["scopeFiles"], 1);
+    let diagnostic = &output["summary"]["scopeDiagnostic"];
+    assert_eq!(diagnostic["filesBeforeExclusions"], 2);
+    assert_eq!(diagnostic["filesAfterExclusions"], 1);
+    assert_eq!(diagnostic["candidateDefinitionsBeforeExclusions"], 4);
+    assert_eq!(diagnostic["candidateDefinitionsAfterExclusions"], 2);
+    assert_eq!(diagnostic["reason"], "partially_excluded");
+    assert_eq!(diagnostic["excludedFiles"][0]["file"], r"C:\test\Helper.cs");
+    assert_eq!(diagnostic["excludedFiles"][0]["matchedPatterns"], json!(["test"]));
     let definitions = output["containingDefinitions"].as_array().unwrap();
     assert_eq!(definitions.len(), 2);
     assert!(definitions.iter().all(|definition| {
@@ -6697,5 +6705,301 @@ fn test_xml_on_demand_literal_brackets_in_filename_resolved() {
     assert!(msg.contains("BracketSvc") || msg.contains("Service"),
         "must successfully extract XML definitions; got: {msg}");
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+
+#[test]
+fn test_scope_diagnostic_file_exclusions_and_misses() {
+    let cases = [
+        (r"C:\scope\Cache\Helper.cs", "c:/SCOPE/cache/helper.cs", vec!["CACHE", "scope/cache"], "fully_excluded", 1, 0),
+        ("cache/Helper.cs", r"CACHE\Helper.cs", vec!["cache"], "fully_excluded", 1, 0),
+        ("C:/scope/CacheExtra/Helper.cs", "Helper.cs", vec!["cache"], "in_scope", 1, 1),
+        ("C:/scope/Cache.cs", "Cache.cs", vec!["cache"], "in_scope", 1, 1),
+        ("C:/scope/cache/Helper.cs", "Helper.cs", vec![r"scope\cache"], "in_scope", 1, 1),
+        ("C:/scope/Helper.cs", "Missing.cs", vec!["scope"], "file_not_found", 0, 0),
+        ("C:/scope/Helper.cs", "Helper.cs", vec![], "in_scope", 1, 1),
+    ];
+    for (file, filter, exclusions, reason, before, after) in cases {
+        for contains_line in [false, true] {
+            for exact in [false, true] {
+                let mut index = make_test_def_index_with_file(file);
+                index.path_to_id.insert(crate::path_identity_key(std::path::Path::new(file)), 0);
+                let ctx = HandlerContext {
+                    def_index: Some(Arc::new(RwLock::new(index))),
+                    ..Default::default()
+                };
+                let mut request = json!({"file": [filter], "excludeDir": exclusions, "exactNameOnly": exact});
+                if contains_line {
+                    request["containsLine"] = json!(10);
+                } else {
+                    request["name"] = json!(["Helper"]);
+                }
+                let result = handle_xray_definitions(&ctx, &request);
+                assert!(!result.is_error, "{}", result.content[0].text);
+                let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+                let diagnostic = &output["summary"]["scopeDiagnostic"];
+                assert_eq!(diagnostic["reason"], reason, "{request}: {output}");
+                assert_eq!(diagnostic["filesBeforeExclusions"], before);
+                assert_eq!(diagnostic["filesAfterExclusions"], after);
+                assert_eq!(diagnostic["candidateDefinitionsBeforeExclusions"], before);
+                assert_eq!(diagnostic["candidateDefinitionsAfterExclusions"], after);
+                let result_key = if contains_line { "containingDefinitions" } else { "definitions" };
+                assert_eq!(output[result_key].as_array().unwrap().len(), after as usize);
+                if reason == "fully_excluded" {
+                    assert_eq!(diagnostic["excludedFiles"][0]["matchedPatterns"], json!(exclusions));
+                }
+                if after == 0 {
+                    assert!(output.get("suggestedMatches").is_none(), "{output}");
+                    assert!(output.get("recommendedNextQueries").is_none(), "{output}");
+                    assert!(output["summary"].get("hint").is_none(), "{output}");
+                }
+                if before == 1 && after == 1 {
+                    if contains_line {
+                        request["containsLine"] = json!(500);
+                    } else {
+                        request["name"] = json!(["MissingSymbol"]);
+                    }
+                    let missing = handle_xray_definitions(&ctx, &request);
+                    let missing: Value = serde_json::from_str(&missing.content[0].text).unwrap();
+                    assert_eq!(missing["summary"]["scopeDiagnostic"]["reason"], "symbol_not_found", "{missing}");
+                    assert_eq!(missing["summary"]["scopeDiagnostic"]["excludedFiles"], json!([]));
+                }
+            }
+        }
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-csharp")]
+fn test_scope_diagnostic_real_file_fuzzy_hint() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let source_dir = root.join("Users").join("Cache");
+    std::fs::create_dir_all(&source_dir).unwrap();
+    std::fs::write(source_dir.join("UserService.cs"), "public class UserService { public void Handle() {} }").unwrap();
+    let root_str = crate::clean_path(&root.to_string_lossy());
+    let index = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+        dir: root_str.clone(),
+        ext: "cs".to_string(),
+        threads: 1,
+        respect_git_exclude: false,
+    });
+    assert_eq!(index.definitions.len(), 2);
+    let ctx = HandlerContext {
+        def_index: Some(Arc::new(RwLock::new(index))),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(root_str))),
+        ..Default::default()
+    };
+    for exact in [false, true] {
+        let result = handle_xray_definitions(&ctx, &json!({
+            "file": ["user_service.cs"], "name": ["UserServic"], "exactNameOnly": exact,
+        }));
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["summary"]["scopeDiagnostic"]["reason"], "file_not_found");
+        assert_eq!(output["summary"]["scopeDiagnostic"]["filesBeforeExclusions"], 0);
+        assert!(output["summary"]["hint"].as_str().unwrap().contains("Nearest match: 'userservice.cs'"), "{output}");
+        assert_eq!(output["definitions"], json!([]));
+        assert_eq!(output["resultStatus"]["status"], "not_found");
+        assert_eq!(output["resultStatus"]["request"]["exactNameOnly"], exact);
+        assert!(output.get("suggestedMatches").is_none(), "{output}");
+        assert!(output.get("recommendedNextQueries").is_none(), "{output}");
+
+        let excluded = handle_xray_definitions(&ctx, &json!({
+            "file": ["UserService.cs"], "excludeDir": ["CACHE"], "name": ["UserServic"], "exactNameOnly": exact,
+        }));
+        assert!(!excluded.is_error, "{}", excluded.content[0].text);
+        let excluded: Value = serde_json::from_str(&excluded.content[0].text).unwrap();
+        assert_eq!(excluded["summary"]["scopeDiagnostic"]["reason"], "fully_excluded");
+        assert_eq!(excluded["summary"]["scopeDiagnostic"]["candidateDefinitionsBeforeExclusions"], 2);
+        assert_eq!(excluded["summary"]["scopeDiagnostic"]["candidateDefinitionsAfterExclusions"], 0);
+        assert_eq!(excluded["summary"]["scopeDiagnostic"]["excludedFiles"][0]["matchedPatterns"], json!(["CACHE"]));
+        assert!(excluded["summary"].get("hint").is_none(), "{excluded}");
+        assert!(excluded.get("suggestedMatches").is_none(), "{excluded}");
+        assert!(excluded.get("recommendedNextQueries").is_none(), "{excluded}");
+        assert_eq!(excluded["definitions"], json!([]));
+    }
+
+    let exact_miss = handle_xray_definitions(&ctx, &json!({
+        "file": ["UserService.cs"], "name": ["UserServic"], "exactNameOnly": true, "autoCorrect": true,
+    }));
+    assert!(!exact_miss.is_error, "{}", exact_miss.content[0].text);
+    let exact_miss: Value = serde_json::from_str(&exact_miss.content[0].text).unwrap();
+    assert_eq!(exact_miss["summary"]["scopeDiagnostic"]["reason"], "symbol_not_found");
+    assert_eq!(exact_miss["definitions"], json!([]));
+    assert!(exact_miss.get("suggestedMatches").is_none(), "{exact_miss}");
+    assert_eq!(exact_miss["resultStatus"]["request"]["exactNameOnly"], true);
+}
+
+#[test]
+fn test_scope_diagnostic_ordinary_mixed_scope() {
+    let mut index = make_test_def_index();
+    index.files = vec![r"C:\scope\Cache\Helper.cs".to_string(), "C:/scope/CacheExtra/Helper.cs".to_string()];
+    let ctx = HandlerContext {
+        def_index: Some(Arc::new(RwLock::new(index))),
+        ..Default::default()
+    };
+    let request = json!({"file": ["Cache/Helper.cs", "CacheExtra/Helper.cs"], "excludeDir": ["cache"]});
+    let result = handle_xray_definitions(&ctx, &request);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let diagnostic = &output["summary"]["scopeDiagnostic"];
+    assert_eq!(diagnostic["reason"], "partially_excluded");
+    assert_eq!(diagnostic["filesBeforeExclusions"], 2);
+    assert_eq!(diagnostic["filesAfterExclusions"], 1);
+    assert_eq!(diagnostic["candidateDefinitionsBeforeExclusions"], 4);
+    assert_eq!(diagnostic["candidateDefinitionsAfterExclusions"], 2);
+    assert_eq!(output["definitions"].as_array().unwrap().len(), 2);
+    assert!(output["definitions"].as_array().unwrap().iter().all(|entry| entry["file"] == "C:/scope/CacheExtra/Helper.cs"));
+    assert_eq!(output["resultStatus"]["status"], "complete");
+
+    let miss = handle_xray_definitions(&ctx, &json!({
+        "file": ["Helper.cs"], "excludeDir": ["cache"], "name": ["AbsentSymbol"], "exactNameOnly": true,
+    }));
+    let miss: Value = serde_json::from_str(&miss.content[0].text).unwrap();
+    assert_eq!(miss["summary"]["scopeDiagnostic"]["reason"], "partially_excluded");
+    assert_eq!(miss["summary"]["scopeDiagnostic"]["filesAfterExclusions"], 1);
+    assert_eq!(miss["resultStatus"]["status"], "not_found");
+    assert_eq!(miss["resultStatus"]["request"]["exactNameOnly"], true);
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_scope_diagnostic_xml_excludes_before_reading() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    std::fs::create_dir(root.join("Cache")).unwrap();
+    std::fs::write(root.join("Cache/invalid.xml"), [0xff, 0xfe, 0xff]).unwrap();
+    std::fs::write(root.join("Cache/valid.xml"), "<Root><Entry/></Root>").unwrap();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(ContentIndex { root: root.to_string_lossy().to_string(), ..Default::default() })),
+        def_index: Some(Arc::new(RwLock::new(make_test_def_index()))),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(root.to_string_lossy().to_string()))),
+        ..Default::default()
+    };
+    for contains_line in [false, true] {
+        for kind in ["xmlElement", "method"] {
+            let mut request = json!({"file": ["Cache/invalid.xml"], "excludeDir": ["CACHE"], "kind": [kind], "includeBody": true});
+            if contains_line { request["containsLine"] = json!(1); }
+            else { request["name"] = json!(["Root"]); }
+            let result = handle_xray_definitions(&ctx, &request);
+            assert!(!result.is_error, "{}", result.content[0].text);
+            let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+            let diagnostic = &output["summary"]["scopeDiagnostic"];
+            assert_eq!(diagnostic["reason"], "fully_excluded", "{output}");
+            assert_eq!(diagnostic["filesBeforeExclusions"], 1);
+            assert_eq!(diagnostic["filesAfterExclusions"], 0);
+            assert!(diagnostic["candidateDefinitionsBeforeExclusions"].is_null());
+            assert_eq!(diagnostic["candidateDefinitionsAfterExclusions"], 0);
+            assert_eq!(diagnostic["excludedFiles"][0]["matchedPatterns"], json!(["CACHE"]));
+            assert_eq!(output["definitions"], json!([]));
+        }
+        let mut request = json!({"file": ["Cache/valid.xml"], "excludeDir": ["CacheExtra"], "exactNameOnly": true});
+        if contains_line { request["containsLine"] = json!(500); }
+        else { request["name"] = json!(["Absent"]); }
+        let result = handle_xray_definitions(&ctx, &request);
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["summary"]["scopeDiagnostic"]["reason"], "symbol_not_found", "{output}");
+        assert_eq!(output["summary"]["scopeDiagnostic"]["filesAfterExclusions"], 1);
+        request["file"] = json!(["Cache/missing.xml"]);
+        let missing = handle_xray_definitions(&ctx, &request);
+        assert!(missing.is_error);
+        assert!(missing.content[0].text.contains("Failed to resolve XML file"));
+    }
+}
+
+#[test]
+fn test_scope_diagnostic_samples_are_bounded() {
+    let patterns = super::super::utils::ExcludePatterns::from_dirs(
+        &(0..8).map(|number| format!("cache{number}")).collect::<Vec<_>>()
+    );
+    let mut diagnostic = DefinitionScopeDiagnostic::default();
+    for number in 0..40 {
+        diagnostic.record_file(&format!("scope/cache0/cache1/cache2/cache3/cache4/cache5/cache6/cache7/Helper{number}.cs"), Some(2), &patterns);
+    }
+    let output = diagnostic.to_json(0, "definition_index");
+    assert_eq!(output["filesBeforeExclusions"], 40);
+    assert_eq!(output["filesAfterExclusions"], 0);
+    assert_eq!(output["candidateDefinitionsBeforeExclusions"], 80);
+    assert_eq!(output["excludedFiles"].as_array().unwrap().len(), 5);
+    assert_eq!(output["excludedFilesOmitted"], 35);
+    assert!(output["excludedFiles"].as_array().unwrap().iter().all(|sample| {
+        sample["matchedPatterns"].as_array().unwrap().len() == 5 && sample["matchedPatternsOmitted"] == 3
+    }));
+    assert!(serde_json::to_vec(&output).unwrap().len() < 2048);
+
+    let mut long_paths = DefinitionScopeDiagnostic::default();
+    for number in 0..40 {
+        let file = format!("scope/cache0/{}/Helper{number}.cs", "\u{03bb}\"".repeat(200));
+        assert!(long_paths.record_file(&file, Some(1), &patterns));
+    }
+    let output = long_paths.to_json(0, "definition_index");
+    let shown = output["excludedFiles"].as_array().unwrap().len();
+    assert!((1..5).contains(&shown));
+    assert_eq!(output["excludedFilesOmitted"], 40 - shown);
+    assert!(serde_json::to_vec(&output).unwrap().len() < 2300);
+    assert!(long_paths.record_file(&format!("cache0/{}", "x".repeat(2048)), Some(1), &patterns));
+    assert_eq!(long_paths.to_json(0, "definition_index")["excludedFilesOmitted"], 41 - shown);
+}
+
+
+#[test]
+fn test_scope_diagnostic_dispatch_transport_budget() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let mut index = make_test_def_index_with_file("Helper.cs");
+    let template = index.definitions[0].clone();
+    index.root = root.to_string_lossy().to_string();
+    index.files.clear();
+    index.definitions.clear();
+    index.file_index.clear();
+    index.name_index.clear();
+    index.kind_index.clear();
+    for number in 0..40 {
+        index.files.push(root.join(format!("Cache/part{number}/Helper.cs")).to_string_lossy().to_string());
+        let mut definition = template.clone();
+        definition.file_id = number;
+        index.definitions.push(definition);
+        index.file_index.insert(number, vec![number]);
+        index.name_index.entry("helper".to_string()).or_default().push(number);
+        index.kind_index.entry(DefinitionKind::Class).or_default().push(number);
+    }
+    let ctx = HandlerContext {
+        def_index: Some(Arc::new(RwLock::new(index))),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(root.to_string_lossy().to_string()))),
+        ..Default::default()
+    };
+    for contains_line in [false, true] {
+        for limit in [512, 4096, 16384] {
+            super::super::body_delivery::with_transport_limit(limit, || {
+                let mut request = json!({"file": ["Helper.cs"], "excludeDir": ["cache"], "includeBody": true});
+                if contains_line { request["containsLine"] = json!(10); }
+                else { request["name"] = json!(["Hleper"]); }
+                let result = super::super::dispatch_tool(&ctx, "xray_definitions", &request);
+                let bytes: usize = result.content.iter().map(|content| content.text.len()).sum();
+                assert!(bytes <= limit, "{bytes} > {limit}");
+                if limit >= 4096 {
+                    assert!(!result.is_error, "{}", result.content[0].text);
+                    let text = &result.content[0].text;
+                    let json_text = text.split_once("\n\n").map(|(_, suffix)| suffix).unwrap_or(text);
+                    let output: Value = serde_json::from_str(json_text).unwrap();
+                    let diagnostic = &output["summary"]["scopeDiagnostic"];
+                    assert_eq!(diagnostic["reason"], "fully_excluded", "{output}");
+                    assert_eq!(diagnostic["filesBeforeExclusions"], 40);
+                    assert_eq!(diagnostic["filesAfterExclusions"], 0);
+                    assert_eq!(diagnostic["candidateDefinitionsBeforeExclusions"], 40);
+                    assert_eq!(diagnostic["excludedFiles"].as_array().unwrap().len(), 5);
+                    assert_eq!(diagnostic["excludedFilesOmitted"], 35);
+                    assert!(output.get("suggestedMatches").is_none());
+                    assert!(output.get("recommendedNextQueries").is_none(), "{output}");
+                    if contains_line {
+                        assert!(output.get("resultStatus").is_none(), "{output}");
+                    } else {
+                        assert_eq!(output["resultStatus"]["status"], "not_found", "{output}");
+                    }
+                }
+            });
+        }
+    }
 }
 

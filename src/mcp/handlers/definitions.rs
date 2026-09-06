@@ -514,6 +514,7 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
         candidate_definitions_after_file_scope: candidate_selection.indices.len(),
         scope_files: scope.file_count(),
         scope_resolution_duration: scope.resolution_duration,
+        diagnostic: scope.diagnostic.clone(),
     });
     let candidates = candidate_selection.indices;
     let def_to_term = candidate_selection.def_to_term;
@@ -542,6 +543,7 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
 
     // 6a. Auto-correction: if 0 results, try kind/name correction before generating hints
     if total_results == 0
+        && !file_scope.as_ref().is_some_and(|scope| scope.files.is_empty())
         && let Some(corrected_result) = attempt_auto_correction(
             &index,
             &parsed,
@@ -684,6 +686,7 @@ fn handle_audit_mode(
 
 #[derive(Debug)]
 struct ResolvedContainsLineFileScope {
+    diagnostic: DefinitionScopeDiagnostic,
     files: ResolvedFileScope,
     exact_path_match: bool,
     resolution_duration: Duration,
@@ -700,19 +703,28 @@ fn resolve_contains_line_file_scope(
         .copied();
     let exact_path_match = exact_file_id.is_some();
     let file_substr = file_filter.replace('\\', "/").to_lowercase();
-    let files = ResolvedFileScope::resolve(
+    let mut diagnostic = DefinitionScopeDiagnostic::default();
+    let files = ResolvedFileScope::resolve_with_ids(
         &index.files,
         true,
         exact_file_id,
-        |file_path| {
+        |file_id, file_path| {
+            if exact_path_match {
+                let candidates = Some(index.file_index.get(&file_id).map_or(0, Vec::len));
+                return !diagnostic.record_file(file_path, candidates, &args.exclude_patterns);
+            }
             let normalized_path = file_path.replace('\\', "/").to_lowercase();
-            (exact_path_match || normalized_path.contains(&file_substr))
-                && (args.exclude_patterns.is_empty()
-                    || !args.exclude_patterns.matches(&normalized_path))
+            if normalized_path.contains(&file_substr) {
+                let candidates = Some(index.file_index.get(&file_id).map_or(0, Vec::len));
+                !diagnostic.record_normalized_file(file_path, &normalized_path, candidates, &args.exclude_patterns)
+            } else {
+                false
+            }
         },
     );
 
     ResolvedContainsLineFileScope {
+        diagnostic,
         files,
         exact_path_match,
         resolution_duration: started.elapsed(),
@@ -763,6 +775,7 @@ fn handle_contains_line_mode(
         candidate_definitions_after_file_scope,
         scope_files: file_scope.files.len(),
         scope_resolution_duration: file_scope.resolution_duration,
+        diagnostic: file_scope.diagnostic.clone(),
     };
 
     let mut containing_defs: Vec<Value> = Vec::new();
@@ -893,7 +906,7 @@ fn handle_contains_line_mode(
     // though the binary was built with `lang-rust`. Bare-basename filters
     // (no dot) are intentionally NOT classified — they are legitimate
     // substring queries against multiple indexed files.
-    if !matched_any_file
+    if !matched_any_file && file_scope.diagnostic.files_before_exclusions == 0
         && let Some(ext) = unsupported_extension_hint_candidate(&file_substr, &ctx.def_extensions)
     {
         let active_list = if ctx.def_extensions.is_empty() {
@@ -944,6 +957,7 @@ pub(super) fn unsupported_extension_hint_candidate<'a>(file_substr: &'a str, act
 /// (used for termBreakdown in multi-term queries).
 #[derive(Debug)]
 struct ResolvedDefinitionFileScope {
+    diagnostic: DefinitionScopeDiagnostic,
     files: ResolvedFileScope,
     definition_ids: Vec<u32>,
     resolution_duration: Duration,
@@ -985,7 +999,8 @@ impl ResolvedDefinitionFileScope {
                 })
             })
             .collect();
-        let files = ResolvedFileScope::resolve(&index.files, true, None, |file_path| {
+        let mut diagnostic = DefinitionScopeDiagnostic::default();
+        let files = ResolvedFileScope::resolve_with_ids(&index.files, true, None, |file_id, file_path| {
             let normalized_path = file_path.replace('\\', "/").to_lowercase();
             file_terms.iter().any(|(term, is_directory)| {
                 if *is_directory {
@@ -993,8 +1008,12 @@ impl ResolvedDefinitionFileScope {
                 } else {
                     normalized_path.contains(term)
                 }
-            }) && (args.exclude_patterns.is_empty()
-                || !args.exclude_patterns.matches(&normalized_path))
+            }) && !diagnostic.record_normalized_file(
+                file_path,
+                &normalized_path,
+                Some(index.file_index.get(&file_id).map_or(0, Vec::len)),
+                &args.exclude_patterns,
+            )
         });
         let mut definition_ids: Vec<u32> = files.iter_ids()
             .filter_map(|file_id| index.file_index.get(&file_id))
@@ -1005,6 +1024,7 @@ impl ResolvedDefinitionFileScope {
         definition_ids.dedup();
 
         Self {
+            diagnostic,
             files,
             definition_ids,
             resolution_duration: started.elapsed(),
@@ -1020,8 +1040,94 @@ impl ResolvedDefinitionFileScope {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default)]
+pub(super) struct DefinitionScopeDiagnostic {
+    files_before_exclusions: usize,
+    files_after_exclusions: usize,
+    candidates_before_exclusions: usize,
+    candidates_after_exclusions: usize,
+    unknown_candidates_before: bool,
+    unknown_candidates_after: bool,
+    excluded_files: Vec<Value>,
+    excluded_sample_bytes: usize,
+}
+
+impl DefinitionScopeDiagnostic {
+    pub(super) fn record_file(&mut self, file: &str, candidates: Option<usize>, patterns: &super::utils::ExcludePatterns) -> bool {
+        let normalized = if patterns.is_empty() { String::new() } else { file.replace('\\', "/").to_lowercase() };
+        self.record_normalized_file(file, &normalized, candidates, patterns)
+    }
+
+    fn record_normalized_file(&mut self, file: &str, normalized: &str, candidates: Option<usize>, patterns: &super::utils::ExcludePatterns) -> bool {
+        self.files_before_exclusions += 1;
+        self.candidates_before_exclusions += candidates.unwrap_or(0);
+        self.unknown_candidates_before |= candidates.is_none();
+        let excluded = patterns.matches(normalized);
+        if !excluded {
+            self.files_after_exclusions += 1;
+            self.candidates_after_exclusions += candidates.unwrap_or(0);
+            self.unknown_candidates_after |= candidates.is_none();
+        } else if self.excluded_files.len() < 5 && file.len() <= 1024 {
+            let mut matched = Vec::new();
+            let mut omitted = 0;
+            for pattern in patterns.matching_patterns(normalized) {
+                if matched.len() < 5 && pattern.len() <= 256 {
+                    matched.push(pattern);
+                } else {
+                    omitted += 1;
+                }
+            }
+            let sample = json!({
+                "file": file,
+                "matchedPatterns": matched,
+                "matchedPatternsOmitted": omitted,
+            });
+            let sample_bytes = sample.to_string().len();
+            if self.excluded_sample_bytes + sample_bytes <= 1536 {
+                self.excluded_sample_bytes += sample_bytes;
+                self.excluded_files.push(sample);
+            }
+        }
+        excluded
+    }
+
+    pub(super) fn to_json(&self, total_results: usize, source: &str) -> Value {
+        let reason = if self.files_before_exclusions == 0 {
+            "file_not_found"
+        } else if self.files_after_exclusions == 0 {
+            "fully_excluded"
+        } else if self.files_after_exclusions < self.files_before_exclusions {
+            "partially_excluded"
+        } else if total_results == 0 {
+            "symbol_not_found"
+        } else {
+            "in_scope"
+        };
+        let message = match reason {
+            "file_not_found" => "The file filter matched no file in this source scope.",
+            "fully_excluded" => "All files matched by the file filter were excluded by excludeDir.",
+            "symbol_not_found" => "Files remain in scope, but no definition matches the requested filters or line.",
+            "partially_excluded" => "excludeDir removed some files matched by the file filter; results cover the remaining scope.",
+            _ => "Files matched by the file filter remain in scope.",
+        };
+        json!({
+            "reason": reason,
+            "message": message,
+            "source": source,
+            "filesBeforeExclusions": self.files_before_exclusions,
+            "filesAfterExclusions": self.files_after_exclusions,
+            "candidateDefinitionBasis": "file_scope_before_symbol_filters",
+            "candidateDefinitionsBeforeExclusions": (!self.unknown_candidates_before).then_some(self.candidates_before_exclusions),
+            "candidateDefinitionsAfterExclusions": (!self.unknown_candidates_after).then_some(self.candidates_after_exclusions),
+            "excludedFiles": self.excluded_files,
+            "excludedFilesOmitted": self.files_before_exclusions - self.files_after_exclusions - self.excluded_files.len(),
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
 struct DefinitionScopeTelemetry {
+    diagnostic: DefinitionScopeDiagnostic,
     candidate_definitions_before_file_scope: usize,
     candidate_definitions_after_file_scope: usize,
     scope_files: usize,
@@ -1883,7 +1989,17 @@ fn format_search_output(
     );
     inject_definition_scope_telemetry(&mut summary, scope_telemetry);
 
-    let suggestions = if total_results == 0 && fuzzy_name_suggestions_enabled(args) {
+    let empty_file_scope = scope_telemetry.is_some_and(|scope| scope.scope_files == 0);
+    if empty_file_scope {
+        summary.as_object_mut().unwrap().remove("hint");
+        if scope_telemetry.is_some_and(|scope| scope.diagnostic.files_before_exclusions == 0)
+            && let Some(hint) = hint_unsupported_extension(args, ctx)
+                .or_else(|| hint_file_fuzzy_match(index, args))
+        {
+            summary["hint"] = json!(hint);
+        }
+    }
+    let suggestions = if total_results == 0 && !empty_file_scope && fuzzy_name_suggestions_enabled(args) {
         suggested_name_matches(index, args)
     } else {
         Vec::new()
@@ -1921,7 +2037,9 @@ fn format_search_output(
             "summary": summary,
         })
     };
-    add_definitions_next_queries(&mut output, args, &result_status, &suggested_for_queries);
+    if !empty_file_scope {
+        add_definitions_next_queries(&mut output, args, &result_status, &suggested_for_queries);
+    }
     let output = attach_result_status(output, result_status);
 
     ToolCallResult::success(json_to_string(&output))
@@ -2602,6 +2720,7 @@ fn run_corrected_search(
         candidate_definitions_after_file_scope: candidate_selection.indices.len(),
         scope_files: scope.file_count(),
         scope_resolution_duration: scope.resolution_duration,
+        diagnostic: scope.diagnostic.clone(),
     });
     let candidates = candidate_selection.indices;
     let def_to_term = candidate_selection.def_to_term;
@@ -2878,8 +2997,8 @@ fn hint_file_fuzzy_match(
                                 None => {
                                     best_match = Some((segment.to_string(), count));
                                 }
-                                Some((_, prev_count)) => {
-                                    if count > *prev_count {
+                                Some((previous_path, prev_count)) => {
+                                    if count > *prev_count || (count == *prev_count && segment.len() > previous_path.len()) {
                                         best_match = Some((segment.to_string(), count));
                                     }
                                 }
@@ -3069,6 +3188,10 @@ fn inject_definition_scope_telemetry(
     summary["candidateDefinitionsAfterFileScope"] =
         json!(telemetry.candidate_definitions_after_file_scope);
     summary["scopeFiles"] = json!(telemetry.scope_files);
+    summary["scopeDiagnostic"] = telemetry.diagnostic.to_json(
+        summary["totalResults"].as_u64().unwrap_or(0) as usize,
+        "definition_index",
+    );
     summary["scopeResolutionMs"] =
         json!(telemetry.scope_resolution_duration.as_secs_f64() * 1000.0);
 }

@@ -113,24 +113,6 @@ pub(crate) fn try_intercept(
         )));
     }
 
-    if let Some(kind_filter) = &args.kind_filter {
-        let compatible = kind_filter
-            .split(',')
-            .map(str::trim)
-            .any(|kind| kind.eq_ignore_ascii_case("xmlElement"));
-        if !compatible {
-            return Some(ToolCallResult::success(json_to_string(&json!({
-                "definitions": [],
-                "summary": {
-                    "totalResults": 0,
-                    "xmlOnDemand": true,
-                    "hint": format!(
-                        "XML on-demand only produces `xmlElement` definitions; kind filter '{kind_filter}' excludes all results."
-                    ),
-                }
-            }))));
-        }
-    }
     let file_filter = &args.file_filter_raw[0];
     // Sole entry in a 1-element array: must be XML to reach here, since
     // `xml_indices` was non-empty and len == 1 implies index 0 is XML.
@@ -248,6 +230,41 @@ pub(crate) fn try_intercept(
         )));
     }
 
+    let mut diagnostic = super::definitions::DefinitionScopeDiagnostic::default();
+    if diagnostic.record_file(&file_path, None, &args.exclude_patterns) {
+        if args.body_target.is_some() {
+            return Some(ToolCallResult::error(json_to_string(&json!({"error": {
+                "code": "body_target_changed", "message": "Body target is missing, excluded, or ambiguous; restart the symbol lookup."
+            }}))));
+        }
+        return Some(ToolCallResult::success(json_to_string(&json!({
+            "definitions": [],
+            "summary": {
+                "totalResults": 0,
+                "xmlOnDemand": true,
+                "scopeFiles": 0,
+                "scopeDiagnostic": diagnostic.to_json(0, "xml_on_demand"),
+            }
+        }))));
+    }
+    if let Some(kind_filter) = &args.kind_filter {
+        let compatible = kind_filter.split(',').map(str::trim)
+            .any(|kind| kind.eq_ignore_ascii_case("xmlElement"));
+        if !compatible {
+            return Some(ToolCallResult::success(json_to_string(&json!({
+                "definitions": [],
+                "summary": {
+                    "totalResults": 0,
+                    "xmlOnDemand": true,
+                    "scopeDiagnostic": diagnostic.to_json(0, "xml_on_demand"),
+                    "hint": format!(
+                        "XML on-demand only produces `xmlElement` definitions; kind filter '{kind_filter}' excludes all results."
+                    ),
+                }
+            }))));
+        }
+    }
+
     // Blocking file read. `handle_xray_definitions` is called from a sync
     // dispatch (see `src/mcp/server.rs`), so no `spawn_blocking` is needed.
     // If that ever changes, this is the place to switch to `tokio::fs`.
@@ -314,6 +331,8 @@ pub(crate) fn try_intercept(
 
     let xml_defs = parse_result.definitions;
     let warnings = parse_result.warnings;
+    let mut diagnostic = super::definitions::DefinitionScopeDiagnostic::default();
+    diagnostic.record_file(&file_path, Some(xml_defs.len()), &args.exclude_patterns);
 
     if xml_defs.is_empty() {
         return Some(ToolCallResult::success(json_to_string(&json!({
@@ -321,6 +340,7 @@ pub(crate) fn try_intercept(
             "summary": {
                 "totalResults": 0,
                 "xmlOnDemand": true,
+                "scopeDiagnostic": diagnostic.to_json(0, "xml_on_demand"),
                 "hint": "XML file parsed but no elements found.",
                 "parseWarnings": warnings,
             }
@@ -346,7 +366,16 @@ pub(crate) fn try_intercept(
             search_start,
             &warnings,
         )) };
-    result.map(|result| finalize_xml_bodies(result, args, &source, &file_path, &xml_defs))
+    result.map(|result| {
+        let result = finalize_xml_bodies(result, args, &source, &file_path, &xml_defs);
+        if result.is_error { return result; }
+        let Ok(mut output) = serde_json::from_str::<Value>(&result.content[0].text) else { return result; };
+        output["summary"]["scopeDiagnostic"] = diagnostic.to_json(
+            output["summary"]["totalResults"].as_u64().unwrap_or(0) as usize,
+            "xml_on_demand",
+        );
+        ToolCallResult::success(json_to_string(&output))
+    })
 }
 
 // ---------------------------------------------------------------------------
