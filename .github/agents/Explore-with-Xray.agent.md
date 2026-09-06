@@ -47,11 +47,13 @@ the question is resolved.
 
 ## Thoroughness Budget
 
-Use the requested thoroughness, defaulting to `thorough`.
+Use the requested thoroughness. Otherwise choose `quick` for a focused lookup
+and `medium` for a flow explanation or impact question. Use `thorough` only
+when explicitly requested.
 
-- `quick`: 1-4 tool calls.
-- `medium`: 5-10 tool calls.
-- `thorough`: 11-24 tool calls.
+- `quick`: at most 4 tool calls.
+- `medium`: at most 10 tool calls.
+- `thorough`: at most 24 tool calls.
 - These are ceilings, not targets. Stop as soon as the question is resolved.
 - Reserve roughly 25% of the budget for narrowing truncated results and taking
   one discriminating caller, callee, implementation, or test hop.
@@ -94,7 +96,8 @@ Use the requested thoroughness, defaulting to `thorough`.
 4. Take one discriminating hop: a caller, callee, implementation, or nearby test
    that can confirm or falsify the current interpretation.
 5. Stop when you have the anchor, the controlling body, and one discriminating
-   piece of evidence. Continue only when the requested thoroughness requires it.
+   piece of evidence that resolves the question. Continue only to resolve a
+   material gap or an unanswered part of the request, never to fill a call budget.
 
 Do not map broad parts of the repository after the answer is already supported.
 Do not keep searching merely to increase confidence.
@@ -115,8 +118,9 @@ Do not keep searching merely to increase confidence.
 
 ## Xray Result Handling
 
-- Follow Xray response hints immediately, including nearest-name corrections,
-  kind corrections, interface retries, and narrower scopes.
+- Use relevant Xray recovery hints to correct a failed or incomplete query.
+  Optional next-query suggestions do not require another call once the question
+  is resolved. Stay within the tool restrictions and remaining call budget.
 - A zero-result response means only that the exact scoped query returned no
   matches. State the tool, query, and scope; do not generalize beyond them.
 - If Xray fails or times out, report the exact tool and query. Do not switch to a

@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.2 (2026-08-12)
+## 0.7.0 (2026-09-06)
 
 - **Separated installer extension confirmation from manual input.** Enter, `y`, or `yes` accepts the suggested list; `n` or `no` opens a separate extension prompt. Bare yes/no answers are retried during manual input; use `.y` or `.n` to select those extensions individually. Each prompt allows ten attempts, then stops with an error, including when input closes during manual entry. Piped custom lists now need a preceding `n`; automation can use `-Extensions` directly. `-Force` and `-Extensions` behavior is unchanged.
 
@@ -8,17 +8,21 @@
 
 - **Fixed tool responses waiting on indexes during startup.** `INDEX_BUILDING` responses and optional metrics now use nonblocking index reads, so a background write lock cannot stall readiness replies. `xray_info` also reports trigram status as `busy` when the content index cannot be read immediately.
 
+- **Hardened installer updates of a running `xray.exe`.** If an MCP host restarts Xray while the installer replaces the binary, setup now stops the restarted process and retries instead of failing with "Cannot create a file when that file already exists."
+
+- **Updated UTF-16 decoding for current Clippy.** Byte-pair handling now uses slice chunks directly without changing decoding or truncated-tail behavior.
+
+- **Updated workspace review guidance.** Rust, general documentation, installer, and git-filter changes now have separate specialist reviewers with a shared playbook for evidence, validation, and verdicts. The Explore agent now chooses quick or medium depth from the question unless thorough investigation is requested explicitly.
+
+## 0.6.2 (2026-08-12)
+
 - **Compact `xray_grep` responses by default.** Performance and index telemetry is now omitted unless the server runs with `--metrics`; result counts, scope, warnings, and correctness diagnostics remain available.
 
 - **Fixed mixed substring and phrase OR searches.** Each term now keeps its own matching semantics before global ranking, counting, and pagination; phrase verification failures also report partial results.
 
-- **Hardened installer updates of a running `xray.exe`.** If an MCP host restarts Xray while the installer replaces the binary, setup now stops the restarted process and retries instead of failing with "Cannot create a file when that file already exists."
-
 - **Disabled default MCP performance metrics.** The installer no longer adds `--metrics`, reducing response payloads for newly configured servers.
 
 - **Corrected zero-result definition hints.** Wrong-kind and cross-file suggestions now preserve exact-name and remaining query filters, while multi-name content fallbacks report each matching term.
-
-- **Updated UTF-16 decoding for current Clippy.** Byte-pair handling now uses slice chunks directly without changing decoding or truncated-tail behavior.
 
 ## 0.6.1 (2026-08-09)
 
